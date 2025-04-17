@@ -1,0 +1,973 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Morpheus API Documentation</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    :root {
+      --primary-color: #004085;
+      --secondary-color: #343a40;
+      --accent-color: #0d6efd;
+      --bg-dark: #1a1a1a;
+      --bg-sidebar: #222222;
+      --text-light: #e9ecef;
+      --border-color: #444;
+      --code-bg: #2d2d2d;
+    }
+    
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background-color: var(--bg-dark);
+      color: var(--text-light);
+      margin: 0;
+      padding: 0;
+      display: flex;
+      min-height: 100vh;
+    }
+    
+    /* Sidebar */
+    .sidebar {
+      width: 250px;
+      background-color: var(--bg-sidebar);
+      border-right: 1px solid var(--border-color);
+      overflow-y: auto;
+      height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+    
+    .sidebar-header {
+      padding: 1.5rem 1rem;
+      display: flex;
+      align-items: center;
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    .sidebar-logo {
+      font-size: 1.5rem;
+      font-weight: bold;
+      color: var(--text-light);
+      text-decoration: none;
+    }
+    
+    .sidebar-nav {
+      padding: 0.5rem 0;
+    }
+    
+    .sidebar-nav-header {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      color: #999;
+      padding: 0.5rem 1rem;
+      margin-top: 1rem;
+    }
+    
+    .sidebar-nav-item {
+      display: block;
+      padding: 0.5rem 1rem;
+      color: var(--text-light);
+      text-decoration: none;
+      border-left: 3px solid transparent;
+    }
+    
+    .sidebar-nav-item:hover,
+    .sidebar-nav-item.active {
+      background-color: rgba(255, 255, 255, 0.1);
+      border-left-color: var(--accent-color);
+    }
+    
+    .sidebar-dropdown {
+      padding-left: 1rem;
+    }
+    
+    /* Main Content */
+    .main-content {
+      flex: 1;
+      margin-left: 250px;
+      padding: 2rem;
+      max-width: calc(100vw - 250px);
+    }
+    
+    .main-header {
+      margin-bottom: 2rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    /* Endpoint Styles */
+    .endpoint-container {
+      background-color: rgba(0, 0, 0, 0.2);
+      border-radius: 8px;
+      margin-bottom: 2rem;
+      overflow: hidden;
+    }
+    
+    .endpoint-header {
+      display: flex;
+      align-items: center;
+      padding: 1rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    .http-method {
+      background-color: #0d6efd;
+      color: white;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-weight: bold;
+      margin-right: 0.75rem;
+    }
+    
+    .http-method.post {
+      background-color: #28a745;
+    }
+    
+    .http-method.get {
+      background-color: #0d6efd;
+    }
+    
+    .http-method.delete {
+      background-color: #dc3545;
+    }
+    
+    .http-method.put {
+      background-color: #fd7e14;
+    }
+    
+    .endpoint-path {
+      font-family: monospace;
+      font-size: 1rem;
+    }
+    
+    .endpoint-description {
+      padding: 1rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    /* Code Tabs */
+    .code-tabs {
+      display: flex;
+      background-color: var(--bg-sidebar);
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    .code-tab {
+      padding: 0.75rem 1rem;
+      cursor: pointer;
+      color: #999;
+    }
+    
+    .code-tab.active {
+      color: var(--text-light);
+      border-bottom: 2px solid var(--accent-color);
+    }
+    
+    .code-block-container {
+      position: relative;
+    }
+    
+    .code-block {
+      background-color: var(--code-bg);
+      padding: 1rem;
+      border-radius: 0 0 8px 8px;
+      overflow-x: auto;
+      font-family: 'Courier New', monospace;
+      white-space: pre;
+    }
+    
+    .copy-btn {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.5rem;
+      background-color: rgba(255, 255, 255, 0.1);
+      border: none;
+      color: var(--text-light);
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    
+    .copy-btn:hover {
+      background-color: rgba(255, 255, 255, 0.2);
+    }
+    
+    /* Parameter Tables */
+    .parameter-section {
+      margin-top: 1.5rem;
+    }
+    
+    .parameter-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    
+    .parameter-table th,
+    .parameter-table td {
+      padding: 0.75rem;
+      border-bottom: 1px solid var(--border-color);
+      text-align: left;
+    }
+    
+    .parameter-table th {
+      color: #999;
+      font-weight: normal;
+    }
+    
+    .parameter-name {
+      font-family: monospace;
+      font-weight: bold;
+    }
+    
+    .parameter-type {
+      color: #999;
+      font-size: 0.9rem;
+    }
+    
+    .required-badge {
+      background-color: #dc3545;
+      color: white;
+      padding: 0.1rem 0.35rem;
+      border-radius: 3px;
+      font-size: 0.7rem;
+      margin-left: 0.5rem;
+    }
+    
+    /* Response Examples */
+    .response-section {
+      margin-top: 1.5rem;
+    }
+    
+    .response-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border-color);
+      margin-bottom: 1rem;
+    }
+    
+    .response-tab {
+      padding: 0.5rem 1rem;
+      cursor: pointer;
+      margin-right: 0.5rem;
+      border-radius: 4px 4px 0 0;
+    }
+    
+    .response-tab.active {
+      background-color: var(--accent-color);
+      color: white;
+    }
+    
+    /* Try It Section */
+    .try-it-btn, .send-request-btn {
+      background-color: var(--accent-color);
+      color: white;
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-top: 1rem;
+    }
+    
+    .try-it-btn:hover, .send-request-btn:hover {
+      background-color: #0b5ed7;
+    }
+
+    /* Form Styles */
+    .request-form {
+      background-color: rgba(0, 0, 0, 0.1);
+      border-radius: 8px;
+      padding: 1rem;
+      margin-top: 1rem;
+    }
+
+    .form-group {
+      margin-bottom: 1rem;
+    }
+
+    .form-label {
+      display: block;
+      margin-bottom: 0.5rem;
+      font-weight: bold;
+    }
+
+    .form-control {
+      width: 100%;
+      padding: 0.5rem;
+      background-color: #2d2d2d;
+      color: #e9ecef;
+      border: 1px solid #444;
+      border-radius: 4px;
+      font-family: 'Courier New', monospace;
+    }
+
+    .form-control:focus {
+      outline: none;
+      border-color: var(--accent-color);
+    }
+
+    .response-container {
+      margin-top: 1rem;
+      border-radius: 8px;
+      overflow: hidden;
+      display: none;
+    }
+
+    .response-header {
+      padding: 0.75rem;
+      background-color: #222;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .response-status {
+      font-weight: bold;
+    }
+
+    .status-200 {
+      color: #28a745;
+    }
+
+    .status-error {
+      color: #dc3545;
+    }
+
+    .response-time {
+      font-size: 0.8rem;
+      color: #999;
+    }
+
+    .response-body {
+      background-color: #2d2d2d;
+      padding: 1rem;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    /* Mobile responsiveness */
+    @media (max-width: 768px) {
+      body {
+        flex-direction: column;
+      }
+      
+      .sidebar {
+        width: 100%;
+        height: auto;
+        position: static;
+      }
+      
+      .main-content {
+        margin-left: 0;
+        max-width: 100%;
+      }
+    }
+
+    /* Switch component */
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 50px;
+      height: 24px;
+      margin-right: 10px;
+    }
+
+    .switch input { 
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #ccc;
+      transition: .4s;
+      border-radius: 34px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 4px;
+      bottom: 4px;
+      background-color: white;
+      transition: .4s;
+      border-radius: 50%;
+    }
+
+    input:checked + .slider {
+      background-color: var(--accent-color);
+    }
+
+    input:focus + .slider {
+      box-shadow: 0 0 1px var(--accent-color);
+    }
+
+    input:checked + .slider:before {
+      transform: translateX(26px);
+    }
+
+    .toggle-label {
+      display: inline-block;
+      vertical-align: middle;
+    }
+
+    /* Auth section */
+    .auth-container {
+      background-color: rgba(0, 0, 0, 0.2);
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 2rem;
+    }
+
+    .auth-header {
+      font-size: 1.2rem;
+      margin-bottom: 1rem;
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <a href="/" class="sidebar-logo">Morpheus API</a>
+    </div>
+    
+    <div class="sidebar-nav">
+      <a href="#" class="sidebar-nav-item">Overview</a>
+      <a href="#" class="sidebar-nav-item active">API Reference</a>
+      <a href="#" class="sidebar-nav-item">Changelog</a>
+      <a href="#" class="sidebar-nav-item">Status Page</a>
+      
+      <div class="sidebar-nav-header">APIs</div>
+      
+      <a href="#chat-completions" class="sidebar-nav-item">Chat</a>
+      <div class="sidebar-dropdown">
+        <a href="#chat-completions" class="sidebar-nav-item">Chat Completions</a>
+      </div>
+      
+      <a href="#models" class="sidebar-nav-item">Models</a>
+      <a href="#" class="sidebar-nav-item">API Keys</a>
+      <a href="#" class="sidebar-nav-item">Sessions</a>
+      <a href="#" class="sidebar-nav-item">Authentication</a>
+      
+      <div class="sidebar-nav-header">Tools</div>
+      <a href="/api-docs" target="_blank" class="sidebar-nav-item">Swagger UI</a>
+    </div>
+  </div>
+  
+  <!-- Main Content -->
+  <div class="main-content">
+    <div class="main-header">
+      <h1>API Documentation</h1>
+      <p>Explore and test the API endpoints directly from your browser</p>
+    </div>
+
+    <!-- Authentication Section -->
+    <div class="auth-container">
+      <div class="auth-header">
+        <i class="fas fa-lock"></i> Authentication
+      </div>
+      <div class="form-group">
+        <label for="api-key" class="form-label">API Key</label>
+        <input type="text" id="api-key" class="form-control" placeholder="Bearer sk-your-api-key">
+        <small class="text-muted">Your API key will be used for all requests in this session</small>
+      </div>
+    </div>
+    
+    <!-- Chat Completions Section -->
+    <section id="chat-completions">
+      <h2>Chat</h2>
+      <h3>Chat Completions</h3>
+      <p>Run text inference based on the supplied parameters.</p>
+      
+      <div class="endpoint-container">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/v1/chat/completions</span>
+        </div>
+        
+        <div class="endpoint-description">
+          <p>Creates a completion for the chat message</p>
+        </div>
+        
+        <div class="code-tabs">
+          <div class="code-tab active">cURL</div>
+          <div class="code-tab">Python</div>
+          <div class="code-tab">JavaScript</div>
+          <div class="code-tab">PHP</div>
+          <div class="code-tab">Go</div>
+          <div class="code-tab">Java</div>
+        </div>
+        
+        <div class="code-block-container">
+          <div class="code-block" id="chat-curl-example">
+curl --request POST \
+  --url https://api.morpheus.ai/v1/chat/completions \
+  --header 'Authorization: Bearer your-api-key' \
+  --header 'Content-Type: application/json' \
+  --data '{
+  "model": "gpt-4",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello, world!"
+    }
+  ],
+  "temperature": 0.7,
+  "max_tokens": 1024
+}'
+          </div>
+          <button class="copy-btn" data-target="chat-curl-example">
+            <i class="fas fa-copy"></i>
+          </button>
+        </div>
+        
+        <!-- Parameter Section -->
+        <div class="parameter-section">
+          <h4>Request Body Parameters</h4>
+          <table class="parameter-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <span class="parameter-name">model</span>
+                  <span class="required-badge">required</span>
+                </td>
+                <td><span class="parameter-type">string</span></td>
+                <td>ID of the model to use. You can use the <code>/v1/models</code> endpoint to see available models.</td>
+              </tr>
+              <tr>
+                <td>
+                  <span class="parameter-name">messages</span>
+                  <span class="required-badge">required</span>
+                </td>
+                <td><span class="parameter-type">array</span></td>
+                <td>A list of messages comprising the conversation so far.</td>
+              </tr>
+              <tr>
+                <td>
+                  <span class="parameter-name">temperature</span>
+                </td>
+                <td><span class="parameter-type">number</span></td>
+                <td>What sampling temperature to use, between 0 and 2. Higher values like 0.8 will make the output more random, while lower values like 0.2 will make it more focused and deterministic.</td>
+              </tr>
+              <tr>
+                <td>
+                  <span class="parameter-name">max_tokens</span>
+                </td>
+                <td><span class="parameter-type">integer</span></td>
+                <td>The maximum number of tokens to generate in the chat completion.</td>
+              </tr>
+              <tr>
+                <td>
+                  <span class="parameter-name">stream</span>
+                </td>
+                <td><span class="parameter-type">boolean</span></td>
+                <td>If set, partial message deltas will be sent, like in ChatGPT. Tokens will be sent as data-only server-sent events.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        
+        <!-- Response Section -->
+        <div class="response-section">
+          <h4>Response</h4>
+          <div class="response-tabs">
+            <div class="response-tab active">200</div>
+            <div class="response-tab">400</div>
+            <div class="response-tab">401</div>
+          </div>
+          
+          <div class="code-block-container">
+            <div class="code-block">
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "created": 1677858242,
+  "model": "gpt-4",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello! How can I help you today?"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 13,
+    "completion_tokens": 12,
+    "total_tokens": 25
+  }
+}
+            </div>
+            <button class="copy-btn">
+              <i class="fas fa-copy"></i>
+            </button>
+          </div>
+        </div>
+        
+        <!-- Try It Section -->
+        <div class="try-it-section p-3">
+          <button class="try-it-btn" data-endpoint="chat-completions">Try it</button>
+          
+          <div class="request-form" id="chat-completions-form" style="display: none;">
+            <div class="form-group">
+              <label for="chat-model" class="form-label">Model</label>
+              <input type="text" id="chat-model" class="form-control" value="gpt-4">
+            </div>
+            
+            <div class="form-group">
+              <label for="chat-messages" class="form-label">Messages (JSON array)</label>
+              <textarea id="chat-messages" class="form-control" rows="5">[
+  {
+    "role": "user",
+    "content": "Hello, world!"
+  }
+]</textarea>
+            </div>
+            
+            <div class="form-group">
+              <label for="chat-temperature" class="form-label">Temperature</label>
+              <input type="number" id="chat-temperature" class="form-control" value="0.7" min="0" max="2" step="0.1">
+            </div>
+            
+            <div class="form-group">
+              <label for="chat-max-tokens" class="form-label">Max Tokens</label>
+              <input type="number" id="chat-max-tokens" class="form-control" value="1024" min="1">
+            </div>
+            
+            <div class="form-group">
+              <label class="toggle-container">
+                <label class="switch">
+                  <input type="checkbox" id="chat-stream">
+                  <span class="slider"></span>
+                </label>
+                <span class="toggle-label">Stream</span>
+              </label>
+            </div>
+            
+            <button class="send-request-btn" data-endpoint="chat-completions">Send Request</button>
+            
+            <div class="response-container" id="chat-completions-response">
+              <div class="response-header">
+                <div class="response-status"></div>
+                <div class="response-time"></div>
+              </div>
+              <pre class="response-body"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Models Section -->
+    <section id="models">
+      <h2>Models</h2>
+      <h3>List Models</h3>
+      <p>Lists the currently available models and their properties.</p>
+      
+      <div class="endpoint-container">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/v1/models</span>
+        </div>
+        
+        <div class="endpoint-description">
+          <p>Lists the currently available models</p>
+        </div>
+        
+        <div class="code-tabs">
+          <div class="code-tab active">cURL</div>
+          <div class="code-tab">Python</div>
+          <div class="code-tab">JavaScript</div>
+        </div>
+        
+        <div class="code-block-container">
+          <div class="code-block" id="models-curl-example">
+curl --request GET \
+  --url https://api.morpheus.ai/v1/models \
+  --header 'Authorization: Bearer your-api-key'
+          </div>
+          <button class="copy-btn" data-target="models-curl-example">
+            <i class="fas fa-copy"></i>
+          </button>
+        </div>
+        
+        <!-- Response Section -->
+        <div class="response-section">
+          <h4>Response</h4>
+          <div class="response-tabs">
+            <div class="response-tab active">200</div>
+            <div class="response-tab">401</div>
+          </div>
+          
+          <div class="code-block-container">
+            <div class="code-block">
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "gpt-4",
+      "object": "model",
+      "created": 1677649963,
+      "owned_by": "morpheus"
+    },
+    {
+      "id": "gpt-3.5-turbo",
+      "object": "model",
+      "created": 1677649963,
+      "owned_by": "morpheus"
+    },
+    {
+      "id": "claude-3-sonnet",
+      "object": "model",
+      "created": 1677649963,
+      "owned_by": "morpheus"
+    }
+  ]
+}
+            </div>
+            <button class="copy-btn">
+              <i class="fas fa-copy"></i>
+            </button>
+          </div>
+        </div>
+        
+        <!-- Try It Section -->
+        <div class="try-it-section p-3">
+          <button class="try-it-btn" data-endpoint="models">Try it</button>
+          
+          <div class="request-form" id="models-form" style="display: none;">
+            <p>No parameters needed for this request.</p>
+            
+            <button class="send-request-btn" data-endpoint="models">Send Request</button>
+            
+            <div class="response-container" id="models-response">
+              <div class="response-header">
+                <div class="response-status"></div>
+                <div class="response-time"></div>
+              </div>
+              <pre class="response-body"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    // Store API key
+    let apiKey = '';
+    
+    document.getElementById('api-key').addEventListener('input', function(e) {
+      apiKey = e.target.value;
+    });
+
+    // Basic tab functionality
+    document.querySelectorAll('.code-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        // Get the parent container
+        const tabContainer = tab.closest('.code-tabs');
+        // Remove active class from all tabs in this container
+        tabContainer.querySelectorAll('.code-tab').forEach(t => t.classList.remove('active'));
+        // Add active class to clicked tab
+        tab.classList.add('active');
+      });
+    });
+
+    document.querySelectorAll('.response-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        // Get the parent container
+        const tabContainer = tab.closest('.response-tabs');
+        // Remove active class from all tabs in this container
+        tabContainer.querySelectorAll('.response-tab').forEach(t => t.classList.remove('active'));
+        // Add active class to clicked tab
+        tab.classList.add('active');
+      });
+    });
+
+    // Copy button functionality
+    document.querySelectorAll('.copy-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const targetId = btn.getAttribute('data-target');
+        const codeBlock = targetId 
+          ? document.getElementById(targetId) 
+          : btn.closest('.code-block-container').querySelector('.code-block');
+        
+        navigator.clipboard.writeText(codeBlock.textContent.trim());
+        
+        // Show copied feedback
+        const originalIcon = btn.innerHTML;
+        btn.innerHTML = '<i class="fas fa-check"></i>';
+        setTimeout(() => {
+          btn.innerHTML = originalIcon;
+        }, 2000);
+      });
+    });
+
+    // Try it button functionality
+    document.querySelectorAll('.try-it-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const endpoint = btn.getAttribute('data-endpoint');
+        const form = document.getElementById(`${endpoint}-form`);
+        
+        if (form.style.display === 'none') {
+          form.style.display = 'block';
+          btn.textContent = 'Hide Form';
+        } else {
+          form.style.display = 'none';
+          btn.textContent = 'Try it';
+        }
+      });
+    });
+
+    // Send request functionality
+    document.querySelectorAll('.send-request-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const endpoint = btn.getAttribute('data-endpoint');
+        const responseContainer = document.getElementById(`${endpoint}-response`);
+        const responseStatus = responseContainer.querySelector('.response-status');
+        const responseTime = responseContainer.querySelector('.response-time');
+        const responseBody = responseContainer.querySelector('.response-body');
+        
+        // Show response container
+        responseContainer.style.display = 'block';
+        
+        // Set initial status
+        responseStatus.textContent = 'Loading...';
+        responseStatus.className = 'response-status';
+        responseTime.textContent = '';
+        responseBody.textContent = '';
+        
+        try {
+          let url, method, headers, body;
+          
+          if (endpoint === 'chat-completions') {
+            url = '/v1/chat/completions';
+            method = 'POST';
+            headers = {
+              'Content-Type': 'application/json',
+              'Authorization': apiKey || 'Bearer your-api-key'
+            };
+            
+            const model = document.getElementById('chat-model').value;
+            const messages = JSON.parse(document.getElementById('chat-messages').value);
+            const temperature = parseFloat(document.getElementById('chat-temperature').value);
+            const maxTokens = parseInt(document.getElementById('chat-max-tokens').value);
+            const stream = document.getElementById('chat-stream').checked;
+            
+            body = JSON.stringify({
+              model,
+              messages,
+              temperature,
+              max_tokens: maxTokens,
+              stream
+            });
+          } else if (endpoint === 'models') {
+            url = '/v1/models';
+            method = 'GET';
+            headers = {
+              'Authorization': apiKey || 'Bearer your-api-key'
+            };
+          }
+          
+          // Start timer
+          const startTime = Date.now();
+          
+          // Make the API request
+          const response = await fetch(url, {
+            method,
+            headers,
+            body: method === 'POST' ? body : undefined
+          });
+          
+          // End timer
+          const endTime = Date.now();
+          const duration = endTime - startTime;
+          
+          // Format the response
+          let jsonResponse;
+          if (response.status === 200) {
+            jsonResponse = await response.json();
+            responseStatus.textContent = `Status: ${response.status} OK`;
+            responseStatus.classList.add('status-200');
+          } else {
+            jsonResponse = await response.json();
+            responseStatus.textContent = `Status: ${response.status} Error`;
+            responseStatus.classList.add('status-error');
+          }
+          
+          responseTime.textContent = `Request took ${duration}ms`;
+          responseBody.textContent = JSON.stringify(jsonResponse, null, 2);
+        } catch (error) {
+          responseStatus.textContent = 'Error';
+          responseStatus.classList.add('status-error');
+          responseBody.textContent = error.toString();
+        }
+      });
+    });
+
+    // Update cURL example when inputs change
+    function updateCurlExample() {
+      const model = document.getElementById('chat-model').value;
+      const messages = document.getElementById('chat-messages').value;
+      const temperature = document.getElementById('chat-temperature').value;
+      const maxTokens = document.getElementById('chat-max-tokens').value;
+      const stream = document.getElementById('chat-stream').checked;
+      
+      const curlExample = document.getElementById('chat-curl-example');
+      const auth = apiKey || 'Bearer your-api-key';
+      
+      let curlCommand = `curl --request POST \\
+  --url https://api.morpheus.ai/v1/chat/completions \\
+  --header 'Authorization: ${auth}' \\
+  --header 'Content-Type: application/json' \\
+  --data '{
+  "model": "${model}",
+  "messages": ${messages},
+  "temperature": ${temperature},
+  "max_tokens": ${maxTokens}${stream ? ',\n  "stream": true' : ''}
+}'`;
+      
+      curlExample.textContent = curlCommand;
+    }
+    
+    ['chat-model', 'chat-messages', 'chat-temperature', 'chat-max-tokens'].forEach(id => {
+      document.getElementById(id).addEventListener('input', updateCurlExample);
+    });
+    
+    document.getElementById('chat-stream').addEventListener('change', updateCurlExample);
+    document.getElementById('api-key').addEventListener('input', updateCurlExample);
+
+    // Update models cURL example when API key changes
+    document.getElementById('api-key').addEventListener('input', function() {
+      const modelsExample = document.getElementById('models-curl-example');
+      const auth = apiKey || 'Bearer your-api-key';
+      
+      modelsExample.textContent = `curl --request GET \\
+  --url https://api.morpheus.ai/v1/models \\
+  --header 'Authorization: ${auth}'`;
+    });
+  </script>
+</body>
+</html> 

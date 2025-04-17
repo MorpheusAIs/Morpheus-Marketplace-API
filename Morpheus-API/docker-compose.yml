@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_NAME=morpheus
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PROXY_ROUTER_URL=http://proxy-router:3333
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    depends_on:
+      - postgres
+      - redis
+    command: npm run dev
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:14-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=morpheus
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  proxy-router:
+    image: morpheus-proxy-router:latest
+    # Note: You would need to build this image from the Morpheus-Lumerin-Node/proxy-router directory
+    ports:
+      - "3333:3333"
+      - "8082:8082"
+    volumes:
+      - ../Morpheus-Lumerin-Node/proxy-router:/app
+    environment:
+      - PROXY_STORE_CHAT_CONTEXT=true
+      # Add other necessary environment variables from .env file
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data: 
