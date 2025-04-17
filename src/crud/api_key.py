@@ -1,6 +1,5 @@
 import datetime
 from typing import Optional, List
-from uuid import UUID
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,13 +8,13 @@ from src.core.security import generate_api_key, get_api_key_hash
 from src.db.models import APIKey, User
 from src.schemas.api_key import APIKeyCreate
 
-async def get_api_key_by_id(db: AsyncSession, api_key_id: UUID) -> Optional[APIKey]:
+async def get_api_key_by_id(db: AsyncSession, api_key_id: int) -> Optional[APIKey]:
     """
     Get an API key by ID.
     
     Args:
         db: Database session
-        api_key_id: API key UUID
+        api_key_id: API key ID
         
     Returns:
         APIKey object if found, None otherwise
@@ -37,13 +36,13 @@ async def get_api_key_by_prefix(db: AsyncSession, key_prefix: str) -> Optional[A
     result = await db.execute(select(APIKey).where(APIKey.key_prefix == key_prefix))
     return result.scalars().first()
 
-async def create_api_key(db: AsyncSession, user_id: UUID, api_key_in: APIKeyCreate) -> tuple[APIKey, str]:
+async def create_api_key(db: AsyncSession, user_id: int, api_key_in: APIKeyCreate) -> tuple[APIKey, str]:
     """
     Create a new API key for a user.
     
     Args:
         db: Database session
-        user_id: User UUID
+        user_id: User ID
         api_key_in: API key creation data
         
     Returns:
@@ -55,14 +54,20 @@ async def create_api_key(db: AsyncSession, user_id: UUID, api_key_in: APIKeyCrea
     # Hash the API key
     hashed_key = get_api_key_hash(full_key)
     
-    # Create API key object
-    db_api_key = APIKey(
-        key_prefix=key_prefix,
-        hashed_key=hashed_key,
-        user_id=user_id,
-        name=api_key_in.name,
-        is_active=True
-    )
+    # Create API key object with required fields
+    api_key_data = {
+        "key_prefix": key_prefix,
+        "hashed_key": hashed_key,
+        "user_id": user_id,
+        "is_active": True
+    }
+    
+    # Add optional name field if provided
+    if api_key_in.name is not None:
+        api_key_data["name"] = api_key_in.name
+    
+    # Create the API key object
+    db_api_key = APIKey(**api_key_data)
     
     # Add to database
     db.add(db_api_key)
@@ -71,13 +76,13 @@ async def create_api_key(db: AsyncSession, user_id: UUID, api_key_in: APIKeyCrea
     
     return db_api_key, full_key
 
-async def get_user_api_keys(db: AsyncSession, user_id: UUID) -> List[APIKey]:
+async def get_user_api_keys(db: AsyncSession, user_id: int) -> List[APIKey]:
     """
     Get all API keys for a user.
     
     Args:
         db: Database session
-        user_id: User UUID
+        user_id: User ID
         
     Returns:
         List of APIKey objects
@@ -85,14 +90,14 @@ async def get_user_api_keys(db: AsyncSession, user_id: UUID) -> List[APIKey]:
     result = await db.execute(select(APIKey).where(APIKey.user_id == user_id))
     return result.scalars().all()
 
-async def deactivate_api_key(db: AsyncSession, api_key_id: UUID, user_id: Optional[UUID] = None) -> Optional[APIKey]:
+async def deactivate_api_key(db: AsyncSession, api_key_id: int, user_id: Optional[int] = None) -> Optional[APIKey]:
     """
     Deactivate an API key.
     
     Args:
         db: Database session
-        api_key_id: API key UUID
-        user_id: Optional user UUID to ensure ownership
+        api_key_id: API key ID
+        user_id: Optional user ID to ensure ownership
         
     Returns:
         Deactivated APIKey object if found and owned by user, None otherwise
@@ -129,8 +134,8 @@ async def update_last_used(db: AsyncSession, api_key: APIKey) -> APIKey:
     Returns:
         Updated APIKey object
     """
-    # Update the last_used_at timestamp
-    api_key.last_used_at = datetime.datetime.now(datetime.timezone.utc)
+    # Update the last_used_at timestamp with a naive datetime
+    api_key.last_used_at = datetime.datetime.utcnow()
     await db.commit()
     
     return api_key 

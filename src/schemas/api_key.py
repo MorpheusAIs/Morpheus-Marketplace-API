@@ -1,5 +1,4 @@
 from typing import Optional
-from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 class APIKeyCreate(BaseModel):
@@ -20,7 +19,7 @@ class APIKeyDB(BaseModel):
     """
     Schema for API key in database response.
     """
-    id: UUID
+    id: int
     key_prefix: str
     name: Optional[str] = None
     created_at: str

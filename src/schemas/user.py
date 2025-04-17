@@ -1,5 +1,4 @@
 from typing import Optional
-from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
 
 # Shared properties
@@ -18,12 +17,22 @@ class UserUpdate(UserBase):
 
 # Properties to return to client
 class UserResponse(UserBase):
-    id: UUID
+    id: int
     
     # Configure Pydantic to work with SQLAlchemy
     model_config = ConfigDict(from_attributes=True)
 
 # Properties for authentication
 class UserLogin(BaseModel):
-    email: EmailStr
-    password: str 
+    """Schema for user login credentials"""
+    email: EmailStr = Field(..., description="Email address for login")
+    password: str = Field(..., description="User password", min_length=8)
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "email": "user@example.com",
+                "password": "securepassword"
+            }
+        }
+    ) 

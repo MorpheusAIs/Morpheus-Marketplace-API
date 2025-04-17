@@ -13,6 +13,7 @@ class User(Base):
     name = Column(String)
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
+    is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -29,6 +30,7 @@ class APIKey(Base):
     key_prefix = Column(String, index=True)
     hashed_key = Column(String)
     user_id = Column(Integer, ForeignKey("users.id"))
+    name = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_used_at = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True)

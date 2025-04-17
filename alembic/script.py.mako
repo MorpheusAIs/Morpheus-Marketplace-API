@@ -1,7 +1,7 @@
 """${message}
 
 Revision ID: ${up_revision}
-Revises: ${down_revision | 'None'}
+Revises: ${down_revision if down_revision else 'None'}
 Create Date: ${create_date}
 
 """
@@ -13,7 +13,7 @@ ${imports if imports else ""}
 
 # revision identifiers, used by Alembic.
 revision: str = '${up_revision}'
-down_revision: Union[str, None] = ${down_revision | repr}
+down_revision: Union[str, None] = ${down_revision if down_revision else 'None'}
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

@@ -38,6 +38,12 @@ class RedisClient:
             # (common pattern in Redis URLs without auth username)
             password = parsed_url.username
         
+        # If password still not found in URL, use the one from settings
+        if not password and hasattr(settings, 'REDIS_PASSWORD'):
+            password = settings.REDIS_PASSWORD
+        
+        print(f"Connecting to Redis at {host}:{port} with {'password' if password else 'no password'}")
+        
         # Create Redis connection
         self.redis = redis.Redis(
             host=host,

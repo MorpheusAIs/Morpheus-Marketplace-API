@@ -235,7 +235,7 @@ FastAPI automatically generates interactive API documentation:
 - Swagger UI: http://localhost:8000/docs
 - ReDoc: http://localhost:8000/redoc
 
-### Core Endpoints
+### Core uvicorn src.main:app --reload --host 0.0.0.0 --port 8000Endpoints
 
 #### Authentication
 

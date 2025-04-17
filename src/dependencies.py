@@ -2,7 +2,7 @@ from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, status, Security
-from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
+from fastapi.security import HTTPBearer, APIKeyHeader
 from jose import jwt, JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -17,24 +17,29 @@ from src.db.database import get_db
 from src.db.models import User, APIKey
 from src.schemas.token import TokenPayload
 
-# Define oauth2 scheme for JWT tokens
-oauth2_scheme = OAuth2PasswordBearer(
-    tokenUrl=f"{settings.API_V1_STR}/auth/login"
+# Define bearer token scheme for JWT authentication
+oauth2_scheme = HTTPBearer(
+    auto_error=True,
+    description="JWT Bearer token authentication"
 )
 
 # Define API key scheme for API key authentication
-api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
+api_key_header = APIKeyHeader(
+    name="Authorization", 
+    auto_error=False,
+    description="Provide the API key as 'Bearer sk-xxxxxx'"
+)
 
 async def get_current_user(
     db: AsyncSession = Depends(get_db),
-    token: str = Depends(oauth2_scheme)
+    token_data: dict = Depends(oauth2_scheme)
 ) -> User:
     """
     Get the current authenticated user from JWT token.
     
     Args:
         db: Database session
-        token: JWT token from Authorization header
+        token_data: JWT token from Authorization header
         
     Returns:
         User object
@@ -49,6 +54,9 @@ async def get_current_user(
     )
     
     try:
+        # Get the token from the scheme
+        token = token_data.credentials
+        
         # Decode the JWT token
         payload = jwt.decode(
             token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
@@ -67,7 +75,7 @@ async def get_current_user(
         raise credentials_exception
     
     # Get the user from the database
-    user = await user_crud.get_user_by_id(db, UUID(token_data.sub))
+    user = await user_crud.get_user_by_id(db, int(token_data.sub))
     
     # Check if user exists and is active
     if user is None or not user.is_active:

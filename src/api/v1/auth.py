@@ -1,6 +1,5 @@
 # Placeholder for authentication routes 
 from typing import List, Any
-from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status, Depends, Body
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +9,7 @@ from src.crud import user as user_crud
 from src.crud import api_key as api_key_crud
 from src.crud import private_key as private_key_crud
 from src.db.database import get_db
-from src.schemas.user import UserCreate, UserResponse
+from src.schemas.user import UserCreate, UserResponse, UserLogin
 from src.schemas.token import Token, TokenRefresh, TokenPayload
 from src.schemas.api_key import APIKeyCreate, APIKeyResponse, APIKeyDB
 from src.schemas import private_key as private_key_schemas
@@ -42,11 +41,23 @@ async def register_user(
 
 @router.post("/login", response_model=Token)
 async def login(
-    user_in: UserCreate,
+    user_in: UserLogin,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Log in a user and return JWT tokens.
+    
+    Simply provide your email and password directly in the request body:
+    
+    ```json
+    {
+        "email": "user@example.com",
+        "password": "yourpassword"
+    }
+    ```
+    
+    The response will contain an access_token that should be used in the Authorization header
+    for protected endpoints, with the format: `Bearer {access_token}`
     """
     # Authenticate user
     user = await user_crud.authenticate_user(db, user_in.email, user_in.password)
@@ -101,7 +112,7 @@ async def refresh_token(
             raise credentials_exception
             
         # Get user from database
-        user = await user_crud.get_user_by_id(db, UUID(user_id))
+        user = await user_crud.get_user_by_id(db, int(user_id))
         if not user or not user.is_active:
             raise credentials_exception
             
@@ -126,6 +137,8 @@ async def create_api_key(
 ):
     """
     Create a new API key for the current user.
+    
+    Requires JWT Bearer authentication with the token received from the login endpoint.
     """
     # Create API key
     api_key, full_key = await api_key_crud.create_api_key(db, current_user.id, api_key_in)
@@ -143,18 +156,22 @@ async def get_api_keys(
 ):
     """
     Get all API keys for the current user.
+    
+    Requires JWT Bearer authentication with the token received from the login endpoint.
     """
     api_keys = await api_key_crud.get_user_api_keys(db, current_user.id)
     return api_keys
 
 @router.delete("/keys/{key_id}", response_model=APIKeyDB)
 async def delete_api_key(
-    key_id: UUID,
+    key_id: int,
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Deactivate an API key.
+    
+    Requires JWT Bearer authentication with the token received from the login endpoint.
     """
     # Deactivate API key
     api_key = await api_key_crud.deactivate_api_key(db, key_id, current_user.id)

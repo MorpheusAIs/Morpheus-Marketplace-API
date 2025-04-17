@@ -23,6 +23,7 @@ async def init_model_cache():
         logger.info("Model cache initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize model cache: {e}")
+        logger.info("Continuing without Redis cache - using in-memory data only")
 
 
 def test_redis_connection():

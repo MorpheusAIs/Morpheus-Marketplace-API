@@ -1,5 +1,4 @@
 from typing import Optional, List, Union
-from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,13 +7,13 @@ from src.core.security import get_password_hash, verify_password
 from src.db.models import User
 from src.schemas.user import UserCreate, UserUpdate
 
-async def get_user_by_id(db: AsyncSession, user_id: UUID) -> Optional[User]:
+async def get_user_by_id(db: AsyncSession, user_id: int) -> Optional[User]:
     """
     Get a user by ID.
     
     Args:
         db: Database session
-        user_id: User UUID
+        user_id: User ID
         
     Returns:
         User object if found, None otherwise
@@ -137,7 +136,7 @@ async def get_all_users(db: AsyncSession, skip: int = 0, limit: int = 100) -> Li
     result = await db.execute(select(User).offset(skip).limit(limit))
     return result.scalars().all()
 
-async def delete_user(db: AsyncSession, user_id: UUID) -> Optional[User]:
+async def delete_user(db: AsyncSession, user_id: int) -> Optional[User]:
     """
     Delete a user.
     
