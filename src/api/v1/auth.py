@@ -1,0 +1,236 @@
+# Placeholder for authentication routes 
+from typing import List, Any
+from uuid import UUID
+
+from fastapi import APIRouter, HTTPException, status, Depends, Body
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.core.security import create_access_token, create_refresh_token
+from src.crud import user as user_crud
+from src.crud import api_key as api_key_crud
+from src.crud import private_key as private_key_crud
+from src.db.database import get_db
+from src.schemas.user import UserCreate, UserResponse
+from src.schemas.token import Token, TokenRefresh, TokenPayload
+from src.schemas.api_key import APIKeyCreate, APIKeyResponse, APIKeyDB
+from src.schemas import private_key as private_key_schemas
+from src.dependencies import CurrentUser
+from src.db.models import User
+
+router = APIRouter()
+
+@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+async def register_user(
+    user_in: UserCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Register a new user.
+    """
+    # Check if user already exists
+    existing_user = await user_crud.get_user_by_email(db, user_in.email)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User with this email already exists"
+        )
+    
+    # Create user
+    user = await user_crud.create_user(db, user_in)
+    
+    return user
+
+@router.post("/login", response_model=Token)
+async def login(
+    user_in: UserCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Log in a user and return JWT tokens.
+    """
+    # Authenticate user
+    user = await user_crud.authenticate_user(db, user_in.email, user_in.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Create tokens
+    access_token = create_access_token(user.id)
+    refresh_token = create_refresh_token(user.id)
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
+
+@router.post("/refresh", response_model=Token)
+async def refresh_token(
+    refresh_token_in: TokenRefresh,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get a new access token using a refresh token.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        # Decode the refresh token
+        from jose import jwt, JWTError
+        from src.core.config import settings
+        
+        payload = jwt.decode(
+            refresh_token_in.refresh_token, 
+            settings.JWT_SECRET_KEY, 
+            algorithms=[settings.JWT_ALGORITHM]
+        )
+        
+        # Extract user ID and token type
+        user_id = payload.get("sub")
+        token_type = payload.get("type")
+        
+        # Check token type and user ID
+        if token_type != "refresh" or not user_id:
+            raise credentials_exception
+            
+        # Get user from database
+        user = await user_crud.get_user_by_id(db, UUID(user_id))
+        if not user or not user.is_active:
+            raise credentials_exception
+            
+        # Create new tokens
+        access_token = create_access_token(user.id)
+        refresh_token = create_refresh_token(user.id)
+        
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer"
+        }
+        
+    except JWTError:
+        raise credentials_exception
+
+@router.post("/keys", response_model=APIKeyResponse)
+async def create_api_key(
+    api_key_in: APIKeyCreate,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Create a new API key for the current user.
+    """
+    # Create API key
+    api_key, full_key = await api_key_crud.create_api_key(db, current_user.id, api_key_in)
+    
+    return {
+        "key": full_key,
+        "key_prefix": api_key.key_prefix,
+        "name": api_key.name
+    }
+
+@router.get("/keys", response_model=List[APIKeyDB])
+async def get_api_keys(
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get all API keys for the current user.
+    """
+    api_keys = await api_key_crud.get_user_api_keys(db, current_user.id)
+    return api_keys
+
+@router.delete("/keys/{key_id}", response_model=APIKeyDB)
+async def delete_api_key(
+    key_id: UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Deactivate an API key.
+    """
+    # Deactivate API key
+    api_key = await api_key_crud.deactivate_api_key(db, key_id, current_user.id)
+    
+    # Check if API key exists and belongs to the user
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API key not found"
+        )
+    
+    return api_key
+
+# Private key management endpoints
+@router.post("/private-key", status_code=status.HTTP_201_CREATED)
+async def store_private_key(
+    private_key: private_key_schemas.PrivateKeyCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(CurrentUser)
+) -> Any:
+    """
+    Store an encrypted blockchain private key for the authenticated user.
+    Replaces any existing key.
+    """
+    try:
+        await private_key_crud.create_user_private_key(
+            db=db, 
+            user_id=current_user.id, 
+            private_key=private_key.private_key
+        )
+        return {"message": "Private key stored successfully"}
+    except Exception as e:
+        # In a production environment, we should have proper error logging
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to store private key"
+        )
+
+
+@router.get("/private-key/status", response_model=private_key_schemas.PrivateKeyStatus)
+async def get_private_key_status(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(CurrentUser)
+) -> Any:
+    """
+    Check if a private key is registered for the authenticated user.
+    """
+    stored_key = await private_key_crud.get_user_private_key(db, current_user.id)
+    
+    if not stored_key:
+        return private_key_schemas.PrivateKeyStatus(has_key=False)
+    
+    return private_key_schemas.PrivateKeyStatus(
+        has_key=True,
+        created_at=stored_key.created_at,
+        updated_at=stored_key.updated_at
+    )
+
+
+@router.delete("/private-key", status_code=status.HTTP_200_OK)
+async def delete_private_key(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(CurrentUser)
+) -> Any:
+    """
+    Delete the stored private key for the authenticated user.
+    """
+    deleted = await private_key_crud.delete_user_private_key(db, current_user.id)
+    
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No private key found for this user"
+        )
+    
+    return {"message": "Private key deleted successfully"}
+
+# Export router
+auth_router = router 

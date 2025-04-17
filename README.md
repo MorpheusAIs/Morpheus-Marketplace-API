@@ -1,298 +1,336 @@
-# Morpheus API Gateway
+# Morpheus API Gateway - FastAPI Implementation
 
-The Morpheus API Gateway is a middleware service that connects Web2 clients to the Morpheus-Lumerin blockchain-based AI marketplace. It provides an OpenAI-compatible REST API while abstracting away the complexities of blockchain interactions, session management, and protocol translations.
+A robust API Gateway connecting Web2 clients to the Morpheus-Lumerin AI Marketplace using FastAPI, PostgreSQL, Redis, and secure key management practices.
 
-## Core Functionality
+## Overview
 
-The gateway handles these key responsibilities:
+This project migrates the existing Morpheus API Gateway functionality from Node.js/Express to Python/FastAPI, incorporating robust authentication, persistent storage, secure key management, and best practices for API development and deployment using Docker.
 
-1. **OpenAI API Compatibility** - Provides a drop-in replacement for OpenAI's API, allowing existing applications to integrate with minimal changes
-2. **Session Management** - Creates and manages blockchain sessions for AI model inference
-3. **Model Mapping** - Translates between OpenAI model names and blockchain model IDs
-4. **User Authentication** - Handles API key-based authentication for users
-5. **Request Proxying** - Forwards requests to the underlying proxy-router with appropriate transformations
-6. **Private Key Management** - Securely stores and manages user private keys for blockchain transactions
+The gateway provides OpenAI-compatible endpoints that connect to the Morpheus blockchain, allowing users to access AI models in a familiar way while leveraging blockchain technology behind the scenes.
 
-## Architecture
+## Technology Stack
 
-The current implementation consists of these components:
+- **Web Framework:** FastAPI
+- **Data Validation:** Pydantic
+- **Database ORM:** SQLAlchemy with Alembic for migrations
+- **Database:** PostgreSQL
+- **Caching/Key Storage:** Redis
+- **Asynchronous HTTP Client:** `httpx` (for communicating with the proxy-router)
+- **JWT Handling:** `python-jose`
+- **Password Hashing:** `passlib[bcrypt]`
+- **Cryptography:** `cryptography` for private key encryption
+- **KMS Integration:** AWS KMS for secure key management
+- **Containerization:** Docker, Docker Compose
 
-### API Layer
-- Express.js server with middleware for authentication, rate limiting, and error handling
-- OpenAI-compatible endpoints for model listing and chat completions
-- Custom endpoints for session management
+## Project Structure
 
-### Service Layer
-- **SessionService**: Handles blockchain session lifecycle (creation, interaction, closure)
-- **ModelMappingService**: Maps between OpenAI model names and blockchain model IDs
-- **UserService**: Manages user accounts and API keys
-- **KeyVaultService**: Securely stores and manages user private keys
-- **ProxyRouterClient**: Handles interactions with the Morpheus-Lumerin-Node proxy-router
-- **RedisClient**: Provides caching for sessions, models, and other data
+```
+morpheus_api_python/
+├── alembic/                  # Database migrations
+├── alembic.ini
+├── src/
+│   ├── api/                  # FastAPI routers/endpoints
+│   │   ├── v1/
+│   │   │   ├── auth.py       # User registration, login, API keys, private key mgmt
+│   │   │   ├── models.py     # OpenAI compatible models endpoint
+│   │   │   └── chat.py       # OpenAI compatible chat completions
+│   │   └── __init__.py
+│   ├── core/                 # Core logic, configuration, security
+│   │   ├── config.py         # Pydantic settings
+│   │   ├── security.py       # JWT generation/validation, password hashing, API key handling
+│   │   ├── key_vault.py      # Private key encryption/decryption, KMS interaction
+│   │   └── __init__.py
+│   ├── crud/                 # Database interaction functions
+│   │   ├── user.py
+│   │   ├── api_key.py
+│   │   ├── private_key.py
+│   │   └── __init__.py
+│   ├── db/                   # Database session management, base model
+│   │   ├── database.py
+│   │   ├── models.py         # SQLAlchemy models
+│   │   └── __init__.py
+│   ├── schemas/              # Pydantic schemas for request/response validation
+│   │   ├── user.py
+│   │   ├── token.py
+│   │   ├── api_key.py
+│   │   ├── private_key.py
+│   │   ├── openai.py         # Schemas for OpenAI compatibility
+│   │   └── __init__.py
+│   ├── services/             # Business logic layer
+│   │   ├── redis_client.py   # Redis interactions (caching)
+│   │   ├── model_mapper.py   # Mapping OpenAI model names <-> Blockchain IDs
+│   │   ├── init_cache.py     # Cache initialization
+│   │   └── __init__.py
+│   ├── dependencies.py       # FastAPI dependency injection functions
+│   └── main.py               # FastAPI application instance and root setup
+├── .env.example              # Environment variable template
+├── .gitignore                # Git ignore file
+├── Dockerfile                # Docker build configuration
+├── docker-compose.yml        # Container orchestration configuration
+├── pyproject.toml            # Python project dependencies
+└── README.md                 # This file
+```
 
-### Integration Layer
-- Communication with the proxy-router service
-- Translation between OpenAI API format and internal formats
+## Getting Started
 
-### Frontend
-- Simple web interface for users to learn about the API
-- Interactive Swagger UI documentation for testing API endpoints
-- Code examples for popular programming languages
+### Prerequisites
 
-## Key Rotation Architecture
+- Python 3.11+
+- Docker and Docker Compose
+- PostgreSQL (if running locally)
+- Redis (if running locally)
+- AWS Account with KMS access (for production)
 
-The API Gateway uses a "Key Rotation" approach to handle multiple user private keys with a single proxy-router instance:
+### Installation
 
-1. **Private Key Storage**: User private keys are encrypted and stored in Redis with the API key as a mapping key
-2. **Session-based Key Selection**: When a user makes a request, their API key is used to retrieve their private key
-3. **Dynamic Auth**: The private key is used to authenticate with the proxy-router for that specific request
-4. **Request Isolation**: Each request is isolated to ensure one user's request doesn't affect another's
-5. **Memory Cache**: Active keys are cached in memory for better performance while maintaining security
-
-This approach provides several benefits:
-- **Security isolation**: Each user's funds are kept separate
-- **Single proxy router**: Simplifies infrastructure requirements
-- **Transparent to users**: Users interact with the OpenAI-compatible API without dealing with blockchain complexity
-- **Scalable design**: Additional proxy-router instances can be added as needed
-
-## How It Works
-
-### Initialization Flow
-1. The Express application starts and loads environment configuration
-2. Redis connection is established for session and model caching
-3. Model mapping service initializes and caches available models
-4. API routes are registered for authentication and model interactions
-
-### User Onboarding Flow
-1. User creates an account and gets an API key
+1. Clone the repository:
    ```bash
-   # Register a new user - this also generates an initial API key
-   curl -X POST http://localhost:3000/auth/register \
-     -H "Content-Type: application/json" \
-     -d '{
-       "name": "Your Name",
-       "email": "your.email@example.com",
-       "password": "yourpassword"
-     }'
-   
-   # Expected response:
-   # {
-   #   "user": {
-   #     "id": "user_...",
-   #     "name": "Your Name",
-   #     "email": "your.email@example.com",
-   #     "createdAt": "2023-...",
-   #     "updatedAt": "2023-..."
-   #   },
-   #   "api_key": "sk-..."
-   # }
-   
-   # Generate additional API keys if needed (requires authentication)
-   curl -X POST http://localhost:3000/auth/keys \
-     -H "Authorization: Bearer sk-your-api-key" \
-     -H "Content-Type: application/json"
-   
-   # List your API keys
-   curl -X GET http://localhost:3000/auth/keys \
-     -H "Authorization: Bearer sk-your-api-key"
+   git clone https://github.com/yourusername/morpheus-api-python.git
+   cd morpheus-api-python
    ```
 
-2. User registers their private key with the API Gateway
+2. Create a virtual environment:
    ```bash
-   # Register your blockchain private key
-   curl -X POST http://localhost:3000/auth/private-key \
-     -H "Authorization: Bearer sk-your-api-key" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "privateKey": "your-ethereum-private-key-here"
-     }'
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
    ```
 
-3. API Gateway securely stores the encrypted private key
-
-4. User approves the proxy-router contract to spend their MOR tokens
+3. Install dependencies:
    ```bash
-   # Approve token spending
-   curl -X POST http://localhost:3000/auth/approve-spending \
-     -H "Authorization: Bearer sk-your-api-key" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "amount": 3
-     }'
+   pip install poetry
+   poetry install
    ```
 
-Once these steps are completed, you can start using the AI inference endpoints with your API key.
-
-### Request Processing Flow
-
-#### Chat Completion Request
-1. Request arrives at `/v1/chat/completions` endpoint
-2. Authentication middleware validates the API key
-3. The request is parsed and validated
-4. The user's private key is retrieved from the secure vault
-5. The OpenAI model name is mapped to a blockchain model ID
-6. The system checks for an existing active session or creates a new one using the user's private key
-7. The request is forwarded to the proxy-router with the session ID and private key
-8. For streaming responses, chunks are processed and forwarded to the client
-9. For non-streaming responses, the complete response is returned
-
-#### Session Management
-- Sessions are created on-demand when needed for a particular model
-- Active sessions are cached in Redis with user associations
-- The system reuses existing sessions when available
-- Sessions are automatically closed when they expire
-
-### Model Mapping System
-The service translates between familiar OpenAI model names and blockchain model IDs:
-- Default mappings provide fallbacks for common models
-- Periodic cache refreshing ensures up-to-date model information
-- Custom model name mapping handles differences in naming conventions
-
-## API Endpoints
-
-### OpenAI-Compatible Endpoints
-- `GET /v1/models` - List available models in OpenAI format
-- `POST /v1/chat/completions` - Generate a chat completion
-
-### Authentication Endpoints
-- `POST /auth/register` - Create a new user account (placeholder)
-- `POST /auth/login` - Authenticate user and generate tokens (placeholder)
-- `GET /auth/keys` - List API keys for the authenticated user (placeholder)
-- `POST /auth/keys` - Generate a new API key (placeholder)
-- `DELETE /auth/keys/{key_id}` - Revoke an API key (placeholder)
-- `POST /auth/private-key` - Register a private key for the current API key
-- `GET /auth/private-key/status` - Check if a private key exists for the current API key
-- `DELETE /auth/private-key` - Delete the private key for the current API key
-- `POST /auth/approve-spending` - Approve the contract to spend MOR tokens
-
-### Session Management Endpoints
-- `GET /v1/sessions` - List active sessions (placeholder)
-- `POST /v1/sessions` - Create a new session (placeholder)
-- `DELETE /v1/sessions/{session_id}` - Close a session (placeholder)
-
-## Technical Implementation
+4. Configure environment variables:
+   ```bash
+   cp .env.example .env
+   ```
+   Edit the `.env` file with your specific settings
 
 ### Environment Configuration
-The system uses environment variables for configuration, including:
-- Server settings (port, CORS, etc.)
-- Database connections (PostgreSQL and Redis)
-- Blockchain settings (Ethereum RPC, contract addresses)
-- Proxy router connection details
-- Authentication settings
-- Key vault encryption settings
 
-### Security Considerations
-- Private keys are encrypted at rest using AES-256-CBC
-- All requests are authenticated with API keys
-- HTTPS should be enabled in production
-- Rate limiting protects against abuse
-- Redis should be configured with password authentication in production
-- The encryption key should be stored in a secure key management system in production
+Configure the following key environment variables:
 
-### Caching Strategy
-- Redis is used for caching session information and model mappings
-- Sessions are cached with expiration based on their blockchain duration
-- Model information is refreshed periodically to stay in sync
+```
+# Database
+POSTGRES_USER=morpheus_user
+POSTGRES_PASSWORD=secure_password_here
+POSTGRES_DB=morpheus_db
+DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}
 
-### Error Handling
-- Standardized error response format compatible with OpenAI
-- Custom error classes for different error types
-- Comprehensive logging with Winston
+# Redis
+REDIS_PASSWORD=secure_redis_password_here
+REDIS_URL=redis://:${REDIS_PASSWORD}@localhost:6379/0
 
-### Authentication
-- API key-based authentication using the Authorization header
-- Currently uses an in-memory store (to be replaced with database)
-- JWT infrastructure in place for future user authentication
+# JWT
+JWT_SECRET_KEY=generate_this_with_openssl_rand_-hex_32
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+REFRESH_TOKEN_EXPIRE_DAYS=7
 
-## Interactive Documentation
+# AWS KMS (for production)
+KMS_PROVIDER=aws
+KMS_MASTER_KEY_ID=your_kms_key_id_or_arn
+AWS_REGION=us-east-1
+# AWS_ACCESS_KEY_ID=your_access_key_id         # If not using IAM roles
+# AWS_SECRET_ACCESS_KEY=your_secret_access_key # If not using IAM roles
 
-The API Gateway comes with built-in Swagger UI documentation, allowing developers to:
+# Development mode local encryption (not for production)
+MASTER_ENCRYPTION_KEY=generate_this_with_openssl_rand_-hex_32
 
-1. Explore available endpoints and their parameters
-2. Test API calls directly from the browser
-3. View request and response schemas
-4. Try out authentication and session management
+# Proxy Router
+PROXY_ROUTER_URL=http://localhost:8545  # URL of the Morpheus-Lumerin Node proxy-router
+```
 
-The documentation is accessible at:
-- `/api-docs` - Swagger UI interface
-- `/` - Main landing page with embedded Swagger UI
+## Database Setup
 
-The OpenAPI specification is defined in `swagger.json` at the root of the project.
+### Local Database Setup
 
-## Development & Deployment
+1. Start PostgreSQL:
+   ```bash
+   docker run --name morpheus-postgres -e POSTGRES_USER=morpheus_user -e POSTGRES_PASSWORD=morpheus_password -e POSTGRES_DB=morpheus_db -p 5432:5432 -d postgres:15-alpine
+   ```
+
+2. Run migrations:
+   ```bash
+   alembic upgrade head
+   ```
+
+### Running Migrations
+
+Generate a new migration after model changes:
+
+```bash
+alembic revision --autogenerate -m "Description of changes"
+```
+
+Apply migrations:
+
+```bash
+alembic upgrade head
+```
+
+Roll back migrations:
+
+```bash
+alembic downgrade -1  # Roll back one migration
+```
+
+## Redis Setup
+
+### Local Redis Setup
+
+Start Redis with password protection:
+
+```bash
+docker run --name morpheus-redis -p 6379:6379 redis:7-alpine --requirepass your_redis_password
+```
+
+### Testing Redis Connection
+
+```bash
+redis-cli -h localhost -p 6379 -a your_redis_password ping
+```
+
+## AWS KMS Setup (Production)
+
+1. Create a KMS key in the AWS console or using AWS CLI
+2. Note the key ARN or ID
+3. Configure IAM permissions for your service principal
+4. Update environment variables with key details
+
+## Running the Application
+
+### Docker Setup (Recommended)
+
+1. Build and start containers:
+   ```bash
+   docker-compose up -d
+   ```
+
+2. Check container status:
+   ```bash
+   docker-compose ps
+   ```
+
+3. View logs:
+   ```bash
+   docker-compose logs -f api
+   ```
 
 ### Local Development
-```bash
-# Clone the repository
-git clone [repository-url]
 
-# Install dependencies
-npm install
+1. Start Redis and PostgreSQL (see above)
 
-# Set up environment variables
-cp .env.example .env
-# Edit .env with your configuration
+2. Run the FastAPI application:
+   ```bash
+   uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+   ```
 
-# Start development server
-npm run dev
-```
+## Testing the API
 
-### Docker Deployment
-```bash
-# Build the Docker image
-docker build -t morpheus-api .
+### API Documentation
 
-# Run with Docker
-docker run -p 3000:3000 --env-file .env morpheus-api
+FastAPI automatically generates interactive API documentation:
 
-# Or use docker-compose
-docker-compose up
-```
+- Swagger UI: http://localhost:8000/docs
+- ReDoc: http://localhost:8000/redoc
 
-## Testing
+### Core Endpoints
 
-The current implementation includes a test API key for easy integration testing:
-- API Key: `test-api-key`
-- User ID: `test-user-id`
+#### Authentication
 
-Example API request:
-```bash
-curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer test-api-key" \
-  -d '{
-    "model": "gpt-4",
-    "messages": [{"role": "user", "content": "Hello, world!"}]
-  }'
-```
+- `POST /api/v1/auth/register` - Create a new user
+- `POST /api/v1/auth/login` - Log in and get JWT tokens
+- `POST /api/v1/auth/refresh` - Refresh access token
 
-Example API request to register a private key:
-```bash
-curl -X POST http://localhost:3000/auth/private-key \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer test-api-key" \
-  -d '{
-    "privateKey": "YOUR_PRIVATE_KEY"
-  }'
-```
+#### API Key Management
 
-Example API request to approve token spending:
-```bash
-curl -X POST http://localhost:3000/auth/approve-spending \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer test-api-key" \
-  -d '{
-    "amount": 3
-  }'
-```
+- `POST /api/v1/auth/keys` - Create a new API key
+- `GET /api/v1/auth/keys` - List your API keys
+- `DELETE /api/v1/auth/keys/{key_id}` - Delete an API key
 
-Example API request for chat completion:
-```bash
-curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer test-api-key" \
-  -d '{
-    "model": "gpt-4",
-    "messages": [{"role": "user", "content": "Hello, world!"}]
-  }'
-``` 
+#### Private Key Management
+
+- `POST /api/v1/auth/private-key` - Store your blockchain private key
+- `GET /api/v1/auth/private-key/status` - Check if you have a stored private key
+- `DELETE /api/v1/auth/private-key` - Delete your stored private key
+
+#### OpenAI-Compatible Endpoints
+
+- `GET /api/v1/models` - List available models
+- `GET /api/v1/models/{model_id}` - Get model details
+- `POST /api/v1/chat/completions` - Create a chat completion
+
+### Example: Creating a Chat Completion
+
+1. Register a user:
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/auth/register \
+     -H "Content-Type: application/json" \
+     -d '{"name": "Test User", "email": "user@example.com", "password": "securepassword"}'
+   ```
+
+2. Login to get tokens:
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"email": "user@example.com", "password": "securepassword"}'
+   ```
+
+3. Create an API key (using JWT from login):
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/auth/keys \
+     -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{}'
+   ```
+
+4. Store a private key:
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/auth/private-key \
+     -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"private_key": "YOUR_BLOCKCHAIN_PRIVATE_KEY"}'
+   ```
+
+5. Create a chat completion using the API key:
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/chat/completions \
+     -H "Authorization: Bearer YOUR_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "model": "gpt-3.5-turbo",
+       "messages": [
+         {"role": "user", "content": "Hello, how are you?"}
+       ]
+     }'
+   ```
+
+## Health Checks
+
+- `GET /health` - Check API and Redis health
+- `GET /` - Basic API information
+
+## Open Questions and TODOs
+
+This implementation is based on the [FastAPI Implementation Plan](fastapi_implementation_plan.md) and has the following open questions:
+
+1. **Proxy-Router API Specifics:** The exact API contract of the `morpheus-lumerin-node` `proxy-router` needs clarification.
+2. **Model Mapping Source:** The source of mapping between OpenAI model names and blockchain model IDs needs to be determined.
+3. **Token Spending Approval:** The mechanism for the `/auth/approve-spending` endpoint needs specification.
+4. **Private Key Scope:** Confirm if a single private key per user is sufficient.
+5. **Rate Limiting:** Determine rate-limiting requirements and implement if needed.
+6. **Security Requirements:** Confirm if there are any specific compliance or advanced security requirements.
+
+The current implementation uses placeholder/mock data for model information and chat completions until the proxy-router integration is finalized.
+
+## Development and Contributing
+
+- Format code with `ruff format`
+- Run linting with `ruff check`
+- Run type checking with `mypy`
+- Run tests with `pytest`
+
+## License
+
+[MIT License](LICENSE) 
