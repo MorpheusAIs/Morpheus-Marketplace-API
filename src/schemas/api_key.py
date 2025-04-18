@@ -1,5 +1,6 @@
 from typing import Optional
 from pydantic import BaseModel, ConfigDict
+from datetime import datetime
 
 class APIKeyCreate(BaseModel):
     """
@@ -22,7 +23,7 @@ class APIKeyDB(BaseModel):
     id: int
     key_prefix: str
     name: Optional[str] = None
-    created_at: str
+    created_at: datetime
     is_active: bool
 
     # Configure Pydantic to work with SQLAlchemy

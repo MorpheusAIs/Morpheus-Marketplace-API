@@ -3,6 +3,7 @@ from typing import Optional, List
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
 from src.core.security import generate_api_key, get_api_key_hash
 from src.db.models import APIKey, User
@@ -19,7 +20,11 @@ async def get_api_key_by_id(db: AsyncSession, api_key_id: int) -> Optional[APIKe
     Returns:
         APIKey object if found, None otherwise
     """
-    result = await db.execute(select(APIKey).where(APIKey.id == api_key_id))
+    result = await db.execute(
+        select(APIKey)
+        .options(joinedload(APIKey.user))
+        .where(APIKey.id == api_key_id)
+    )
     return result.scalars().first()
 
 async def get_api_key_by_prefix(db: AsyncSession, key_prefix: str) -> Optional[APIKey]:
@@ -33,7 +38,11 @@ async def get_api_key_by_prefix(db: AsyncSession, key_prefix: str) -> Optional[A
     Returns:
         APIKey object if found, None otherwise
     """
-    result = await db.execute(select(APIKey).where(APIKey.key_prefix == key_prefix))
+    result = await db.execute(
+        select(APIKey)
+        .options(joinedload(APIKey.user))
+        .where(APIKey.key_prefix == key_prefix)
+    )
     return result.scalars().first()
 
 async def create_api_key(db: AsyncSession, user_id: int, api_key_in: APIKeyCreate) -> tuple[APIKey, str]:

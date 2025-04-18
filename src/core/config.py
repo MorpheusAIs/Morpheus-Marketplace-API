@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     PROXY_ROUTER_URL: str = Field(default=os.getenv("PROXY_ROUTER_URL", ""))
     PROXY_ROUTER_USERNAME: str = Field(default=os.getenv("PROXY_ROUTER_USERNAME", ""))
     PROXY_ROUTER_PASSWORD: str = Field(default=os.getenv("PROXY_ROUTER_PASSWORD", ""))
+    
+    # Blockchain Private Key Fallback
+    FALLBACK_PRIVATE_KEY: str | None = Field(default=os.getenv("FALLBACK_PRIVATE_KEY"))
 
     # KMS Settings (placeholders - specific config depends on KMS choice)
     KMS_PROVIDER: str | None = Field(default=os.getenv("KMS_PROVIDER", "aws"))

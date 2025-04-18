@@ -136,12 +136,16 @@ async def custom_swagger_ui_html():
                     instructionDiv.innerHTML = `
                         <div style="background-color: #f8d7da; padding: 15px; margin-bottom: 20px; border-radius: 5px; border-left: 5px solid #dc3545;">
                             <h3 style="margin-top: 0; color: #721c24;">Authentication Required</h3>
-                            <p><strong>⚠️ Most endpoints require authentication!</strong></p>
-                            <p><strong>Step 1:</strong> Register or Login using the /auth/register or /auth/login endpoints</p>
-                            <p><strong>Step 2:</strong> Copy the access_token from the response</p>
-                            <p><strong>Step 3:</strong> Click the "Authorize" button at the top right and paste the token in the BearerAuth field (without "Bearer" prefix)</p>
-                            <p><strong>Step 4:</strong> Click "Authorize" and then "Close"</p>
-                            <p>Without authorization, most endpoints will return 401 Unauthorized errors.</p>
+                            <p><strong>⚠️ Two authentication methods available!</strong></p>
+                            <p><strong>1. JWT Authentication (BearerAuth):</strong> For most endpoints except /session</p>
+                            <p>- Register or Login using the /auth/register or /auth/login endpoints</p>
+                            <p>- Copy the access_token from the response</p>
+                            <p>- Click "Authorize" and paste the token in the BearerAuth field (without "Bearer" prefix)</p>
+                            <p><strong>2. API Key Authentication (APIKeyAuth):</strong> For /session endpoints</p>
+                            <p>- Create an API key via /auth/keys endpoint (requires JWT auth)</p>
+                            <p>- Copy the API key from the response</p>
+                            <p>- Click "Authorize" and paste the API key in the APIKeyAuth field</p>
+                            <p>- The API key can be entered as either "Bearer sk-xxxxxx" or just "sk-xxxxxx"</p>
                         </div>
                     `;
                     
@@ -150,13 +154,38 @@ async def custom_swagger_ui_html():
                     const infoContainer = swaggerUI.querySelector('.information-container');
                     infoContainer.after(instructionDiv);
                     
-                    // Also add a click handler to automatically open the auth dialog
+                    // Fix session endpoints to use API key auth when the page loads
                     setTimeout(function() {
                         const authButton = document.querySelector('.authorize');
                         if (!localStorage.getItem('auth_reminded')) {
                             authButton.classList.add('pulse');
                             localStorage.setItem('auth_reminded', 'true');
                         }
+                        
+                        // Check if we're on a session endpoint and select the right auth
+                        const pathElements = document.querySelectorAll('.opblock-summary-path');
+                        pathElements.forEach(function(elem) {
+                            const path = elem.innerText;
+                            if (path && path.includes('/session/')) {
+                                const opblock = elem.closest('.opblock');
+                                if (opblock) {
+                                    const authEl = opblock.querySelector('.authorization__btn');
+                                    if (authEl) {
+                                        // Add a visual indicator for API Key auth
+                                        const indicator = document.createElement('span');
+                                        indicator.className = 'api-key-indicator';
+                                        indicator.innerText = 'API Key';
+                                        indicator.style.backgroundColor = '#28a745';
+                                        indicator.style.color = 'white';
+                                        indicator.style.padding = '2px 8px';
+                                        indicator.style.borderRadius = '4px';
+                                        indicator.style.fontSize = '10px';
+                                        indicator.style.marginLeft = '8px';
+                                        authEl.appendChild(indicator);
+                                    }
+                                }
+                            }
+                        });
                     }, 1000);
                 }
             """
@@ -334,7 +363,7 @@ def custom_openapi():
         "type": "apiKey",
         "in": "header",
         "name": "Authorization",
-        "description": "Provide the API key with format: 'Bearer sk-xxxxxx'"
+        "description": "Provide the API key in either format: 'Bearer sk-xxxxxx.yyyyyyy' or just 'sk-xxxxxx.yyyyyyy'. The prefix is 9 characters long including 'sk-'."
     }
     
     # Update security for specific paths and completely remove args and kwargs parameters
@@ -370,10 +399,18 @@ def custom_openapi():
                                 if prop not in ["args", "kwargs"]
                             ]
         
-        # Apply security to all endpoints except login/register
-        if not (path_key.startswith("/api/v1/auth/login") or path_key.startswith("/api/v1/auth/register")):
-            for method in path_item:
-                path_item[method]["security"] = [{"BearerAuth": []}]
+            # Determine which security scheme to apply based on the endpoint
+            if path_key.startswith("/api/v1/auth/login") or path_key.startswith("/api/v1/auth/register"):
+                # No security for login/register endpoints
+                pass
+            elif path_key.startswith("/api/v1/session/"):
+                # Apply API Key authentication to session endpoints
+                for method in path_item:
+                    path_item[method]["security"] = [{"APIKeyAuth": []}]
+            else:
+                # Apply JWT Bearer authentication to all other endpoints
+                for method in path_item:
+                    path_item[method]["security"] = [{"BearerAuth": []}]
 
     app.openapi_schema = openapi_schema
     return app.openapi_schema
@@ -384,7 +421,9 @@ app.openapi = custom_openapi
 # API Documentation landing page
 @app.get("/api-docs", include_in_schema=False)
 async def api_docs_landing(request: Request):
-    """API Documentation landing page with links to all documentation UIs."""
+    """
+    Landing page for API docs
+    """
     return templates.TemplateResponse(
         "api_docs_landing.html",
         {
@@ -394,30 +433,6 @@ async def api_docs_landing(request: Request):
         }
     )
 
-@app.post("/test-private-key")
-async def test_private_key(request: Request):
-    """
-    Test endpoint for direct request handling
-    """
-    try:
-        data = await request.json()
-        return {
-            "success": True,
-            "message": "Request successfully processed",
-            "received_data": data
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
+# The test-private-key endpoint has been removed
 
-# Remove the problematic endpoint
-"""
-@app.post("/api/v1/auth/set-private-key")
-async def set_private_key(
-    request: Request,
-    db: AsyncSession = Depends(get_db)
-):
-    # Implementation removed
-""" 
+# The set-private-key endpoint has been removed 

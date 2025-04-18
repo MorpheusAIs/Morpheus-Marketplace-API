@@ -38,18 +38,26 @@ async def execute_proxy_router_operation(
     """
     # Get user's private key if user_id and db are provided
     private_key = None
+    using_fallback = False
+    
     if user_id and db:
-        private_key = await private_key_crud.get_decrypted_private_key(db, user_id)
+        # Use the get_private_key_with_fallback function which returns the key and a fallback indicator
+        private_key, using_fallback = await private_key_crud.get_private_key_with_fallback(db, user_id)
+        
         if not private_key:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Private key not found. Please set up your private key first."
+                detail="Private key not found and no fallback key configured. Please set up your private key."
             )
     
     # Set up headers with private key if available
     request_headers = headers or {}
     if private_key:
         request_headers["X-Private-Key"] = private_key
+        
+        # Log a warning if using fallback key (for debugging purposes only)
+        if using_fallback:
+            logger.warning("DEBUGGING MODE: Using fallback private key - this should never be used in production!")
     
     # Set up auth credentials
     auth = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
@@ -99,16 +107,27 @@ async def execute_proxy_router_operation(
                 detail_message = str(error_detail)
         except:
             detail_message = f"Status code: {e.response.status_code}, Reason: {e.response.reason_phrase}"
+        
+        # Include information about fallback key in error message if applicable  
+        error_message = f"Error from proxy router: {detail_message}"
+        if using_fallback:
+            error_message = f"[USING FALLBACK KEY] {error_message}"
             
         raise HTTPException(
             status_code=e.response.status_code,
-            detail=f"Error from proxy router: {detail_message}"
+            detail=error_message
         )
     except Exception as e:
         logger.error(f"Unexpected error calling proxy router: {e}")
+        
+        # Include information about fallback key in error message if applicable
+        error_message = f"Unexpected error communicating with proxy router: {str(e)}"
+        if using_fallback:
+            error_message = f"[USING FALLBACK KEY] {error_message}"
+            
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unexpected error communicating with proxy router: {str(e)}"
+            detail=error_message
         )
 
 def handle_proxy_error(e, operation_name):

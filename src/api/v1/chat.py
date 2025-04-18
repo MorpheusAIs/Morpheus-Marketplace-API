@@ -7,6 +7,10 @@ from typing import Optional, Dict, Any
 import json
 import httpx
 import logging
+from datetime import datetime
+import uuid
+import asyncio
+import base64
 
 from ...dependencies import get_api_key_user, api_key_header
 from ...db.database import get_db
@@ -25,7 +29,6 @@ AUTH = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
 @router.post("/completions", response_model=None)
 async def create_chat_completion(
     request: Request,
-    body: openai_schemas.ChatCompletionRequest,
     api_key: str = Depends(api_key_header),
     user: User = Depends(get_api_key_user),
     db: AsyncSession = Depends(get_db)
@@ -34,7 +37,8 @@ async def create_chat_completion(
     Create a chat completion.
     
     This implementation connects to the proxy-router to interact with the selected model.
-    The session is automatically retrieved from the database based on the API key.
+    The session is automatically retrieved from the database based on the API key,
+    or can be explicitly provided in the request body via session_id parameter.
     """
     # Check if we have a valid user from the API key
     if not user:
@@ -44,123 +48,120 @@ async def create_chat_completion(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Get API key
-    if not user.api_keys:
+    # Get the raw request body
+    body = await request.body()
+    
+    # Extract session_id from body if present
+    session_id = None
+    try:
+        json_body = json.loads(body)
+        session_id = json_body.get("session_id")
+        
+        # If session_id is in body, remove it and recreate the body
+        if session_id:
+            del json_body["session_id"]
+            body = json.dumps(json_body).encode('utf-8')
+    except Exception as e:
+        logging.error(f"Error processing request body: {e}")
+    
+    # If no session_id from body, try to get from database
+    if not session_id and user.api_keys:
+        try:
+            api_key_prefix = user.api_keys[0].key_prefix
+            db_api_key = await api_key_crud.get_api_key_by_prefix(db, api_key_prefix)
+            
+            if not db_api_key:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="API key not found"
+                )
+            
+            # Get session associated with the API key
+            session = await session_crud.get_session_by_api_key_id(db, db_api_key.id)
+            
+            if not session or not session.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No active session found for API key. Please create a session first using /session/modelsession endpoint."
+                )
+            
+            # Use the session ID from the database
+            session_id = session.session_id
+            logging.info(f"Using session ID from database: {session_id}")
+        except HTTPException:
+            # Re-raise HTTP exceptions
+            raise
+        except Exception as e:
+            logging.error(f"Error looking up session: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error retrieving session: {str(e)}"
+            )
+    
+    # If we still don't have a session_id, return an error
+    if not session_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No API keys found for user"
+            detail="No session ID provided in request and no active session found for API key"
         )
-    
-    api_key_prefix = user.api_keys[0].key_prefix
-    db_api_key = await api_key_crud.get_api_key_by_prefix(db, api_key_prefix)
-    
-    if not db_api_key:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="API key not found"
-        )
-    
-    # Get session associated with the API key
-    session = await session_crud.get_session_by_api_key_id(db, db_api_key.id)
-    
-    if not session or not session.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No active session found for API key. Please create a session first using /session/modelsession endpoint."
-        )
-    
-    # Use the session ID from the database
-    session_id = session.session_id
-    logging.info(f"Using session ID from database: {session_id}")
     
     # Forward request to proxy-router
     endpoint = f"{settings.PROXY_ROUTER_URL}/v1/chat/completions"
     
-    headers = {"session_id": session_id}
+    # Create basic auth header - this is critical
+    auth_str = f"{settings.PROXY_ROUTER_USERNAME}:{settings.PROXY_ROUTER_PASSWORD}"
+    auth_b64 = base64.b64encode(auth_str.encode('ascii')).decode('ascii')
     
-    # Handle streaming or non-streaming requests by forwarding to the proxy-router
-    try:
-        async with httpx.AsyncClient() as client:
-            if body.stream:
-                # For streaming, we'll create a StreamingResponse that forwards the proxy-router's streaming response
-                async def stream_generator():
-                    async with client.stream(
-                        "POST",
-                        endpoint,
-                        json=body.dict(),
-                        headers=headers,
-                        auth=AUTH,
-                        timeout=60.0
-                    ) as response:
-                        response.raise_for_status()
-                        async for chunk in response.aiter_text():
-                            yield chunk
-                
-                return StreamingResponse(
-                    stream_generator(),
-                    media_type="text/event-stream"
-                )
-            else:
-                # For non-streaming, just forward the request and return the response
-                response = await client.post(
-                    endpoint,
-                    json=body.dict(),
-                    headers=headers,
-                    auth=AUTH,
-                    timeout=60.0
-                )
-                response.raise_for_status()
-                
-                # Get the raw response text
-                response_text = response.text
-                logging.info(f"Proxy router response status: {response.status_code}")
-                
-                # Handle the case where the response starts with 'data:'
-                if response_text.startswith('data:'):
-                    # Strip the 'data:' prefix and any whitespace
-                    json_text = response_text.replace('data:', '').strip()
-                    # Try to parse the JSON
-                    try:
-                        parsed_json = json.loads(json_text)
-                        return JSONResponse(content=parsed_json)
-                    except Exception as json_err:
-                        logging.error(f"JSON parsing error: {json_err}")
-                        # Return raw text as fallback
-                        return PlainTextResponse(content=response_text.strip())
-                
-                # Normal JSON response
-                try:
-                    return JSONResponse(content=response.json())
-                except Exception as e:
-                    logging.error(f"JSON parsing error: {e}")
-                    # Return text response as fallback
-                    return PlainTextResponse(content=response_text.strip())
+    # Simple headers that work with the proxy router
+    headers = {
+        "authorization": f"Basic {auth_b64}",
+        "Content-Type": "application/json",
+        "accept": "text/event-stream",
+        "session_id": session_id
+    }
     
-    except httpx.HTTPStatusError as e:
-        # Handle HTTP errors from the proxy-router
-        logging.error(f"HTTP error from proxy-router: {e}")
-        
-        # Get error details if available
-        error_detail = "Unknown error"
+    logging.info(f"Making request to {endpoint} with session_id: {session_id}")
+    logging.info(f"Headers: {headers}")
+    
+    # Handle streaming only - assume all requests are streaming
+    async def stream_generator():
         try:
-            error_response = e.response.json()
-            if "error" in error_response:
-                error_detail = error_response["error"]
-            elif "detail" in error_response:
-                error_detail = error_response["detail"]
-            else:
-                error_detail = str(error_response)
-        except:
-            error_detail = f"Error status code: {e.response.status_code}"
+            async with httpx.AsyncClient() as client:
+                async with client.stream(
+                    "POST",
+                    endpoint,
+                    content=body,
+                    headers=headers,
+                    timeout=60.0
+                ) as response:
+                    # Log response info
+                    logging.info(f"Proxy router response status: {response.status_code}")
+                    logging.info(f"Proxy router response headers: {response.headers}")
+                    if response.status_code != 200:
+                        error_msg = f"Proxy router returned non-200 status: {response.status_code}"
+                        logging.error(error_msg)
+                        try:
+                            error_content = await response.aread()
+                            logging.error(f"Error content: {error_content.decode('utf-8')}")
+                        except:
+                            pass
+                        
+                        yield f"data: {{\"error\": {{\"message\": \"{error_msg}\", \"type\": \"StreamingError\"}}}}\n\n"
+                        return
+                    
+                    # Simply forward the stream response with minimal processing
+                    async for chunk in response.aiter_bytes():
+                        yield chunk.decode('utf-8')
         
-        raise HTTPException(
-            status_code=e.response.status_code,
-            detail=f"Error from proxy-router: {error_detail}"
-        )
-    except Exception as e:
-        # Handle other errors
-        logging.error(f"Error in chat completion: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error in chat completion: {str(e)}"
-        ) 
+        except Exception as e:
+            logging.error(f"Error in streaming: {e}")
+            yield f"data: {{\"error\": {{\"message\": \"Error in streaming: {str(e)}\", \"type\": \"StreamingError\"}}}}\n\n"
+    
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive"
+        }
+    ) 

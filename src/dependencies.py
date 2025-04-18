@@ -5,8 +5,11 @@ from fastapi import Depends, HTTPException, status, Security
 from fastapi.security import HTTPBearer, APIKeyHeader
 from jose import jwt, JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy import select
+from sqlalchemy.future import select as future_select
 import time
+import logging
 from datetime import datetime, timedelta
 
 from src.core.config import settings
@@ -90,7 +93,7 @@ async def get_api_key_user(
     """
     Validate an API key and return the associated user.
     
-    The API key is expected in the format: "Bearer sk-xxxxxx"
+    The API key is expected in the format: "Bearer sk-xxxxxx" or just "sk-xxxxxx"
     
     Args:
         db: Database session
@@ -109,7 +112,7 @@ async def get_api_key_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
         
-    # Extract the key without the Bearer prefix
+    # Extract the key without the Bearer prefix if present
     if api_key.startswith("Bearer "):
         api_key = api_key.replace("Bearer ", "")
     
@@ -121,23 +124,59 @@ async def get_api_key_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Get the key prefix for lookup (first few characters)
-    key_prefix = api_key[:10]  # Get the first part of the key for lookup
+    # Extract the key prefix - "sk-" plus the next 6 characters 
+    # This should match how keys are generated in security.py
+    key_prefix = api_key[:9] if len(api_key) >= 9 else api_key
     
-    # Look up the API key in the database
-    db_api_key = await api_key_crud.get_api_key_by_prefix(db, key_prefix)
-    
-    if not db_api_key:
+    try:
+        # Instead of just getting the API key, join with the user table to avoid lazy loading
+        # And also load the user's api_keys relationship to avoid another lazy load
+        
+        # First get the API key and its user with a subquery
+        api_key_query = select(APIKey).where(APIKey.key_prefix == key_prefix)
+        db_api_key = (await db.execute(api_key_query)).scalar_one_or_none()
+        
+        if not db_api_key:
+            # Log the key prefix for debugging
+            logging.error(f"Could not find API key with prefix: {key_prefix}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Update last used timestamp
+        await api_key_crud.update_last_used(db, db_api_key)
+        
+        # Now get the user with api_keys loaded
+        user_query = future_select(User).options(
+            selectinload(User.api_keys)
+        ).where(User.id == db_api_key.user_id)
+        
+        user = (await db.execute(user_query)).scalar_one_or_none()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="API key not associated with a valid user",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            
+        return user
+        
+    except Exception as e:
+        # Log the error
+        logging.error(f"Error in get_api_key_user: {str(e)}")
+        
+        # Re-raise HTTP exceptions
+        if isinstance(e, HTTPException):
+            raise
+            
+        # Otherwise raise a generic error
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Unexpected error validating API key: {str(e)}"
         )
-    
-    # Update last used timestamp
-    await api_key_crud.update_last_used(db, db_api_key)
-    
-    return db_api_key.user
 
 # Type aliases for commonly used dependency chains
 CurrentUser = Annotated[User, Depends(get_current_user)]
