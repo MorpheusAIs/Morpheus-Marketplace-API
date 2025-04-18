@@ -1,17 +1,21 @@
-from fastapi import FastAPI, Request, status
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, status, Depends
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 import time
 import logging
 import asyncio
+import os
+import pathlib
+import datetime
+from fastapi.routing import APIRoute, APIRouter
 
-from src.api.v1.auth import auth_router
+from src.api.v1 import models, chat, session, auth
 from src.core.config import settings
-from src.api.v1 import models, chat, blockchain
-from src.services.init_cache import test_redis_connection, init_model_cache
+from src.api.v1.custom_route import FixedDependencyAPIRoute
 
 # Add the import for testing database connection
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -27,6 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Using our production-ready fixed route class
 app = FastAPI(
     title="Morpheus API Gateway",
     description="API Gateway connecting Web2 clients to the Morpheus-Lumerin AI Marketplace",
@@ -41,6 +46,9 @@ app = FastAPI(
         "docExpansion": "list"
     }
 )
+
+# Set our fixed dependency route class for all APIRouters
+app.router.route_class = FixedDependencyAPIRoute
 
 # Set up CORS
 if hasattr(settings, 'BACKEND_CORS_ORIGINS'):
@@ -109,23 +117,74 @@ async def custom_swagger_ui_html():
             "layout": "BaseLayout",
             "onComplete": """
                 function() {
+                    // Add custom CSS for animations
+                    const style = document.createElement('style');
+                    style.textContent = `
+                        @keyframes pulse {
+                            0% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7); }
+                            70% { box-shadow: 0 0 0 10px rgba(220, 53, 69, 0); }
+                            100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0); }
+                        }
+                        .authorize.pulse {
+                            animation: pulse 2s infinite;
+                        }
+                    `;
+                    document.head.appendChild(style);
+                    
                     // Add helpful instruction panel
                     const instructionDiv = document.createElement('div');
                     instructionDiv.innerHTML = `
-                        <div style="background-color: #f0f8ff; padding: 15px; margin-bottom: 20px; border-radius: 5px; border-left: 5px solid #007bff;">
-                            <h3 style="margin-top: 0;">Authentication Guide</h3>
+                        <div style="background-color: #f8d7da; padding: 15px; margin-bottom: 20px; border-radius: 5px; border-left: 5px solid #dc3545;">
+                            <h3 style="margin-top: 0; color: #721c24;">Authentication Required</h3>
+                            <p><strong>⚠️ Most endpoints require authentication!</strong></p>
                             <p><strong>Step 1:</strong> Register or Login using the /auth/register or /auth/login endpoints</p>
                             <p><strong>Step 2:</strong> Copy the access_token from the response</p>
-                            <p><strong>Step 3:</strong> Click the "Authorize" button and paste the token in the BearerAuth field (without "Bearer" prefix)</p>
-                            <p>After authorizing, you can access protected endpoints.</p>
+                            <p><strong>Step 3:</strong> Click the "Authorize" button at the top right and paste the token in the BearerAuth field (without "Bearer" prefix)</p>
+                            <p><strong>Step 4:</strong> Click "Authorize" and then "Close"</p>
+                            <p>Without authorization, most endpoints will return 401 Unauthorized errors.</p>
                         </div>
                     `;
                     
+                    // Add it to the top of the Swagger UI for better visibility
                     const swaggerUI = document.querySelector('.swagger-ui');
                     const infoContainer = swaggerUI.querySelector('.information-container');
                     infoContainer.after(instructionDiv);
+                    
+                    // Also add a click handler to automatically open the auth dialog
+                    setTimeout(function() {
+                        const authButton = document.querySelector('.authorize');
+                        if (!localStorage.getItem('auth_reminded')) {
+                            authButton.classList.add('pulse');
+                            localStorage.setItem('auth_reminded', 'true');
+                        }
+                    }, 1000);
                 }
             """
+        }
+    )
+
+# Set up Jinja2 templates
+templates_path = pathlib.Path(__file__).parent / "templates"
+templates = Jinja2Templates(directory=str(templates_path))
+
+# Scalar UI documentation endpoint
+@app.get("/scalar", include_in_schema=False)
+async def get_scalar_docs(request: Request):
+    """
+    Serve the Scalar API documentation UI.
+    
+    This is a modern alternative to Swagger UI with a cleaner interface.
+    """
+    return templates.TemplateResponse(
+        "scalar_docs.html",
+        {
+            "request": request,
+            "title": f"{app.title} - API Documentation",
+            "description": app.description,
+            "openapi_url": app.openapi_url,
+            "favicon_url": "https://fastapi.tiangolo.com/img/favicon.png",
+            "scalar_js_url": "https://cdn.jsdelivr.net/npm/@scalar/api-reference",
+            "oauth2_redirect_url": app.swagger_ui_oauth2_redirect_url or "",
         }
     )
 
@@ -152,64 +211,96 @@ async def openai_exception_handler(request: Request, exc: Exception):
 # Application startup event
 @app.on_event("startup")
 async def startup_event():
-    # Test Redis connection
-    redis_ok = test_redis_connection()
-    if not redis_ok:
-        logger.warning("Redis connection failed. Cache features may not work correctly.")
+    """
+    Perform startup initialization.
+    """
+    # Make sure all routers use our fixed route class
+    for router in [auth, models, chat, session]:
+        update_router_route_class(router, FixedDependencyAPIRoute)
     
-    # Initialize model cache
-    await init_model_cache()
-    logger.info("Application startup complete")
+    logger.info("Application startup complete. Using FixedDependencyAPIRoute for all routes.")
+
+# Update router route classes
+def update_router_route_class(router: APIRouter, route_class=FixedDependencyAPIRoute):
+    """
+    Update an APIRouter instance to use our fixed route class.
+    
+    This is used to propagate the route class to all included routers.
+    
+    Args:
+        router: The router to update
+        route_class: The route class to use
+    """
+    router.route_class = route_class
+    for route in router.routes:
+        if isinstance(route, APIRouter):
+            update_router_route_class(route, route_class)
+    return router
+
+# Update all imported routers with our custom route class
+update_router_route_class(auth)
+update_router_route_class(models)
+update_router_route_class(chat)
+update_router_route_class(session)
 
 # Include routers
-app.include_router(auth_router, prefix=f"{settings.API_V1_STR}/auth", tags=["Authentication"])
-app.include_router(models, prefix=f"{settings.API_V1_STR}/models", tags=["Models"])
-app.include_router(chat, prefix=f"{settings.API_V1_STR}/chat", tags=["Chat"])
-app.include_router(blockchain, prefix=f"{settings.API_V1_STR}/blockchain", tags=["Blockchain"])
+app.include_router(auth, prefix=f"{settings.API_V1_STR}/auth")
+app.include_router(models, prefix=f"{settings.API_V1_STR}/models")
+app.include_router(chat, prefix=f"{settings.API_V1_STR}/chat")
+app.include_router(session, prefix=f"{settings.API_V1_STR}/session")
 
-@app.get("/")
+# Default routes - using standard APIRoute for these endpoints to avoid dependency resolution issues
+# Reset the route_class temporarily for these specific routes
+original_route_class = app.router.route_class
+app.router.route_class = APIRoute
+
+@app.get("/", include_in_schema=True)
 async def root():
+    """
+    Root endpoint returning basic API information.
+    """
     return {
         "name": settings.PROJECT_NAME,
         "version": "0.1.0",
-        "description": "OpenAI-compatible API gateway for Morpheus blockchain models"
+        "description": "OpenAI-compatible API gateway for Morpheus blockchain models",
+        "documentation": {
+            "swagger_ui": "/docs",
+            "scalar": "/scalar"
+        }
     }
 
-# Health check endpoint with Redis and PostgreSQL status
-@app.get("/health")
+@app.get("/health", include_in_schema=True)
 async def health_check():
-    # Check Redis connection
-    redis_status = "ok" if test_redis_connection() else "unavailable"
-    
+    """
+    Health check endpoint to verify API and database status.
+    """
     # Check database connection
-    db_status = "ok"
-    db_error = None
     try:
-        # Try to connect to the database
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
+        # Connect to the database and execute a simple query
+        await check_db_connection(engine)
+        db_status = "healthy"
     except Exception as e:
-        logger.error(f"Database connection test failed: {e}")
-        db_status = "unavailable"
-        db_error = str(e)
-    
-    # Mask the password in the URL for display
-    db_url = str(settings.DATABASE_URL)
-    if ":" in db_url and "@" in db_url:
-        # Simple way to mask password in URL
-        parts = db_url.split("@")
-        user_pass = parts[0].split("://")[1].split(":")
-        masked_url = f"{parts[0].split('://')[0]}://{user_pass[0]}:****@{parts[1]}"
-    else:
-        masked_url = db_url
+        db_status = f"unhealthy: {str(e)}"
     
     return {
         "status": "ok",
-        "redis": redis_status,
-        "database": db_status,
-        "database_error": db_error,
-        "database_url": masked_url
+        "timestamp": datetime.datetime.now().isoformat(),
+        "version": "0.1.0",
+        "database": db_status
     }
+
+# Restore the original route class for subsequent routes
+app.router.route_class = original_route_class
+
+# Check database connection (async)
+async def check_db_connection(engine: AsyncEngine):
+    """Check if database connection is working"""
+    from sqlalchemy.ext.asyncio import AsyncSession
+    
+    async with AsyncSession(engine) as session:
+        # Execute a simple query
+        result = await session.execute(text("SELECT 1"))
+        return result.scalar() == 1
 
 # Custom OpenAPI schema generator
 def custom_openapi():
@@ -246,29 +337,87 @@ def custom_openapi():
         "description": "Provide the API key with format: 'Bearer sk-xxxxxx'"
     }
     
-    # Update security for specific paths
+    # Update security for specific paths and completely remove args and kwargs parameters
     for path_key, path_item in openapi_schema["paths"].items():
-        # Skip authentication endpoints
-        if "/auth/login" in path_key or "/auth/register" in path_key:
-            continue
-            
-        # Add Bearer auth to all other auth endpoints
-        if "/auth/" in path_key:
-            for method, operation in path_item.items():
-                operation["security"] = [{"BearerAuth": []}]
+        # Process each operation (GET, POST, etc.)
+        for method, operation in path_item.items():
+            # Remove args and kwargs parameters from all routes
+            if "parameters" in operation:
+                # Remove args and kwargs parameters entirely
+                operation["parameters"] = [
+                    param for param in operation["parameters"]
+                    if param.get("name") not in ["args", "kwargs"]
+                ]
                 
-        # Add API Key auth to model and chat endpoints
-        elif "/models" in path_key or "/chat" in path_key:
-            for method, operation in path_item.items():
-                operation["security"] = [{"APIKeyAuth": []}]
+                # If no parameters are left, remove the empty parameters list
+                if not operation["parameters"]:
+                    del operation["parameters"]
+            
+            # IMPORTANT: Check if there are required properties in the schema and remove args and kwargs
+            if "requestBody" in operation and "content" in operation["requestBody"]:
+                for content_type, content_schema in operation["requestBody"]["content"].items():
+                    if "schema" in content_schema and "properties" in content_schema["schema"]:
+                        # Remove args and kwargs from properties
+                        if "args" in content_schema["schema"]["properties"]:
+                            del content_schema["schema"]["properties"]["args"]
+                        if "kwargs" in content_schema["schema"]["properties"]:
+                            del content_schema["schema"]["properties"]["kwargs"]
+                        
+                        # Remove args and kwargs from required list
+                        if "required" in content_schema["schema"]:
+                            content_schema["schema"]["required"] = [
+                                prop for prop in content_schema["schema"]["required"] 
+                                if prop not in ["args", "kwargs"]
+                            ]
+        
+        # Apply security to all endpoints except login/register
+        if not (path_key.startswith("/api/v1/auth/login") or path_key.startswith("/api/v1/auth/register")):
+            for method in path_item:
+                path_item[method]["security"] = [{"BearerAuth": []}]
 
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
-app.openapi = custom_openapi
+# Set custom OpenAPI schema generator
+app.openapi = custom_openapi 
 
-# TODO: Add other routers once implemented
-# from src.api.v1.models import models_router
-# from src.api.v1.chat import chat_router
-# app.include_router(models_router, prefix=f"{settings.API_V1_STR}", tags=["Models"])
-# app.include_router(chat_router, prefix=f"{settings.API_V1_STR}", tags=["Chat"]) 
+# API Documentation landing page
+@app.get("/api-docs", include_in_schema=False)
+async def api_docs_landing(request: Request):
+    """API Documentation landing page with links to all documentation UIs."""
+    return templates.TemplateResponse(
+        "api_docs_landing.html",
+        {
+            "request": request,
+            "title": app.title,
+            "year": datetime.datetime.now().year
+        }
+    )
+
+@app.post("/test-private-key")
+async def test_private_key(request: Request):
+    """
+    Test endpoint for direct request handling
+    """
+    try:
+        data = await request.json()
+        return {
+            "success": True,
+            "message": "Request successfully processed",
+            "received_data": data
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+# Remove the problematic endpoint
+"""
+@app.post("/api/v1/auth/set-private-key")
+async def set_private_key(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    # Implementation removed
+""" 

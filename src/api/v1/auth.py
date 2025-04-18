@@ -1,7 +1,7 @@
-# Placeholder for authentication routes 
+# Authentication routes 
 from typing import List, Any
 
-from fastapi import APIRouter, HTTPException, status, Depends, Body
+from fastapi import APIRouter, HTTPException, status, Depends, Body, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.security import create_access_token, create_refresh_token
@@ -16,7 +16,7 @@ from src.schemas import private_key as private_key_schemas
 from src.dependencies import CurrentUser
 from src.db.models import User
 
-router = APIRouter()
+router = APIRouter(tags=["Auth"])
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register_user(
@@ -186,21 +186,30 @@ async def delete_api_key(
     return api_key
 
 # Private key management endpoints
-@router.post("/private-key", status_code=status.HTTP_201_CREATED)
+@router.post("/private-key", status_code=status.HTTP_201_CREATED, response_model=dict)
 async def store_private_key(
-    private_key: private_key_schemas.PrivateKeyCreate,
+    request_body: dict = Body(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(CurrentUser)
-) -> Any:
+):
     """
     Store an encrypted blockchain private key for the authenticated user.
     Replaces any existing key.
     """
+    # Validate request body manually
+    if "private_key" not in request_body:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Private key is required"
+        )
+    
+    private_key = request_body["private_key"]
+    
     try:
         await private_key_crud.create_user_private_key(
             db=db, 
             user_id=current_user.id, 
-            private_key=private_key.private_key
+            private_key=private_key
         )
         return {"message": "Private key stored successfully"}
     except Exception as e:
@@ -210,41 +219,38 @@ async def store_private_key(
             detail="Failed to store private key"
         )
 
-
-@router.get("/private-key/status", response_model=private_key_schemas.PrivateKeyStatus)
+@router.get("/private-key", response_model=private_key_schemas.PrivateKeyStatus)
 async def get_private_key_status(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(CurrentUser)
-) -> Any:
+):
     """
-    Check if a private key is registered for the authenticated user.
+    Check if a user has a private key registered.
+    Does not return the actual key, only status information.
     """
-    stored_key = await private_key_crud.get_user_private_key(db, current_user.id)
-    
-    if not stored_key:
-        return private_key_schemas.PrivateKeyStatus(has_key=False)
-    
-    return private_key_schemas.PrivateKeyStatus(
-        has_key=True,
-        created_at=stored_key.created_at,
-        updated_at=stored_key.updated_at
-    )
+    has_key = await private_key_crud.user_has_private_key(db, current_user.id)
+    return {"has_private_key": has_key}
 
-
-@router.delete("/private-key", status_code=status.HTTP_200_OK)
+@router.delete("/private-key", status_code=status.HTTP_200_OK, response_model=dict)
 async def delete_private_key(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(CurrentUser)
-) -> Any:
+):
     """
-    Delete the stored private key for the authenticated user.
+    Delete a user's private key.
     """
-    deleted = await private_key_crud.delete_user_private_key(db, current_user.id)
-    
-    if not deleted:
+    has_key = await private_key_crud.user_has_private_key(db, current_user.id)
+    if not has_key:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No private key found for this user"
+            detail="Private key not found"
+        )
+    
+    success = await private_key_crud.delete_user_private_key(db, current_user.id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete private key"
         )
     
     return {"message": "Private key deleted successfully"}

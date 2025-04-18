@@ -29,10 +29,22 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
+.pytest_cache/
+pytest.ini
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
 
 # Virtual Environment
 venv/
 ENV/
+.venv/
+env/
 
 # IDE
 .idea/
@@ -42,4 +54,11 @@ ENV/
 
 # OS specific
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Local configuration
+config.local.json 

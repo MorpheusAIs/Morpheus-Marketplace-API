@@ -1,25 +1,22 @@
-# Placeholder for OpenAI chat completion routes 
+# Chat routes 
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import StreamingResponse, JSONResponse, PlainTextResponse
-from fastapi.security import HTTPBearer, APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 import json
-import time
-import uuid
-import asyncio
 import httpx
+import logging
 
 from ...dependencies import get_api_key_user, api_key_header
 from ...db.database import get_db
 from ...db.models import User
 from ...schemas import openai as openai_schemas
-from ...crud import private_key as private_key_crud
-from ...services.model_mapper import model_mapper
+from ...crud import session as session_crud
+from ...crud import api_key as api_key_crud
 from ...core.config import settings
 
-router = APIRouter(tags=["chat"])
+router = APIRouter(tags=["Chat"])
 
 # Authentication credentials for proxy-router
 AUTH = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
@@ -29,44 +26,52 @@ AUTH = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
 async def create_chat_completion(
     request: Request,
     body: openai_schemas.ChatCompletionRequest,
-    api_key: Optional[str] = Depends(api_key_header),
+    api_key: str = Depends(api_key_header),
+    user: User = Depends(get_api_key_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Create a chat completion.
     
     This implementation connects to the proxy-router to interact with the selected model.
-    The session_id header MUST be provided and should be the blockchain session ID (hex) 
-    obtained when creating a session with blockchain/sessions/model or blockchain/sessions/bid.
+    The session is automatically retrieved from the database based on the API key.
     """
-    # Get session_id from headers
-    session_id = request.headers.get("session_id")
+    # Check if we have a valid user from the API key
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
-    # Log information for debugging
-    print(f"Headers: {request.headers}")
-    print(f"Session ID: {session_id}")
-    
-    # Verify API key if provided
-    user = None
-    if api_key:
-        # Extract the key without the Bearer prefix
-        if api_key.startswith("Bearer "):
-            api_key = api_key.replace("Bearer ", "")
-            
-        # Simple validation for demo purposes - in production, use proper auth
-        if not api_key.startswith("sk-"):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid API key format. Must start with sk-",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-    
-    # Check if session_id is provided
-    if not session_id:
+    # Get API key
+    if not user.api_keys:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="A session_id header is required. Please create a session first using blockchain/sessions/model or blockchain/sessions/bid endpoints."
+            detail="No API keys found for user"
         )
+    
+    api_key_prefix = user.api_keys[0].key_prefix
+    db_api_key = await api_key_crud.get_api_key_by_prefix(db, api_key_prefix)
+    
+    if not db_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="API key not found"
+        )
+    
+    # Get session associated with the API key
+    session = await session_crud.get_session_by_api_key_id(db, db_api_key.id)
+    
+    if not session or not session.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active session found for API key. Please create a session first using /session/modelsession endpoint."
+        )
+    
+    # Use the session ID from the database
+    session_id = session.session_id
+    logging.info(f"Using session ID from database: {session_id}")
     
     # Forward request to proxy-router
     endpoint = f"{settings.PROXY_ROUTER_URL}/v1/chat/completions"
@@ -108,7 +113,7 @@ async def create_chat_completion(
                 
                 # Get the raw response text
                 response_text = response.text
-                print(f"Proxy router response status: {response.status_code}")
+                logging.info(f"Proxy router response status: {response.status_code}")
                 
                 # Handle the case where the response starts with 'data:'
                 if response_text.startswith('data:'):
@@ -119,7 +124,7 @@ async def create_chat_completion(
                         parsed_json = json.loads(json_text)
                         return JSONResponse(content=parsed_json)
                     except Exception as json_err:
-                        print(f"JSON parsing error: {json_err}")
+                        logging.error(f"JSON parsing error: {json_err}")
                         # Return raw text as fallback
                         return PlainTextResponse(content=response_text.strip())
                 
@@ -127,13 +132,12 @@ async def create_chat_completion(
                 try:
                     return JSONResponse(content=response.json())
                 except Exception as e:
-                    print(f"JSON parsing error: {e}")
+                    logging.error(f"JSON parsing error: {e}")
                     # Return text response as fallback
                     return PlainTextResponse(content=response_text.strip())
     
     except httpx.HTTPStatusError as e:
         # Handle HTTP errors from the proxy-router
-        import logging
         logging.error(f"HTTP error from proxy-router: {e}")
         
         # Get error details if available
@@ -155,7 +159,6 @@ async def create_chat_completion(
         )
     except Exception as e:
         # Handle other errors
-        import logging
         logging.error(f"Error in chat completion: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

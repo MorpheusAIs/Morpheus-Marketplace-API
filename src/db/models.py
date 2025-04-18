@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, LargeBinary, JSON
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, LargeBinary, JSON, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -37,6 +37,7 @@ class APIKey(Base):
     
     # Relationships
     user = relationship("User", back_populates="api_keys")
+    session = relationship("UserSession", back_populates="api_key", uselist=False, cascade="all, delete-orphan")
 
 
 # UserPrivateKey model (focus of this implementation)
@@ -51,4 +52,25 @@ class UserPrivateKey(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
-    user = relationship("User", back_populates="private_key") 
+    user = relationship("User", back_populates="private_key")
+
+
+# New model to store Session information associated with API keys
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    api_key_id = Column(Integer, ForeignKey("api_keys.id"), unique=True)
+    session_id = Column(String, index=True)
+    model_id = Column(String)  # Store the model/bid ID used to create this session
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, default=True)
+    
+    # Relationships
+    api_key = relationship("APIKey", back_populates="session")
+    
+    # Only one active session per API key
+    __table_args__ = (
+        UniqueConstraint('api_key_id', name='unique_api_key_session'),
+    ) 

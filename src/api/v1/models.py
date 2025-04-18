@@ -1,5 +1,4 @@
-# Placeholder for OpenAI models routes 
-
+# Model routes 
 from fastapi import APIRouter, HTTPException, status, Query, Depends, Path
 from typing import List, Dict, Any
 import time
@@ -11,24 +10,18 @@ from ...schemas import openai as openai_schemas
 from ...services.model_mapper import model_mapper
 from ...core.config import settings
 
-router = APIRouter(tags=["models"])
+router = APIRouter(tags=["Models"])
 
 # Authentication credentials
 AUTH = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
 
-@router.get("", response_model=None)
-async def list_models(
-    refresh_cache: bool = Query(False, description="Force refresh the models cache"),
-    include_raw: bool = Query(False, description="Include raw blockchain data in response"),
-    format: str = Query("openai", description="Format of response: 'openai' or 'blockchain'")
-):
+@router.get("/", response_model=None)
+async def list_models():
     """
     Get a list of available models.
     
-    Uses Redis caching for efficient responses. The cache can be
-    bypassed by setting refresh_cache=True.
-    Set include_raw=true to see the raw blockchain model data.
-    Set format=blockchain to get the raw blockchain model format.
+    Response is in OpenAI API format with selected fields from the blockchain data.
+    Only returns non-deleted models.
     """
     try:
         # Direct fetch from blockchain API
@@ -45,63 +38,25 @@ async def list_models(
             blockchain_data = response.json()
             blockchain_models = blockchain_data.get("models", [])
             
-            # For blockchain format, return raw data
-            if format.lower() == "blockchain":
-                return {
-                    "count": len(blockchain_models),
-                    "models": blockchain_models
-                }
+            # Filter out deleted models
+            active_models = [model for model in blockchain_models if not model.get("IsDeleted", False)]
             
-            # For debugging, return raw data when requested
-            if include_raw:
-                return {
-                    "object": "list",
-                    "data": blockchain_models
-                }
-            
-            # Convert blockchain models to OpenAI format
+            # Convert blockchain models to OpenAI format with required fields
             models = []
-            for model in blockchain_models:
+            for model in active_models:
                 model_name = model.get("Name", "unknown-model")
-                created_timestamp = model.get("CreatedAt", int(time.time()))
                 blockchain_id = model.get("Id", "")
-                owner = model.get("Owner", "morpheus")
-                
-                # Create a unique permission ID
-                permission_id = f"modelperm-{uuid.uuid4().hex[:8]}"
+                created_timestamp = model.get("CreatedAt", int(time.time()))
                 
                 # Get model tags
                 tags = model.get("Tags", [])
                 
-                # Include the blockchain ID in the name for easy reference
-                model_name_with_id = f"{model_name} [ID:{blockchain_id}]"
-                
-                # Create OpenAI-compatible model with blockchain ID included
+                # Create simplified OpenAI-compatible model
                 openai_model = {
                     "id": model_name,
-                    "object": "model", 
+                    "blockchainID": blockchain_id,
                     "created": created_timestamp,
-                    "owned_by": owner,
-                    "root": model_name,
-                    "parent": None,
-                    "blockchain_id": blockchain_id,  # Include blockchain ID
-                    "tags": tags,                   # Include tags
-                    "permission": [
-                        {
-                            "id": permission_id,
-                            "object": "model_permission",
-                            "created": created_timestamp,
-                            "allow_create_engine": False,
-                            "allow_sampling": True,
-                            "allow_logprobs": True,
-                            "allow_search_indices": False,
-                            "allow_view": True,
-                            "allow_fine_tuning": False,
-                            "organization": "morpheus",
-                            "group": None,
-                            "is_blocking": False
-                        }
-                    ]
+                    "tags": tags
                 }
                 
                 models.append(openai_model)
@@ -139,7 +94,7 @@ async def list_models(
         )
 
 
-@router.get("/bids/rated")
+@router.get("/ratedbids")
 async def get_rated_bids(
     model_id: str = Query(..., description="The blockchain ID (hex) of the model to get rated bids for, e.g. 0x1234...")
 ):
