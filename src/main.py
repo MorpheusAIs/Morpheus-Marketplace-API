@@ -399,12 +399,31 @@ def custom_openapi():
                                 if prop not in ["args", "kwargs"]
                             ]
         
+            # Add example for chat completions endpoint
+            if path_key == "/api/v1/chat/completions" and method == "post" and "requestBody" in operation:
+                for content_type in operation["requestBody"]["content"]:
+                    operation["requestBody"]["content"][content_type]["example"] = {
+                        "model": "gpt-3.5-turbo",
+                        "messages": [
+                            {"role": "system", "content": "You are a helpful assistant."},
+                            {"role": "user", "content": "Hello, how are you?"}
+                        ],
+                        "temperature": 0.7,
+                        "stream": True
+                    }
+                    
+                    # Add description about session_id
+                    if "schema" in operation["requestBody"]["content"][content_type]:
+                        schema = operation["requestBody"]["content"][content_type]["schema"]
+                        description = schema.get("description", "")
+                        schema["description"] = description + "\n\nNote: You can optionally include 'session_id' if you want to use a specific session."
+        
             # Determine which security scheme to apply based on the endpoint
             if path_key.startswith("/api/v1/auth/login") or path_key.startswith("/api/v1/auth/register"):
                 # No security for login/register endpoints
                 pass
-            elif path_key.startswith("/api/v1/session/"):
-                # Apply API Key authentication to session endpoints
+            elif path_key.startswith("/api/v1/session/") or path_key == "/api/v1/chat/completions":
+                # Apply API Key authentication to session endpoints and chat completions
                 for method in path_item:
                     path_item[method]["security"] = [{"APIKeyAuth": []}]
             else:

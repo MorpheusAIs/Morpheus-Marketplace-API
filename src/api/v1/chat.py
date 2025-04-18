@@ -1,9 +1,9 @@
 # Chat routes 
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Body
 from fastapi.responses import StreamingResponse, JSONResponse, PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Union
 import json
 import httpx
 import logging
@@ -11,6 +11,7 @@ from datetime import datetime
 import uuid
 import asyncio
 import base64
+from pydantic import BaseModel, Field
 
 from ...dependencies import get_api_key_user, api_key_header
 from ...db.database import get_db
@@ -25,10 +26,27 @@ router = APIRouter(tags=["Chat"])
 # Authentication credentials for proxy-router
 AUTH = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+    name: Optional[str] = None
+
+class ChatCompletionRequest(BaseModel):
+    model: str
+    messages: List[ChatMessage]
+    temperature: Optional[float] = 1.0
+    top_p: Optional[float] = 1.0
+    n: Optional[int] = 1
+    stream: Optional[bool] = True
+    stop: Optional[Union[str, List[str]]] = None
+    max_tokens: Optional[int] = None
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
+    session_id: Optional[str] = Field(None, description="Optional session ID to use for this request. If not provided, the system will use the session associated with the API key.")
 
 @router.post("/completions", response_model=None)
 async def create_chat_completion(
-    request: Request,
+    request_data: ChatCompletionRequest,
     api_key: str = Depends(api_key_header),
     user: User = Depends(get_api_key_user),
     db: AsyncSession = Depends(get_db)
@@ -48,21 +66,10 @@ async def create_chat_completion(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Get the raw request body
-    body = await request.body()
-    
-    # Extract session_id from body if present
-    session_id = None
-    try:
-        json_body = json.loads(body)
-        session_id = json_body.get("session_id")
-        
-        # If session_id is in body, remove it and recreate the body
-        if session_id:
-            del json_body["session_id"]
-            body = json.dumps(json_body).encode('utf-8')
-    except Exception as e:
-        logging.error(f"Error processing request body: {e}")
+    # Convert the request data to a dictionary and then to JSON
+    json_body = request_data.dict(exclude_none=True)
+    session_id = json_body.pop("session_id", None)
+    body = json.dumps(json_body).encode('utf-8')
     
     # If no session_id from body, try to get from database
     if not session_id and user.api_keys:
