@@ -62,7 +62,7 @@ async def create_session(
 ) -> UserSession:
     """
     Create a new session for an API key.
-    If a session already exists for this API key, it will be deactivated.
+    If any sessions exist for this API key, they will be deleted.
     
     Args:
         db: Database session
@@ -74,30 +74,34 @@ async def create_session(
     Returns:
         Created UserSession object
     """
-    # Deactivate any existing sessions for this API key
-    await db.execute(
-        update(UserSession)
-        .where(UserSession.api_key_id == api_key_id)
-        .values(is_active=False)
-    )
-    
-    # Calculate expiration time
-    expires_at = datetime.utcnow() + timedelta(seconds=session_duration)
-    
-    # Create new session
-    db_session = UserSession(
-        api_key_id=api_key_id,
-        session_id=blockchain_session_id,
-        model_id=model_id,
-        expires_at=expires_at,
-        is_active=True
-    )
-    
-    db.add(db_session)
-    await db.commit()
-    await db.refresh(db_session)
-    
-    return db_session
+    try:
+        # Delete any existing sessions for this API key
+        await db.execute(
+            delete(UserSession)
+            .where(UserSession.api_key_id == api_key_id)
+        )
+        
+        # Calculate expiration time
+        expires_at = datetime.utcnow() + timedelta(seconds=session_duration)
+        
+        # Create new session
+        db_session = UserSession(
+            api_key_id=api_key_id,
+            session_id=blockchain_session_id,
+            model_id=model_id,
+            expires_at=expires_at,
+            is_active=True
+        )
+        
+        db.add(db_session)
+        await db.commit()
+        await db.refresh(db_session)
+        
+        return db_session
+        
+    except Exception as e:
+        await db.rollback()
+        raise
 
 async def update_session_status(db: AsyncSession, session_id: int, is_active: bool) -> Optional[UserSession]:
     """
@@ -111,16 +115,20 @@ async def update_session_status(db: AsyncSession, session_id: int, is_active: bo
     Returns:
         Updated UserSession object if found, None otherwise
     """
-    # Update session
-    await db.execute(
-        update(UserSession)
-        .where(UserSession.id == session_id)
-        .values(is_active=is_active)
-    )
-    await db.commit()
-    
-    # Get updated session
-    return await get_session_by_id(db, session_id)
+    try:
+        # Update session
+        await db.execute(
+            update(UserSession)
+            .where(UserSession.id == session_id)
+            .values(is_active=is_active)
+        )
+        await db.commit()
+        
+        # Get updated session
+        return await get_session_by_id(db, session_id)
+    except Exception as e:
+        await db.rollback()
+        raise
 
 async def delete_session(db: AsyncSession, session_id: int) -> bool:
     """
@@ -133,7 +141,10 @@ async def delete_session(db: AsyncSession, session_id: int) -> bool:
     Returns:
         True if session was deleted, False otherwise
     """
-    result = await db.execute(delete(UserSession).where(UserSession.id == session_id))
-    await db.commit()
-    
-    return result.rowcount > 0 
+    try:
+        result = await db.execute(delete(UserSession).where(UserSession.id == session_id))
+        await db.commit()
+        return result.rowcount > 0
+    except Exception as e:
+        await db.rollback()
+        raise 

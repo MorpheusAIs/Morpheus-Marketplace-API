@@ -3,8 +3,10 @@ from typing import Dict, Any, Optional
 import httpx
 import json
 import logging
+import os
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
+import base64
 
 from ...core.config import settings
 from ...db.database import get_db
@@ -14,7 +16,6 @@ from ...crud import session as session_crud
 from ...crud import api_key as api_key_crud
 from ...crud import private_key as private_key_crud
 from ...services.proxy_router import execute_proxy_router_operation, handle_proxy_error
-import os
 
 # Define the request models
 class SessionInitRequest(BaseModel):
@@ -1003,7 +1004,8 @@ async def ping_session(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Ping the session to keep it alive.
+    Ping the session by attempting a simple chat completion.
+    If the chat completion fails, the session is considered dead and will be closed.
     """
     if not user:
         raise HTTPException(
@@ -1012,71 +1014,116 @@ async def ping_session(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    logger = logging.getLogger(__name__)
+    
     try:
-        # We need to extract the API key prefix, but we know it's already loaded
-        api_key_prefix = user.api_keys[0].key_prefix if user.api_keys and len(user.api_keys) > 0 else None
-        if not api_key_prefix:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No API key found for this user"
-            )
-        
-        # Since user.api_keys is already loaded by the dependency, we can directly get the first API key
+        # Get API key
         api_key = user.api_keys[0] if user.api_keys and len(user.api_keys) > 0 else None
         if not api_key:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="API key not found"
-                )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="API key not found"
+            )
             
         # Get session associated with the API key
         session = await session_crud.get_session_by_api_key_id(db, api_key.id)
         
         if not session or not session.is_active:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No active session found for this API key"
-                )
-            
-        # Get a private key (with possible fallback)
-        private_key, using_fallback = await private_key_crud.get_private_key_with_fallback(db, user.id)
-        
-        if not private_key:
-            return {
-                "error": {
-                    "message": "No private key found and no fallback key configured. Please set up your private key.",
-                    "type": "PrivateKeyNotFound"
-                }
-            }
-        
-        if using_fallback:
-            logging.warning(f"DEBUGGING MODE: Using fallback private key for user {user.id} - this should never be used in production!")
-        
-        # Make direct call to the proxy-router
-        full_url = f"{settings.PROXY_ROUTER_URL}/blockchain/sessions/{session.session_id}/ping"
-        auth = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
-        headers = {"X-Private-Key": private_key}
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                full_url,
-                headers=headers,
-                auth=auth,
-                timeout=30.0
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No active session found for this API key"
             )
-            response.raise_for_status()
-            ping_response = response.json()
         
-        result = {
-                "success": True,
-            "message": "Session pinged successfully",
+        # Prepare a simple chat completion request
+        test_message = {
+            "messages": [{"role": "user", "content": "test"}],
+            "stream": True  # Always use streaming as that's what the proxy router expects
+        }
+        
+        # Create basic auth header
+        auth_str = f"{settings.PROXY_ROUTER_USERNAME}:{settings.PROXY_ROUTER_PASSWORD}"
+        auth_b64 = base64.b64encode(auth_str.encode('ascii')).decode('ascii')
+        
+        # Setup headers for chat completion - match exactly what the chat endpoint uses
+        headers = {
+            "authorization": f"Basic {auth_b64}",
+            "Content-Type": "application/json",
+            "accept": "text/event-stream",
             "session_id": session.session_id
         }
         
-        # Add note about fallback key usage
-        if using_fallback:
-            result["note"] = "Private Key not set, using fallback key (FOR DEBUGGING ONLY)"
-            
-        return result
+        # Make request to chat completions endpoint
+        endpoint = f"{settings.PROXY_ROUTER_URL}/v1/chat/completions"
+        
+        logger.info(f"Testing session {session.session_id} with chat completion")
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                # Use streaming request like the chat endpoint
+                async with client.stream(
+                    "POST",
+                    endpoint,
+                    json=test_message,
+                    headers=headers,
+                    timeout=30.0
+                ) as response:
+                    response.raise_for_status()
+                    
+                    # Read just enough of the stream to confirm it's working
+                    async for chunk in response.aiter_bytes():
+                        # If we get any response chunk, the session is alive
+                        return {
+                            "success": True,
+                            "message": "Session is alive",
+                            "session_id": session.session_id
+                        }
+                    
+                    # If we get here with no chunks, something is wrong
+                    raise Exception("No response received from chat completion")
+                    
+            except Exception as e:
+                logger.error(f"Chat completion test failed: {str(e)}")
+                logger.info(f"Closing dead session {session.session_id}")
+                
+                # Session is dead, try to close it
+                try:
+                    # Get a private key (with possible fallback)
+                    private_key, using_fallback = await private_key_crud.get_private_key_with_fallback(db, user.id)
+                    
+                    if private_key:
+                        # Setup headers for closing session
+                        close_headers = {
+                            "X-Private-Key": private_key,
+                            "X-Chain-ID": os.getenv("CHAIN_ID"),
+                            "X-Contract-Address": os.getenv("DIAMOND_CONTRACT_ADDRESS")
+                        }
+                        
+                        # Try to close the session on the blockchain
+                        await execute_proxy_router_operation(
+                            endpoint=f"blockchain/sessions/{session.session_id}/close",
+                            headers=close_headers,
+                            user_id=user.id,
+                            db=db
+                        )
+                except Exception as close_err:
+                    logger.error(f"Error closing dead session: {str(close_err)}")
+                
+                # Mark session as inactive in database regardless of blockchain close result
+                await session_crud.update_session_status(db, session.id, False)
+                
+                return {
+                    "error": {
+                        "message": "Session is dead and has been closed",
+                        "type": "DeadSession",
+                        "original_error": str(e)
+                    }
+                }
+                
     except Exception as e:
-        return handle_proxy_error(e, "pinging session") 
+        logger.error(f"Error in ping_session: {str(e)}")
+        return {
+            "error": {
+                "message": f"Error checking session status: {str(e)}",
+                "type": "PingError"
+            }
+        } 

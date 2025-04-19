@@ -32,7 +32,7 @@ class ChatMessage(BaseModel):
     name: Optional[str] = None
 
 class ChatCompletionRequest(BaseModel):
-    model: str
+    model: Optional[str] = None
     messages: List[ChatMessage]
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
@@ -69,6 +69,8 @@ async def create_chat_completion(
     # Convert the request data to a dictionary and then to JSON
     json_body = request_data.dict(exclude_none=True)
     session_id = json_body.pop("session_id", None)
+    # Remove model field as it's not needed by proxy-router
+    json_body.pop("model", None)
     body = json.dumps(json_body).encode('utf-8')
     
     # If no session_id from body, try to get from database

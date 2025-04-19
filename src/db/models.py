@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, LargeBinary, JSON, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, LargeBinary, JSON, UniqueConstraint, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -60,7 +60,7 @@ class UserSession(Base):
     __tablename__ = "user_sessions"
     
     id = Column(Integer, primary_key=True, index=True)
-    api_key_id = Column(Integer, ForeignKey("api_keys.id"), unique=True)
+    api_key_id = Column(Integer, ForeignKey("api_keys.id"))
     session_id = Column(String, index=True)
     model_id = Column(String)  # Store the model/bid ID used to create this session
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -72,5 +72,5 @@ class UserSession(Base):
     
     # Only one active session per API key
     __table_args__ = (
-        UniqueConstraint('api_key_id', name='unique_api_key_session'),
+        Index('unique_active_api_key_session', 'api_key_id', unique=True, postgresql_where='is_active = true'),
     ) 
