@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # Local encryption key (for development)
     MASTER_ENCRYPTION_KEY: str | None = Field(default=os.getenv("MASTER_ENCRYPTION_KEY"))
     
+    # Automation feature flag
+    AUTOMATION_FEATURE_ENABLED: bool = Field(default=os.getenv("AUTOMATION_FEATURE_ENABLED", "False").lower() == "true")
+    
     class Config:
         env_file = ".env"
         env_file_encoding = 'utf-8'

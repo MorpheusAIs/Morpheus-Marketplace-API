@@ -68,6 +68,11 @@ async def execute_proxy_router_operation(
     try:
         async with httpx.AsyncClient() as client:
             if method.upper() == "POST":
+                # Log the request details
+                logger.info(f"Making POST request to {full_url}")
+                logger.info(f"Request data: {data}")
+                logger.info(f"Request headers: {request_headers}")
+                
                 response = await client.post(
                     full_url,
                     json=data,
@@ -77,6 +82,11 @@ async def execute_proxy_router_operation(
                     timeout=30.0
                 )
             elif method.upper() == "GET":
+                # Log the request details
+                logger.info(f"Making GET request to {full_url}")
+                logger.info(f"Request params: {params}")
+                logger.info(f"Request headers: {request_headers}")
+                
                 response = await client.get(
                     full_url,
                     params=params,

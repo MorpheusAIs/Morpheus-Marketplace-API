@@ -59,6 +59,7 @@ Thumbs.db
 # Logs
 logs/
 *.log
+debug_log.txt
 
 # Local configuration
 config.local.json 

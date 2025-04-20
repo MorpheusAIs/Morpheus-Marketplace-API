@@ -12,13 +12,41 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# Install and configure PostgreSQL if not present
+echo "Checking PostgreSQL installation..."
+if ! command -v psql &> /dev/null; then
+    echo "Installing PostgreSQL..."
+    sudo yum install postgresql postgresql-server postgresql-devel postgresql-contrib -y
+    sudo postgresql-setup initdb
+    sudo systemctl enable postgresql
+    sudo systemctl start postgresql
+    echo "PostgreSQL installed and started"
+fi
+
+# Install and configure Redis if not present
+echo "Checking Redis installation..."
+if ! command -v redis-cli &> /dev/null; then
+    echo "Installing Redis..."
+    sudo yum install redis -y
+    sudo systemctl enable redis
+    sudo systemctl start redis
+    echo "Redis installed and started"
+fi
+
+# Get actual service names - typical for Amazon Linux 2023
+POSTGRES_SERVICE="postgresql.service"
+REDIS_SERVICE="redis.service"
+
+echo "Using PostgreSQL service: $POSTGRES_SERVICE"
+echo "Using Redis service: $REDIS_SERVICE"
+
 # Create the systemd service file
 echo "Creating systemd service file..."
-cat > /etc/systemd/system/morpheus-api.service << 'EOL'
+cat > /etc/systemd/system/morpheus-api.service << EOL
 [Unit]
 Description=Morpheus API Gateway
-After=network.target postgresql.service redis.service
-Requires=postgresql.service redis.service
+After=network.target ${POSTGRES_SERVICE} ${REDIS_SERVICE}
+Requires=${POSTGRES_SERVICE} ${REDIS_SERVICE}
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -68,13 +96,55 @@ if [ ! -d "/home/ec2-user/venv" ]; then
     exit 1
 fi
 
+# Verify .env file exists
+if [ ! -f "/home/ec2-user/morpheus-API/.env" ]; then
+    echo "Warning: .env file not found in /home/ec2-user/morpheus-API/"
+    echo "Please ensure you have created the .env file with proper configuration"
+    read -p "Press Enter to continue anyway, or Ctrl+C to cancel..."
+fi
+
 # Ensure proper ownership
 chown -R ec2-user:ec2-user /home/ec2-user/morpheus-API
 chown -R ec2-user:ec2-user /home/ec2-user/venv
 
+# Verify services are running
+echo "Verifying required services..."
+for service in "$POSTGRES_SERVICE" "$REDIS_SERVICE"; do
+    if ! systemctl is-active --quiet "$service"; then
+        echo "Starting $service..."
+        systemctl start "$service"
+    fi
+    echo "$service is running"
+done
+
+# Setting up PostgreSQL user and database if not already done
+if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='morpheus_user'" | grep -q 1; then
+    echo "PostgreSQL user 'morpheus_user' already exists"
+else
+    echo "Creating PostgreSQL user and database..."
+    sudo -u postgres psql -c "CREATE USER morpheus_user WITH PASSWORD 'your_password';"
+    sudo -u postgres psql -c "CREATE DATABASE morpheus_db;"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE morpheus_db TO morpheus_user;"
+    echo "PostgreSQL user and database created"
+fi
+
+# Configure Redis password if needed
+if ! grep -q "requirepass" /etc/redis/redis.conf 2>/dev/null; then
+    echo "Configuring Redis password..."
+    echo "requirepass your_redis_password" | sudo tee -a /etc/redis/redis.conf
+    sudo systemctl restart redis
+    echo "Redis password configured"
+fi
+
 # Reload systemd
 echo "Reloading systemd..."
 systemctl daemon-reload
+
+# Stop existing service if running
+if systemctl is-active --quiet morpheus-api; then
+    echo "Stopping existing morpheus-api service..."
+    systemctl stop morpheus-api
+fi
 
 # Enable and start service
 echo "Enabling and starting service..."
@@ -91,4 +161,13 @@ echo "To monitor logs in real-time, run: journalctl -u morpheus-api -f"
 echo "======================================================"
 
 # Show initial logs
-journalctl -u morpheus-api -n 50 --no-pager 
+journalctl -u morpheus-api -n 50 --no-pager
+
+# Final status check
+echo "======================================================"
+echo "Service Status Summary:"
+echo "--------------------"
+echo "PostgreSQL: $(systemctl is-active $POSTGRES_SERVICE)"
+echo "Redis: $(systemctl is-active $REDIS_SERVICE)"
+echo "Morpheus API: $(systemctl is-active morpheus-api)"
+echo "======================================================" 

@@ -15,11 +15,14 @@ from pydantic import BaseModel, Field
 
 from ...dependencies import get_api_key_user, api_key_header
 from ...db.database import get_db
-from ...db.models import User
+from ...db.models import User, APIKey
 from ...schemas import openai as openai_schemas
 from ...crud import session as session_crud
 from ...crud import api_key as api_key_crud
 from ...core.config import settings
+from ...crud import automation as automation_crud
+from ...core.model_routing import model_router
+from ...services import session_service
 
 router = APIRouter(tags=["Chat"])
 
@@ -44,6 +47,69 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = 0.0
     session_id: Optional[str] = Field(None, description="Optional session ID to use for this request. If not provided, the system will use the session associated with the API key.")
 
+async def _handle_automated_session_creation(
+    db: AsyncSession,
+    user: User,
+    db_api_key: APIKey,
+    requested_model: Optional[str]
+) -> Optional[str]:
+    """
+    Helper method to handle automated session creation.
+    
+    Returns:
+        session_id if a session was created, None otherwise
+    """
+    logger = logging.getLogger(__name__)
+    
+    # Check system-wide feature flag first
+    if not settings.AUTOMATION_FEATURE_ENABLED:
+        logger.info("Automation feature is disabled system-wide")
+        return None
+        
+    # Check if automation is enabled for the user in their settings
+    automation_settings = await automation_crud.get_automation_settings(db, user.id)
+    
+    # If settings don't exist yet, create them with automation enabled by default
+    if not automation_settings:
+        logger.info(f"No automation settings found for user {user.id} - creating default settings with automation enabled")
+        automation_settings = await automation_crud.create_automation_settings(
+            db=db,
+            user_id=user.id,
+            is_enabled=True,  # Enable automation by default
+            session_duration=3600  # Default 1 hour session
+        )
+    # If settings exist but automation is disabled, log and return None
+    elif not automation_settings.is_enabled:
+        logger.info(f"Automation is explicitly disabled for user {user.id}")
+        return None
+    
+    # Automation is enabled - create a new session
+    logger.info(f"Automation enabled for user {user.id} - creating new session")
+    
+    # Get target model from model router
+    target_model = model_router.get_target_model(requested_model)
+    logger.info(f"Target model: {target_model} (requested: {requested_model})")
+    
+    # Create new session with target model
+    session_duration = automation_settings.session_duration
+    try:
+        logger.info(f"Attempting to create automated session for user {user.id} with model {target_model}, duration {session_duration}")
+        new_session = await session_service.create_automated_session(
+            db, user, db_api_key, target_model, session_duration
+        )
+        session_id = new_session.session_id
+        logger.info(f"Created new automated session: {session_id}")
+        
+        # Add a small delay to ensure the session is fully registered
+        logger.info("Adding a brief delay to ensure session is fully registered")
+        await asyncio.sleep(1.0)  # 1 second delay
+        return session_id
+    except Exception as e:
+        logger.error(f"Error creating automated session: {e}")
+        logger.exception(e)  # Log full stack trace
+        # Return None to fall back to manual session handling
+        return None
+
 @router.post("/completions", response_model=None)
 async def create_chat_completion(
     request_data: ChatCompletionRequest,
@@ -52,11 +118,7 @@ async def create_chat_completion(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Create a chat completion.
-    
-    This implementation connects to the proxy-router to interact with the selected model.
-    The session is automatically retrieved from the database based on the API key,
-    or can be explicitly provided in the request body via session_id parameter.
+    Create a chat completion with automatic session creation if enabled.
     """
     # Check if we have a valid user from the API key
     if not user:
@@ -66,16 +128,23 @@ async def create_chat_completion(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    # Set up logging for this request
+    logger = logging.getLogger(__name__)
+    logger.info(f"Processing chat completion request for user {user.id}")
+    
     # Convert the request data to a dictionary and then to JSON
-    json_body = request_data.dict(exclude_none=True)
+    json_body = request_data.model_dump(exclude_none=True)
     session_id = json_body.pop("session_id", None)
-    # Remove model field as it's not needed by proxy-router
-    json_body.pop("model", None)
+    requested_model = json_body.pop("model", None)
     body = json.dumps(json_body).encode('utf-8')
+    
+    # Log the original request details
+    logger.info(f"Original request - session_id: {session_id}, model: {requested_model}")
     
     # If no session_id from body, try to get from database
     if not session_id and user.api_keys:
         try:
+            logger.info("No session_id in request, attempting to retrieve or create one")
             api_key_prefix = user.api_keys[0].key_prefix
             db_api_key = await api_key_crud.get_api_key_by_prefix(db, api_key_prefix)
             
@@ -88,27 +157,46 @@ async def create_chat_completion(
             # Get session associated with the API key
             session = await session_crud.get_session_by_api_key_id(db, db_api_key.id)
             
-            if not session or not session.is_active:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No active session found for API key. Please create a session first using /session/modelsession endpoint."
+            if session and session.is_active:
+                # Use the session ID from the database
+                session_id = session.session_id
+                logger.info(f"Using existing session ID from database: {session_id}")
+            else:
+                logger.info("No active session found, attempting automated session creation")
+                # No active session - try automated session creation
+                automated_session_id = await _handle_automated_session_creation(
+                    db, user, db_api_key, requested_model
                 )
-            
-            # Use the session ID from the database
-            session_id = session.session_id
-            logging.info(f"Using session ID from database: {session_id}")
-        except HTTPException:
-            # Re-raise HTTP exceptions
+                
+                if automated_session_id:
+                    session_id = automated_session_id
+                    logger.info(f"Successfully created automated session: {session_id}")
+                    
+                    # Add a small delay to ensure the session is fully registered
+                    logger.info("Adding a brief delay to ensure session is fully registered")
+                    await asyncio.sleep(1.0)  # 1 second delay
+                else:
+                    # Automation disabled or failed - return error
+                    logger.error("Automation is disabled or failed to create session")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="No active session found. Please create a session first using /session/modelsession endpoint."
+                    )
+        except HTTPException as http_exc:
+            # Re-raise HTTP exceptions with logging
+            logger.error(f"HTTP exception during session handling: {http_exc.detail}")
             raise
         except Exception as e:
-            logging.error(f"Error looking up session: {e}")
+            logger.error(f"Error in session handling: {e}")
+            logger.exception(e)  # Log full stack trace
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error retrieving session: {str(e)}"
+                detail=f"Error handling session: {str(e)}"
             )
     
     # If we still don't have a session_id, return an error
     if not session_id:
+        logger.error("No session ID after all attempts")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No session ID provided in request and no active session found for API key"
@@ -116,6 +204,9 @@ async def create_chat_completion(
     
     # Forward request to proxy-router
     endpoint = f"{settings.PROXY_ROUTER_URL}/v1/chat/completions"
+    
+    # Add session_id to both the URL and as a query parameter for maximum compatibility
+    endpoint = f"{endpoint}?session_id={session_id}"
     
     # Create basic auth header - this is critical
     auth_str = f"{settings.PROXY_ROUTER_USERNAME}:{settings.PROXY_ROUTER_PASSWORD}"
@@ -126,44 +217,89 @@ async def create_chat_completion(
         "authorization": f"Basic {auth_b64}",
         "Content-Type": "application/json",
         "accept": "text/event-stream",
-        "session_id": session_id
+        "session_id": session_id,
+        "X-Session-ID": session_id  # Try an alternate header format
     }
     
-    logging.info(f"Making request to {endpoint} with session_id: {session_id}")
-    logging.info(f"Headers: {headers}")
+    logger.info(f"Making request to {endpoint} with session_id: {session_id}")
+    logger.info(f"Using session_id in header, URL parameter, and X-Session-ID header")
     
     # Handle streaming only - assume all requests are streaming
     async def stream_generator():
         try:
+            # Try a direct request first - sometimes streaming mode causes issues
+            logger.info("Trying direct request to proxy router")
             async with httpx.AsyncClient() as client:
-                async with client.stream(
-                    "POST",
+                response = await client.post(
                     endpoint,
                     content=body,
                     headers=headers,
                     timeout=60.0
-                ) as response:
-                    # Log response info
-                    logging.info(f"Proxy router response status: {response.status_code}")
-                    logging.info(f"Proxy router response headers: {response.headers}")
-                    if response.status_code != 200:
-                        error_msg = f"Proxy router returned non-200 status: {response.status_code}"
-                        logging.error(error_msg)
+                )
+                
+                # Log response info
+                logger.info(f"Direct request response status: {response.status_code}")
+                
+                if response.status_code != 200:
+                    error_msg = f"Proxy router returned non-200 status: {response.status_code}"
+                    error_type = "ProxyRouterError" # Default type
+                    logger.error(error_msg)
+                    try:
+                        error_text = response.text
+                        logger.error(f"Error content: {error_text}")
+
+                        # Try to parse JSON response
                         try:
-                            error_content = await response.aread()
-                            logging.error(f"Error content: {error_content.decode('utf-8')}")
-                        except:
-                            pass
-                        
-                        yield f"data: {{\"error\": {{\"message\": \"{error_msg}\", \"type\": \"StreamingError\"}}}}\n\n"
-                        return
-                    
-                    # Simply forward the stream response with minimal processing
-                    async for chunk in response.aiter_bytes():
-                        yield chunk.decode('utf-8')
-        
+                            error_json = json.loads(error_text)
+                            logger.error(f"Parsed error JSON: {json.dumps(error_json, indent=2)}")
+
+                            # Include more detailed error in the response to client
+                            if isinstance(error_json, dict) and "error" in error_json:
+                                error_data = error_json["error"]
+                                if isinstance(error_data, dict):
+                                    # Try to extract message and type if error is a dict
+                                    error_msg = error_data.get("message", str(error_data))
+                                    error_type = error_data.get("type", "ProxyRouterError") # Extract type if available
+                                elif isinstance(error_data, str):
+                                    # If error is just a string
+                                    error_msg = error_data
+                                error_msg = f"Proxy router error: {error_msg}" # Prepend context
+
+                        except json.JSONDecodeError:
+                            logger.error("Could not parse error response as JSON")
+                            # Use the raw text if JSON parsing fails but we have text
+                            error_msg = f"Proxy router error: {error_text}" if error_text else error_msg
+
+                    except Exception as read_err:
+                        logger.error(f"Error reading response content: {str(read_err)}")
+
+                    # Yield the potentially more detailed error
+                    # Use json.dumps to handle escaping of quotes within the message
+                    error_payload = json.dumps({"error": {"message": error_msg, "type": error_type}})
+                    yield f"data: {error_payload}\\n\\n"
+                    return
+                
+                # For successful responses, just yield the response text
+                # If it's a streaming response, it will be in the correct format
+                # If it's a regular JSON response, we'll wrap it in the SSE format
+                response_text = response.text
+                
+                # Check if this is already SSE format
+                if response_text.startswith("data:"):
+                    # It's already in SSE format, pass it through
+                    yield response_text
+                else:
+                    # Try to parse as JSON and wrap in SSE format
+                    try:
+                        result = json.loads(response_text)
+                        yield f"data: {json.dumps(result)}\n\n"
+                    except:
+                        # Just wrap the raw text
+                        yield f"data: {response_text}\n\n"
+                
         except Exception as e:
-            logging.error(f"Error in streaming: {e}")
+            logger.error(f"Error in streaming: {e}")
+            logger.exception(e)  # Log full stack trace
             yield f"data: {{\"error\": {{\"message\": \"Error in streaming: {str(e)}\", \"type\": \"StreamingError\"}}}}\n\n"
     
     return StreamingResponse(

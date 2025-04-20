@@ -58,7 +58,7 @@ async def create_session(
     api_key_id: int, 
     blockchain_session_id: str, 
     model_id: str,
-    session_duration: int = 3600
+    expires_at: datetime
 ) -> UserSession:
     """
     Create a new session for an API key.
@@ -69,7 +69,7 @@ async def create_session(
         api_key_id: API key ID
         blockchain_session_id: Blockchain session ID (hex)
         model_id: Model or bid ID used to create the session
-        session_duration: Session duration in seconds (default: 1 hour)
+        expires_at: Calculated expiration timestamp for the session
         
     Returns:
         Created UserSession object
@@ -80,9 +80,6 @@ async def create_session(
             delete(UserSession)
             .where(UserSession.api_key_id == api_key_id)
         )
-        
-        # Calculate expiration time
-        expires_at = datetime.utcnow() + timedelta(seconds=session_duration)
         
         # Create new session
         db_session = UserSession(

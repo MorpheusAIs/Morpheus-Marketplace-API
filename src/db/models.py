@@ -20,6 +20,7 @@ class User(Base):
     # Relationships
     api_keys = relationship("APIKey", back_populates="user", cascade="all, delete-orphan")
     private_key = relationship("UserPrivateKey", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    automation_settings = relationship("UserAutomationSettings", back_populates="user", uselist=False, cascade="all, delete-orphan")
 
 
 # APIKey model (if not already defined)
@@ -73,4 +74,18 @@ class UserSession(Base):
     # Only one active session per API key
     __table_args__ = (
         Index('unique_active_api_key_session', 'api_key_id', unique=True, postgresql_where='is_active = true'),
-    ) 
+    )
+
+# User Automation Settings for session automation
+class UserAutomationSettings(Base):
+    __tablename__ = "user_automation_settings"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True)  # One automation setting per user
+    is_enabled = Column(Boolean, default=False)  # Whether automation is enabled for this user (disabled by default)
+    session_duration = Column(Integer, default=3600)  # Default session duration in seconds
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    user = relationship("User", back_populates="automation_settings") 

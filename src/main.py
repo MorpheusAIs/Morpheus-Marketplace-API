@@ -12,8 +12,9 @@ import os
 import pathlib
 import datetime
 from fastapi.routing import APIRoute, APIRouter
+from contextlib import asynccontextmanager
 
-from src.api.v1 import models, chat, session, auth
+from src.api.v1 import models, chat, session, auth, automation
 from src.core.config import settings
 from src.api.v1.custom_route import FixedDependencyAPIRoute
 
@@ -24,10 +25,14 @@ from src.db.database import engine
 # Import what we need for proper SQL execution
 from sqlalchemy import text
 
-# Configure logging
+# Set up detailed logging
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/app.log'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -244,7 +249,7 @@ async def startup_event():
     Perform startup initialization.
     """
     # Make sure all routers use our fixed route class
-    for router in [auth, models, chat, session]:
+    for router in [auth, models, chat, session, automation]:
         update_router_route_class(router, FixedDependencyAPIRoute)
     
     logger.info("Application startup complete. Using FixedDependencyAPIRoute for all routes.")
@@ -271,12 +276,14 @@ update_router_route_class(auth)
 update_router_route_class(models)
 update_router_route_class(chat)
 update_router_route_class(session)
+update_router_route_class(automation)
 
 # Include routers
 app.include_router(auth, prefix=f"{settings.API_V1_STR}/auth")
 app.include_router(models, prefix=f"{settings.API_V1_STR}/models")
 app.include_router(chat, prefix=f"{settings.API_V1_STR}/chat")
 app.include_router(session, prefix=f"{settings.API_V1_STR}/session")
+app.include_router(automation, prefix=f"{settings.API_V1_STR}/automation")
 
 # Default routes - using standard APIRoute for these endpoints to avoid dependency resolution issues
 # Reset the route_class temporarily for these specific routes
