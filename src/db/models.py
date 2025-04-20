@@ -2,6 +2,8 @@ from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, L
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
+from sqlalchemy.dialects.postgresql import JSONB, TEXT
+from sqlalchemy.sql import func
 
 Base = declarative_base()
 
@@ -20,6 +22,7 @@ class User(Base):
     # Relationships
     api_keys = relationship("APIKey", back_populates="user", cascade="all, delete-orphan")
     private_key = relationship("UserPrivateKey", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    delegations = relationship("Delegation", back_populates="user", cascade="all, delete-orphan")
 
 
 # APIKey model (if not already defined)
@@ -74,3 +77,19 @@ class UserSession(Base):
     __table_args__ = (
         Index('unique_active_api_key_session', 'api_key_id', unique=True, postgresql_where='is_active = true'),
     ) 
+
+
+class Delegation(Base):
+    __tablename__ = "delegations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    delegate_address = Column(String, nullable=False, index=True)
+    # Store the signed delegation object (EIP-712 structure + signature) as JSON or Text
+    # Using TEXT might be simpler initially if the structure isn't fixed
+    signed_delegation_data = Column(TEXT, nullable=False)
+    expiry = Column(DateTime, nullable=True) # Optional expiry from delegation
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    is_active = Column(Boolean, default=True, index=True)
+
+    user = relationship("User", back_populates="delegations") 

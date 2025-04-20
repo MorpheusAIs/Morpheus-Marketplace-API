@@ -1,7 +1,7 @@
 import os
 from typing import List, Union, Optional, Any
 from pydantic_settings import BaseSettings
-from pydantic import PostgresDsn, RedisDsn, Field, AnyHttpUrl, field_validator
+from pydantic import PostgresDsn, RedisDsn, Field, AnyHttpUrl, field_validator, SecretStr
 from dotenv import load_dotenv
 
 # Load .env file variables
@@ -59,12 +59,18 @@ class Settings(BaseSettings):
     # AWS KMS specific settings
     AWS_REGION: str | None = Field(default=os.getenv("AWS_REGION", "us-east-1"))
     AWS_ACCESS_KEY_ID: str | None = Field(default=os.getenv("AWS_ACCESS_KEY_ID"))
-    AWS_SECRET_ACCESS_KEY: str | None = Field(default=os.getenv("AWS_SECRET_ACCESS_KEY"))
+    AWS_SECRET_ACCESS_KEY: str | None = None
     AWS_SESSION_TOKEN: str | None = Field(default=os.getenv("AWS_SESSION_TOKEN"))
     
-    # Local encryption key (for development)
-    MASTER_ENCRYPTION_KEY: str | None = Field(default=os.getenv("MASTER_ENCRYPTION_KEY"))
+    # Development mode local encryption (not for production)
+    MASTER_ENCRYPTION_KEY: SecretStr = SecretStr("generate_this_with_openssl_rand_-hex_32")
     
+    # Proxy Router
+    PROXY_ROUTER_URL: AnyHttpUrl = AnyHttpUrl("http://localhost:8545")
+
+    # Delegation
+    GATEWAY_DELEGATE_ADDRESS: str = "0xGatewayDelegateAccountAddressPlaceholder"
+
     class Config:
         env_file = ".env"
         env_file_encoding = 'utf-8'

@@ -1,20 +1,24 @@
 # Authentication routes 
-from typing import List, Any
+from typing import List, Any, Optional
 
-from fastapi import APIRouter, HTTPException, status, Depends, Body, Request
+from fastapi import APIRouter, HTTPException, status, Depends, Body, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.security import create_access_token, create_refresh_token
 from src.crud import user as user_crud
 from src.crud import api_key as api_key_crud
 from src.crud import private_key as private_key_crud
+from src.crud import delegation as delegation_crud
 from src.db.database import get_db
 from src.schemas.user import UserCreate, UserResponse, UserLogin
 from src.schemas.token import Token, TokenRefresh, TokenPayload
 from src.schemas.api_key import APIKeyCreate, APIKeyResponse, APIKeyDB
 from src.schemas import private_key as private_key_schemas
-from src.dependencies import CurrentUser
+from src.schemas import delegation as delegation_schemas
+from src.dependencies import CurrentUser, get_current_active_user
 from src.db.models import User
+from src.core import security, key_vault
+from src.core.config import settings
 
 router = APIRouter(tags=["Auth"])
 
@@ -254,6 +258,93 @@ async def delete_private_key(
         )
     
     return {"message": "Private key deleted successfully"}
+
+# New endpoint for managing delegations
+@router.post("/delegation", response_model=delegation_schemas.DelegationRead)
+async def store_delegation(
+    delegation_in: delegation_schemas.DelegationCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Allows an authenticated user to store a signed delegation.
+    The frontend should construct and sign the delegation using the Gator SDK.
+    """
+    # Validate that the delegation is for the configured gateway delegate address
+    if delegation_in.delegate_address != settings.GATEWAY_DELEGATE_ADDRESS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Delegation must be granted to the configured gateway address: {settings.GATEWAY_DELEGATE_ADDRESS}"
+        )
+
+    # Optional: Deactivate previous delegations if only one active is allowed
+    existing_active = delegation_crud.get_active_delegation_by_user(db, user_id=current_user.id)
+    if existing_active:
+        delegation_crud.set_delegation_inactive(db, db_delegation=existing_active)
+
+    db_delegation = delegation_crud.create_user_delegation(
+        db=db, delegation=delegation_in, user_id=current_user.id
+    )
+    return db_delegation
+
+@router.get("/delegation", response_model=List[delegation_schemas.DelegationRead])
+async def get_user_delegations(
+    skip: int = 0,
+    limit: int = 10,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Retrieves the user's stored delegations.
+    """
+    delegations = delegation_crud.get_delegations_by_user(db, user_id=current_user.id, skip=skip, limit=limit)
+    return delegations
+
+@router.get("/delegation/active", response_model=Optional[delegation_schemas.DelegationRead])
+async def get_active_user_delegation(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Retrieves the user's currently active delegation, if any.
+    """
+    delegation = delegation_crud.get_active_delegation_by_user(db, user_id=current_user.id)
+    return delegation
+
+@router.delete("/delegation/{delegation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_delegation(
+    delegation_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Deletes a specific delegation for the user.
+    Alternatively, could just mark it inactive.
+    """
+    db_delegation = delegation_crud.get_delegation(db, delegation_id=delegation_id)
+    if not db_delegation or db_delegation.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delegation not found")
+
+    # Option 1: Mark inactive
+    # delegation_crud.set_delegation_inactive(db, db_delegation=db_delegation)
+
+    # Option 2: Hard delete
+    delegation_crud.delete_delegation(db, db_delegation=db_delegation)
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+# Endpoint to check private key status
+@router.get("/private-key/status", response_model=private_key_schemas.PrivateKeyStatus)
+async def get_private_key_status(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(CurrentUser)
+):
+    """
+    Check if a user has a private key registered.
+    Does not return the actual key, only status information.
+    """
+    has_key = await private_key_crud.user_has_private_key(db, current_user.id)
+    return {"has_private_key": has_key}
 
 # Export router
 auth_router = router 
