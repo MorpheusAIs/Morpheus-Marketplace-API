@@ -37,6 +37,9 @@ COPY ./src ./src
 COPY ./alembic ./alembic
 COPY alembic.ini .
 
+# Create logs directory before changing ownership
+RUN mkdir /app/logs
+
 # Change ownership to non-root user
 RUN chown -R app:app /app
 
@@ -46,7 +49,6 @@ USER app
 # Expose the port the app runs on
 EXPOSE 8000
 
-# Run alembic migrations and then start the application
-# Note: In production, you might run migrations as a separate step/job
-# Using gunicorn as the ASGI server
-CMD ["sh", "-c", "alembic upgrade head && gunicorn -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:8000 src.main:app"] 
+# Run only the application using gunicorn
+# Migrations should be run separately (e.g., manually or via a dedicated job)
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "4", "-b", "0.0.0.0:8000", "src.main:app"] 
