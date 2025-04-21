@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     # Automation feature flag
     AUTOMATION_FEATURE_ENABLED: bool = Field(default=os.getenv("AUTOMATION_FEATURE_ENABLED", "False").lower() == "true")
     
+    # Delegation
+    GATEWAY_DELEGATE_ADDRESS: str = "0xGatewayDelegateAccountAddressPlaceholder" # Placeholder
+    
     class Config:
         env_file = ".env"
         env_file_encoding = 'utf-8'

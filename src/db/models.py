@@ -1,7 +1,8 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, LargeBinary, JSON, UniqueConstraint, Index
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, LargeBinary, JSON, UniqueConstraint, Index, TEXT
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
+from sqlalchemy.sql import func
 
 Base = declarative_base()
 
@@ -21,6 +22,7 @@ class User(Base):
     api_keys = relationship("APIKey", back_populates="user", cascade="all, delete-orphan")
     private_key = relationship("UserPrivateKey", back_populates="user", uselist=False, cascade="all, delete-orphan")
     automation_settings = relationship("UserAutomationSettings", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    delegations = relationship("Delegation", back_populates="user", cascade="all, delete-orphan")
 
 
 # APIKey model (if not already defined)
@@ -88,4 +90,20 @@ class UserAutomationSettings(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
-    user = relationship("User", back_populates="automation_settings") 
+    user = relationship("User", back_populates="automation_settings")
+
+# Add Delegation Model
+class Delegation(Base):
+    __tablename__ = "delegations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    delegate_address = Column(String, nullable=False, index=True)
+    # Store the signed delegation object (EIP-712 structure + signature) as JSON or Text
+    # Using TEXT might be simpler initially if the structure isn't fixed
+    signed_delegation_data = Column(TEXT, nullable=False)
+    expiry = Column(DateTime, nullable=True) # Optional expiry from delegation
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    is_active = Column(Boolean, default=True, index=True)
+
+    user = relationship("User", back_populates="delegations") 
