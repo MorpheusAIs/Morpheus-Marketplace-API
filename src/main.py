@@ -25,12 +25,16 @@ from src.db.database import engine
 # Import what we need for proper SQL execution
 from sqlalchemy import text
 
+# Define log directory
+log_dir = 'logs'
+os.makedirs(log_dir, exist_ok=True) # Create log directory if it doesn't exist
+
 # Set up detailed logging
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/app.log'),
+        logging.FileHandler(os.path.join(log_dir, 'app.log')), # Use os.path.join
         logging.StreamHandler()
     ]
 )

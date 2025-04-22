@@ -7,6 +7,7 @@ import os
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 import base64
+from datetime import datetime, timedelta
 
 from ...core.config import settings
 from ...db.database import get_db
@@ -545,12 +546,15 @@ async def create_bid_session(
         
         # Store session information in the database
         session_duration = session_data.get("sessionDuration", 3600)
+        now = datetime.utcnow()
+        expires_at = now + timedelta(seconds=session_duration)
+        
         db_session = await session_crud.create_session(
             db, 
             api_key.id, 
             blockchain_session_id, 
             bid_id,
-            session_duration
+            expires_at
         )
         
         result = {
@@ -866,12 +870,15 @@ async def create_model_session(
             
             # Store session information in the database
             session_duration = session_data.sessionDuration
+            now = datetime.utcnow()
+            expires_at = now + timedelta(seconds=session_duration)
+            
             db_session = await session_crud.create_session(
                 db, 
                 api_key.id, 
                 blockchain_session_id, 
                 model_id,
-                session_duration
+                expires_at
             )
                 
             result = {
