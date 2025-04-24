@@ -36,7 +36,6 @@ def upgrade() -> None:
     # op.drop_index('ix_delegations_id', table_name='delegations')                 # Commented out: Index doesn't exist / Table drop handles this
     # op.drop_index('ix_delegations_is_active', table_name='delegations')          # Commented out: Index doesn't exist / Table drop handles this
     # op.drop_index('ix_delegations_user_id', table_name='delegations')           # Commented out: Index doesn't exist / Table drop handles this
-    op.drop_table('delegations')
     # ### end Alembic commands ###
 
 
