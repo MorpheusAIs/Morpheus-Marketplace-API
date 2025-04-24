@@ -32,10 +32,10 @@ def upgrade() -> None:
     sa.UniqueConstraint('user_id')
     )
     op.create_index(op.f('ix_user_automation_settings_id'), 'user_automation_settings', ['id'], unique=False)
-    op.drop_index('ix_delegations_delegate_address', table_name='delegations')
-    op.drop_index('ix_delegations_id', table_name='delegations')
-    op.drop_index('ix_delegations_is_active', table_name='delegations')
-    op.drop_index('ix_delegations_user_id', table_name='delegations')
+    # op.drop_index('ix_delegations_delegate_address', table_name='delegations') # Commented out: Index doesn't exist / Table drop handles this
+    # op.drop_index('ix_delegations_id', table_name='delegations')                 # Commented out: Index doesn't exist / Table drop handles this
+    # op.drop_index('ix_delegations_is_active', table_name='delegations')          # Commented out: Index doesn't exist / Table drop handles this
+    # op.drop_index('ix_delegations_user_id', table_name='delegations')           # Commented out: Index doesn't exist / Table drop handles this
     op.drop_table('delegations')
     # ### end Alembic commands ###
 

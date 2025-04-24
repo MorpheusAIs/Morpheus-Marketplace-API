@@ -1,270 +1,315 @@
 #!/bin/bash
-# Morpheus API Gateway - AWS EC2 Setup Script (Amazon Linux)
-# This script sets up the Morpheus API Gateway on an Amazon Linux EC2 instance
+# Morpheus API Gateway - AWS EC2 Setup and Management Script
+# This script provides four functionalities:
+# 1. Initial EC2 Setup: Complete setup from a fresh EC2 instance
+# 2. Service Restart: For code updates without full reinstall
+# 3. Manual Gunicorn Start: Direct start without systemd
+# 4. Manual Setup Instructions: For reference/troubleshooting
 
-set -e  # Exit on error
+#-----------------------------------------------------
+# SECTION 1: INITIAL EC2 SETUP (Fresh Instance)
+#-----------------------------------------------------
+setup_fresh_instance() {
+    echo "======================================================"
+    echo "Starting Fresh EC2 Instance Setup"
+    echo "======================================================"
 
-echo "======================================================"
-echo "Morpheus API Gateway - AWS EC2 Setup"
-echo "======================================================"
+    # System Updates and Dependencies
+    echo "Installing system dependencies..."
+    sudo yum update -y
+    sudo yum install git gcc make openssl-devel bzip2-devel libffi-devel zlib-devel postgresql-devel postgresql-libs python3.11 python3.11-pip python3.11-devel docker -y
 
-# Update system packages
-echo "Updating system packages..."
-sudo yum update -y
+    # Setup Docker
+    echo "Setting up Docker..."
+    sudo systemctl enable docker
+    sudo systemctl start docker
+    sudo usermod -a -G docker ec2-user
+    sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    sudo chmod +x /usr/local/bin/docker-compose
 
-# Install essential development tools
-echo "Installing development tools..."
-sudo yum install git gcc make openssl-devel bzip2-devel libffi-devel zlib-devel -y
+    # Variables
+    PROJECT_DIR="/home/ec2-user/morpheus-API"
+    VENV_DIR="/home/ec2-user/venv-morpheus"
+    SERVICE_USER="ec2-user"
 
-# Install Git
-echo "Installing Git..."
-sudo yum install git -y
+    # Clean any existing installation
+    sudo rm -rf $PROJECT_DIR
+    sudo rm -rf $VENV_DIR
 
-# Setup GitHub SSH keys
-echo "Setting up GitHub SSH access..."
-if [ ! -f ~/.ssh/id_ed25519 ]; then
-  echo "Generating new SSH key..."
-  ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -C "bowtiedbluefin.eth@gmail.com"
-  eval "$(ssh-agent -s)"
-  ssh-add ~/.ssh/id_ed25519
-  echo "Add this public key to your GitHub repository deploy keys:"
-  cat ~/.ssh/id_ed25519.pub
-  echo ""
-  echo "Press Enter after you've added the key to GitHub..."
-  read -r
-  # Test SSH connection
-  ssh -T git@github.com -o StrictHostKeyChecking=no || true
-fi
+    # Clone Repository (assumes SSH key is already configured)
+    echo "Cloning repository..."
+    sudo -u $SERVICE_USER git clone --depth 1 -b dev-k1 git@github.com:bowtiedbluefin/morpheus-API.git $PROJECT_DIR
+    cd $PROJECT_DIR
 
-# Install Docker and Docker Compose
-echo "Installing Docker..."
-sudo yum install docker -y
-sudo systemctl enable docker
-sudo systemctl start docker
-sudo usermod -a -G docker ec2-user
-echo "NOTE: You may need to log out and back in for the docker group permissions to take effect"
+    # Setup Python Environment
+    echo "Setting up Python virtual environment..."
+    sudo -u $SERVICE_USER python3.11 -m venv $VENV_DIR
+    source $VENV_DIR/bin/activate
+    pip install --upgrade pip
 
-# Install Docker Compose
-echo "Installing Docker Compose..."
-sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-sudo chmod +x /usr/local/bin/docker-compose
+    # Install Dependencies
+    echo "Installing Python dependencies..."
+    if [ -f "pyproject.toml" ] || [ -f "poetry.lock" ]; then
+        pip install poetry
+        poetry install --no-root --no-interaction
+    elif [ -f "requirements.txt" ]; then
+        pip install -r requirements.txt
+    else
+        echo "No dependency file found. Cannot proceed."
+        exit 1
+    fi
+    pip install gunicorn
 
-# Install Python and dependencies (more robust approach)
-echo "Installing Python and dependencies..."
-sudo yum install python3.11 python3.11-pip python3.11-devel -y
+    # Configure Environment
+    echo "Setting up environment variables..."
+    if [ -f .env.example ]; then
+        sudo -u $SERVICE_USER cp .env.example .env
+        
+        # Generate secure keys
+        JWT_SECRET=$(openssl rand -hex 32)
+        ENCRYPTION_KEY=$(openssl rand -hex 32)
 
-# Install PostgreSQL client libraries (required for psycopg2)
-echo "Installing PostgreSQL client libraries..."
-sudo yum install postgresql-devel postgresql-libs -y
+        # Update .env file
+        sudo sed -i 's/^POSTGRES_USER=.*/POSTGRES_USER=morpheus_user/' .env
+        sudo sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=morpheus_password/' .env
+        sudo sed -i 's/^POSTGRES_DB=.*/POSTGRES_DB=morpheus_db/' .env
+        sudo sed -i 's|^DATABASE_URL=.*|DATABASE_URL=postgresql+asyncpg://morpheus_user:morpheus_password@db:5432/morpheus_db|' .env
+        sudo sed -i 's/^REDIS_PASSWORD=.*/REDIS_PASSWORD=your_redis_password/' .env
+        sudo sed -i 's|^REDIS_URL=.*|REDIS_URL=redis://:your_redis_password@redis:6379/0|' .env
+        sudo sed -i "s/^JWT_SECRET_KEY=.*/JWT_SECRET_KEY=$JWT_SECRET/" .env
+        sudo sed -i "s/^MASTER_ENCRYPTION_KEY=.*/MASTER_ENCRYPTION_KEY=$ENCRYPTION_KEY/" .env
+        sudo sed -i 's/^ACCESS_TOKEN_EXPIRE_MINUTES=.*/ACCESS_TOKEN_EXPIRE_MINUTES=30/' .env
+        sudo sed -i 's/^REFRESH_TOKEN_EXPIRE_DAYS=.*/REFRESH_TOKEN_EXPIRE_DAYS=7/' .env
+        sudo sed -i 's/^AUTOMATION_FEATURE_ENABLED=.*/AUTOMATION_FEATURE_ENABLED=true/' .env
 
-# Create virtual environment for local development
-echo "Setting up Python virtual environment..."
-python3 -m pip install --user virtualenv
-python3 -m virtualenv ~/venv
-echo "Adding virtualenv activation to .bashrc..."
-echo 'source ~/venv/bin/activate' >> ~/.bashrc
-echo "To activate the virtual environment in your current session, run: source ~/venv/bin/activate"
-#  Sometimes you need to do this?? source venv311/bin/activate
+        # Contract Settings (TESTNET)
+        sudo sed -i 's/^DIAMOND_CONTRACT_ADDRESS=.*/DIAMOND_CONTRACT_ADDRESS=0xb8C55cD613af947E73E262F0d3C54b7211Af16CF/' .env
+        sudo sed -i 's/^CONTRACT_ADDRESS=.*/CONTRACT_ADDRESS=0x34a285a1b1c166420df5b6630132542923b5b27e/' .env
+        sudo sed -i 's|^BLOCKSCOUT_API_URL=.*|BLOCKSCOUT_API_URL="https://arbitrum-sepolia.blockscout.com/api/v2"|' .env
+        sudo sed -i 's/^CHAIN_ID=.*/CHAIN_ID=421614/' .env
+        sudo sed -i 's/^ENVIRONMENT=.*/ENVIRONMENT=development/' .env
 
-# Clone the repository (using SSH)
-echo "Cloning the repository..."
-git clone -b dev-k1 git@github.com:bowtiedbluefin/morpheus-API.git
-cd morpheus-API
+        # Placeholder for FALLBACK_PRIVATE_KEY
+        sudo sed -i 's/^FALLBACK_PRIVATE_KEY=.*/FALLBACK_PRIVATE_KEY=xxxx_REPLACE_THIS_MANUALLY_xxxx/' .env
+        echo "WARNING: Update FALLBACK_PRIVATE_KEY in .env manually!"
 
-# Setup environment variables
-echo "Setting up environment variables..."
-if [ -f .env.example ]; then
-  cp .env.example .env
-else
-  echo "WARNING: .env.example not found. Creating blank .env file."
-  touch .env
-fi
+        sudo chown $SERVICE_USER:$SERVICE_USER .env
+        sudo chmod 600 .env
+    fi
 
-# Generate secure keys for JWT and encryption
-echo "Generating secure keys..."
-JWT_SECRET=$(openssl rand -hex 32)
-ENCRYPTION_KEY=$(openssl rand -hex 32)
+    # Start Database and Redis
+    echo "Starting PostgreSQL and Redis containers..."
+    sudo docker-compose up -d db redis
+    sleep 10 # Wait for containers to initialize
 
-# Update .env file with secure keys
-sed -i "s/JWT_SECRET_KEY=.*/JWT_SECRET_KEY=$JWT_SECRET/" .env
-sed -i "s/MASTER_ENCRYPTION_KEY=.*/MASTER_ENCRYPTION_KEY=$ENCRYPTION_KEY/" .env
+    # Setup systemd service
+    echo "Setting up systemd service..."
+    setup_systemd_service
 
-# Verify docker-compose.yml exists
-if [ ! -f docker-compose.yml ]; then
-  echo "ERROR: docker-compose.yml not found. Please create one before proceeding."
-  exit 1
-fi
+    echo "======================================================"
+    echo "Initial Setup Complete!"
+    echo "IMPORTANT: Update FALLBACK_PRIVATE_KEY in $PROJECT_DIR/.env"
+    echo "Check status: sudo systemctl status morpheus-api"
+    echo "Check logs: sudo journalctl -u morpheus-api -f"
+    echo "======================================================"
+}
 
-# Start the application using Docker Compose
-echo "Starting the application using Docker Compose..."
-sudo docker-compose up -d
+#-----------------------------------------------------
+# SECTION 2: SERVICE RESTART (For Code Updates)
+#-----------------------------------------------------
+restart_service() {
+    echo "======================================================"
+    echo "Restarting Morpheus API Service"
+    echo "======================================================"
 
-# Check container status and logs
-echo "Checking container status..."
-sudo docker-compose ps
+    PROJECT_DIR="/home/ec2-user/morpheus-API"
+    cd $PROJECT_DIR
 
-echo "Showing recent container logs to verify startup..."
-sudo docker-compose logs --tail=50
+    echo "Pulling latest changes..."
+    git pull
 
-# Check if containers are healthy
-CONTAINER_COUNT=$(sudo docker-compose ps -q | wc -l)
-if [ "$CONTAINER_COUNT" -lt 1 ]; then
-  echo "WARNING: No containers appear to be running. Docker Compose may have failed."
-  echo "You can try starting the application manually with uvicorn instead."
-fi
+    echo "Restarting services..."
+    # Restart DB/Redis only if necessary (e.g., schema changes)
+    # sudo docker-compose restart db redis
 
-# Since only DB and Redis are running, start the API directly
-echo "======================================================"
-echo "Starting the API directly with uvicorn..."
-echo "======================================================"
-cd ~/morpheus-API
-source ~/venv/bin/activate
+    echo "Restarting API service..."
+    sudo systemctl restart morpheus-api
 
-# Check the repository structure and install dependencies
-echo "Checking repository structure..."
-ls -la
+    echo "Service restart complete. Checking status..."
+    sudo systemctl status morpheus-api --no-pager
+    echo "Check logs with: sudo journalctl -u morpheus-api -f"
+}
 
-# Install dependencies based on what files exist
-if [ -f "pyproject.toml" ]; then
-  echo "Found pyproject.toml, installing with poetry..."
-  pip install poetry
-  poetry install --no-root
-elif [ -f "poetry.lock" ]; then
-  echo "Found poetry.lock, installing with poetry..."
-  pip install poetry
-  poetry install --no-root
-elif [ -f "requirements.txt" ]; then
-  echo "Found requirements.txt, installing dependencies..."
-  pip install -r requirements.txt
-else
-  echo "No dependency file found. Installing minimal dependencies..."
-  pip install fastapi uvicorn sqlalchemy psycopg2-binary redis alembic pydantic python-dotenv email-validator boto3 jinja2
-  pip install "pydantic[email]" "python-jose[cryptography]" "passlib[bcrypt]"
-fi
+#-----------------------------------------------------
+# SECTION 3: MANUAL GUNICORN START
+#-----------------------------------------------------
+manual_start() {
+    echo "======================================================"
+    echo "Starting Morpheus API Manually with Gunicorn"
+    echo "======================================================"
 
-pip install uvicorn gunicorn
+    PROJECT_DIR="/home/ec2-user/morpheus-API"
+    VENV_DIR="/home/ec2-user/venv-morpheus"
 
-# Look for the entry point file
-echo "Looking for the API entry point..."
-find . -name "main.py" | sort
+    # Find main application file
+    if [ -f "$PROJECT_DIR/src/main.py" ]; then
+        UVICORN_MODULE_PATH="src.main"
+    elif [ -f "$PROJECT_DIR/app/main.py" ]; then
+        UVICORN_MODULE_PATH="app.main"
+    elif [ -f "$PROJECT_DIR/main.py" ]; then
+        UVICORN_MODULE_PATH="main"
+    else
+        echo "ERROR: Could not find main.py"
+        exit 1
+    fi
 
-# Set PYTHONPATH to include the current directory
-export PYTHONPATH=$PYTHONPATH:$(pwd)
+    cd $PROJECT_DIR
+    source $VENV_DIR/bin/activate
 
-# Ask for the path to the main.py file
-read -p "Enter the relative path to main.py (e.g., src/main.py or app/main.py): " MAIN_PATH
+    echo "Starting Gunicorn..."
+    echo "Logs will appear below. Press Ctrl+C to stop."
+    echo "To run in background, use: nohup ./awsonboard manual-start &"
+    
+    # Run Gunicorn in the foreground
+    PYTHONPATH=$PROJECT_DIR gunicorn $UVICORN_MODULE_PATH:app \
+        --workers 4 \
+        --worker-class uvicorn.workers.UvicornWorker \
+        --bind 0.0.0.0:8000 \
+        --access-logfile - \
+        --error-logfile -
+}
 
-# Use default if no input
-if [ -z "$MAIN_PATH" ]; then
-  # Try to guess based on typical FastAPI patterns
-  if [ -f "src/main.py" ]; then
-    MAIN_PATH="src/main.py"
-  elif [ -f "app/main.py" ]; then
-    MAIN_PATH="app/main.py"
-  elif [ -f "main.py" ]; then
-    MAIN_PATH="main.py"
-  else
-    echo "Could not find main.py, please enter the path manually:"
-    read -p "Path to main.py: " MAIN_PATH
-  fi
-fi
+#-----------------------------------------------------
+# Helper Functions
+#-----------------------------------------------------
+setup_systemd_service() {
+    # Find main application file
+    if [ -f "$PROJECT_DIR/src/main.py" ]; then
+        UVICORN_MODULE_PATH="src.main"
+    elif [ -f "$PROJECT_DIR/app/main.py" ]; then
+        UVICORN_MODULE_PATH="app.main"
+    elif [ -f "$PROJECT_DIR/main.py" ]; then
+        UVICORN_MODULE_PATH="main"
+    else
+        echo "ERROR: Could not find main.py"
+        exit 1
+    fi
 
-# Extract the module path for uvicorn
-MODULE_PATH=$(echo $MAIN_PATH | sed 's/\.py$//' | sed 's/\//./g')
+    # Create systemd service file
+    sudo bash -c "cat > /etc/systemd/system/morpheus-api.service" << EOL
+[Unit]
+Description=Morpheus API Gateway (Gunicorn)
+After=network.target docker.service
+Requires=docker.service
 
-# Start uvicorn in the background
-echo "Starting uvicorn with $MODULE_PATH:app..."
-nohup uvicorn $MODULE_PATH:app --host 0.0.0.0 --port 8000 > uvicorn.log 2>&1 &
+[Service]
+User=$SERVICE_USER
+Group=$(id -gn $SERVICE_USER)
+WorkingDirectory=$PROJECT_DIR
+Environment="PATH=$VENV_DIR/bin"
+Environment="PYTHONPATH=$PROJECT_DIR"
+ExecStart=$VENV_DIR/bin/gunicorn $UVICORN_MODULE_PATH:app \\
+    --workers 4 \\
+    --worker-class uvicorn.workers.UvicornWorker \\
+    --bind 0.0.0.0:8000
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/morpheus-api.log
+StandardError=append:/var/log/morpheus-api.log
 
-echo "API should now be running on port 8000"
-echo "You can check the logs with: tail -f ~/morpheus-API/uvicorn.log"
-echo "Make sure your EC2 security group allows inbound traffic on port 8000"
+[Install]
+WantedBy=multi-user.target
+EOL
 
-echo "======================================================"
-echo "Setup complete! The API should be running on port 8000."
-echo "You can access the API documentation at http://your-ec2-ip:8000/docs"
-echo ""
-echo "IMPORTANT NEXT STEPS:"
-echo "1. Configure security groups to allow traffic on port 8000"
-echo "2. Set up a domain and SSL certificate (recommended for production)"
-echo "3. Configure AWS KMS for secure key management in production"
-echo "4. Update environment variables in .env for production use"
-echo "======================================================"
+    # Enable and start service
+    sudo systemctl daemon-reload
+    sudo systemctl enable morpheus-api
+}
 
-# Instructions for manual setup without Docker
-echo "======================================================"
-echo "ALTERNATIVE: Manual setup without Docker"
-echo "======================================================"
-echo "If Docker Compose is not working properly, you can set up the application manually:"
-echo ""
-echo "1. Activate the virtual environment:"
-echo "   source ~/venv/bin/activate"
-echo ""
-echo "2. Install Poetry (dependency manager):"
-echo "   pip install poetry"
-echo ""
-echo "3. Install dependencies:"
-echo "   poetry install"
-echo "   # Or if Poetry has issues:"
-echo "   pip install -r requirements.txt"
-echo ""
-echo "4. Install and configure PostgreSQL:"
-echo "   sudo yum install postgresql postgresql-server postgresql-devel postgresql-contrib -y"
-echo "   sudo postgresql-setup initdb"
-echo "   sudo systemctl enable postgresql"
-echo "   sudo systemctl start postgresql"
-echo "   sudo -u postgres psql -c \"CREATE USER morpheus_user WITH PASSWORD 'your_password';\""
-echo "   sudo -u postgres psql -c \"CREATE DATABASE morpheus_db;\""
-echo "   sudo -u postgres psql -c \"GRANT ALL PRIVILEGES ON DATABASE morpheus_db TO morpheus_user;\""
-echo ""
-echo "5. Install and configure Redis:"
-echo "   sudo yum install redis -y"
-echo "   sudo systemctl enable redis"
-echo "   sudo systemctl start redis"
-echo "   # Update redis password in /etc/redis/redis.conf if needed:"
-echo "   # requirepass your_redis_password"
-echo "   sudo systemctl restart redis"
-echo ""
-echo "6. Run database migrations:"
-echo "   cd ~/morpheus-api-python"
-echo "   source ~/venv/bin/activate"
-echo "   alembic upgrade head"
-echo ""
-echo "7. Start the application with uvicorn (likely more reliable than Docker):"
-echo "   cd ~/morpheus-api-python"
-echo "   source ~/venv/bin/activate"
-echo "   pip install uvicorn gunicorn"
-echo "   uvicorn src.main:app --host 0.0.0.0 --port 8000"
-echo "   # Or for production:"
-echo "   gunicorn -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:8000 src.main:app"
-echo "======================================================"
+#-----------------------------------------------------
+# SECTION 4: MANUAL SETUP INSTRUCTIONS
+#-----------------------------------------------------
+show_manual_instructions() {
+    cat << 'EOL'
+====================================================
+MANUAL SETUP INSTRUCTIONS
+====================================================
 
-echo "To set up as a systemd service for automatic startup:"
-echo "======================================================"
-echo "1. Create a systemd service file for direct uvicorn startup (more reliable):"
-echo "   sudo nano /etc/systemd/system/morpheus-api.service"
-echo ""
-echo "2. Add the following content:"
-echo "   [Unit]"
-echo "   Description=Morpheus API Gateway"
-echo "   After=network.target postgresql.service redis.service"
-echo ""
-echo "   [Service]"
-echo "   User=ec2-user"
-echo "   WorkingDirectory=/home/ec2-user/morpheus-api-python"
-echo "   Environment=\"PATH=/home/ec2-user/venv/bin\""
-echo "   ExecStart=/home/ec2-user/venv/bin/uvicorn src.main:app --host 0.0.0.0 --port 8000"
-echo "   Restart=always"
-echo ""
-echo "   [Install]"
-echo "   WantedBy=multi-user.target"
-echo ""
-echo "3. Enable and start the service:"
-echo "   sudo systemctl daemon-reload"
-echo "   sudo systemctl enable morpheus-api"
-echo "   sudo systemctl start morpheus-api"
-echo ""
-echo "4. Check service status:"
-echo "   sudo systemctl status morpheus-api"
-echo "   journalctl -u morpheus-api -f"
-echo "======================================================" 
+If you need to set up components manually or troubleshoot:
+
+1. System Dependencies:
+   sudo yum update -y
+   sudo yum install git gcc make openssl-devel bzip2-devel libffi-devel zlib-devel postgresql-devel postgresql-libs python3.11 python3.11-pip python3.11-devel docker -y
+
+2. Docker Setup:
+   sudo systemctl enable docker
+   sudo systemctl start docker
+   sudo usermod -a -G docker ec2-user
+   # Install Docker Compose
+   sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+   sudo chmod +x /usr/local/bin/docker-compose
+
+3. Python Environment:
+   python3.11 -m venv ~/venv-morpheus
+   source ~/venv-morpheus/bin/activate
+   pip install --upgrade pip
+   pip install poetry
+   poetry install
+   # Or: pip install -r requirements.txt
+
+4. Database/Redis (Docker):
+   cd ~/morpheus-API
+   docker-compose up -d db redis
+
+5. Environment Variables:
+   cp .env.example .env
+   # Edit .env with your settings
+   nano .env
+
+6. Run Application:
+   # Direct with uvicorn:
+   uvicorn src.main:app --host 0.0.0.0 --port 8000
+   # Or with gunicorn:
+   gunicorn -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:8000 src.main:app
+
+7. Systemd Service:
+   sudo nano /etc/systemd/system/morpheus-api.service
+   sudo systemctl daemon-reload
+   sudo systemctl enable morpheus-api
+   sudo systemctl start morpheus-api
+
+Common Commands:
+- Check service status: sudo systemctl status morpheus-api
+- View logs: sudo journalctl -u morpheus-api -f
+- Restart service: sudo systemctl restart morpheus-api
+- Check Docker containers: docker-compose ps
+- View Docker logs: docker-compose logs db redis
+====================================================
+EOL
+}
+
+#-----------------------------------------------------
+# Main Script Logic
+#-----------------------------------------------------
+case "$1" in
+    "setup")
+        setup_fresh_instance
+        ;;
+    "restart")
+        restart_service
+        ;;
+    "manual-start")
+        manual_start
+        ;;
+    "manual")
+        show_manual_instructions
+        ;;
+    *)
+        echo "Usage: $0 {setup|restart|manual-start|manual}"
+        echo "  setup        - Set up a fresh EC2 instance"
+        echo "  restart      - Restart services after code update"
+        echo "  manual-start - Start the API manually with Gunicorn"
+        echo "  manual       - Show manual setup instructions"
+        exit 1
+        ;;
+esac 
