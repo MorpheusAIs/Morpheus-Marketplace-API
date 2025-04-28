@@ -3,9 +3,12 @@ name = "morpheus-api-python"
 version = "0.1.0"
 description = "Morpheus API Gateway connecting Web2 clients to the Morpheus-Lumerin AI Marketplace"
 authors = ["Morpheus Team <dev@morpheus.com>"]
+packages = [
+    { include = "src" }
+]
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = ">=3.11,<3.12"
 fastapi = "^0.110.0"
 uvicorn = "^0.27.0"
 pydantic = "^2.6.0"
@@ -33,4 +36,10 @@ mypy = "^1.5.1"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api" 
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "."
+]
+asyncio_mode = "auto" 

@@ -19,7 +19,8 @@ class User(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
-    api_keys = relationship("APIKey", back_populates="user", cascade="all, delete-orphan")
+    api_keys = relationship("APIKey", back_populates="user")
+    sessions = relationship("Session", back_populates="user")
     private_key = relationship("UserPrivateKey", back_populates="user", uselist=False, cascade="all, delete-orphan")
     automation_settings = relationship("UserAutomationSettings", back_populates="user", uselist=False, cascade="all, delete-orphan")
     delegations = relationship("Delegation", back_populates="user", cascade="all, delete-orphan")
@@ -40,7 +41,7 @@ class APIKey(Base):
     
     # Relationships
     user = relationship("User", back_populates="api_keys")
-    session = relationship("UserSession", back_populates="api_key", uselist=False, cascade="all, delete-orphan")
+    sessions = relationship("Session", back_populates="api_key")
 
 
 # UserPrivateKey model (focus of this implementation)
@@ -57,26 +58,6 @@ class UserPrivateKey(Base):
     # Relationships
     user = relationship("User", back_populates="private_key")
 
-
-# New model to store Session information associated with API keys
-class UserSession(Base):
-    __tablename__ = "user_sessions"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    api_key_id = Column(Integer, ForeignKey("api_keys.id"))
-    session_id = Column(String, index=True)
-    model_id = Column(String)  # Store the model/bid ID used to create this session
-    created_at = Column(DateTime, default=datetime.utcnow)
-    expires_at = Column(DateTime, nullable=True)
-    is_active = Column(Boolean, default=True)
-    
-    # Relationships
-    api_key = relationship("APIKey", back_populates="session")
-    
-    # Only one active session per API key
-    __table_args__ = (
-        Index('unique_active_api_key_session', 'api_key_id', unique=True, postgresql_where='is_active = true'),
-    )
 
 # User Automation Settings for session automation
 class UserAutomationSettings(Base):
@@ -106,4 +87,29 @@ class Delegation(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     is_active = Column(Boolean, default=True, index=True)
 
-    user = relationship("User", back_populates="delegations") 
+    user = relationship("User", back_populates="delegations")
+
+class Session(Base):
+    __tablename__ = "sessions"
+    
+    id = Column(String, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    api_key_id = Column(Integer, ForeignKey("api_keys.id"), nullable=True, index=True)
+    model = Column(String, nullable=False)
+    type = Column(String, nullable=False)  # "automated" or "manual"
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    is_active = Column(Boolean, default=True, index=True)
+    
+    user = relationship("User", back_populates="sessions")
+    api_key = relationship("APIKey", back_populates="sessions")
+    
+    # Constraint to enforce one active session per API key
+    __table_args__ = (
+        Index('sessions_active_api_key_unique', 'api_key_id', 'is_active', 
+              unique=True, postgresql_where=is_active.is_(True)),
+    )
+    
+    @property
+    def is_expired(self):
+        return datetime.utcnow() > self.expires_at 

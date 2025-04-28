@@ -1,12 +1,12 @@
 # This file makes api.v1 a Python package 
 from fastapi import APIRouter
 
-from src.api.v1.custom_route import FixedDependencyAPIRoute
-from src.api.v1.auth import router as auth_router
-from src.api.v1.models import router as models_router
-from src.api.v1.chat import router as chat_router
-from src.api.v1.session import router as session_router
-from src.api.v1.automation import router as automation_router
+from .custom_route import FixedDependencyAPIRoute
+from .auth import router as auth_router
+from .models import router as models_router
+from .chat import router as chat_router
+from .session import router as session_router
+from .automation import router as automation_router
 
 # Create routers with the fixed dependency route class
 models = APIRouter(route_class=FixedDependencyAPIRoute)

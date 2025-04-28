@@ -8,15 +8,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 import base64
 from datetime import datetime, timedelta
+from sqlalchemy import select
 
 from ...core.config import settings
 from ...db.database import get_db
-from ...dependencies import get_api_key_user
-from ...db.models import User
+from ...dependencies import get_api_key_user, get_current_api_key
+from ...db.models import User, Session, APIKey
 from ...crud import session as session_crud
 from ...crud import api_key as api_key_crud
 from ...crud import private_key as private_key_crud
 from ...services.proxy_router import execute_proxy_router_operation, handle_proxy_error
+from ...services import session_service
+from ...core.model_routing import model_router
 
 # Define the request models
 class SessionInitRequest(BaseModel):
@@ -213,108 +216,41 @@ async def create_bid_session(
             detail="API key not found"
         )
     
-    # Check if there's already an active session
-    existing_session = await session_crud.get_session_by_api_key_id(db, api_key.id)
-    if existing_session and existing_session.is_active:
-        # Close the existing session
-        try:
-            # Try to close session but don't raise an error if it fails
-            try:
-                # Use our updated utility function that supports fallback private key
-                await execute_proxy_router_operation(
-                    endpoint=f"blockchain/sessions/{existing_session.session_id}/close",
-                    user_id=user.id,
-                    db=db
-                )
-            except Exception as e:
-                # Log the error but continue with creating a new session
-                logger.warning(f"Failed to close existing session: {str(e)}")
-            
-            # Mark the session as inactive in the database
-            await session_crud.update_session_status(db, existing_session.id, False)
-        except Exception as close_err:
-            logger.error(f"Error updating session status: {close_err}")
-            # Continue despite error - we'll create a new session anyway
-    
-    # Get environment variables needed for blockchain operations
-    chain_id = os.getenv("CHAIN_ID")
-    diamond_contract_address = os.getenv("DIAMOND_CONTRACT_ADDRESS")
-    contract_address = os.getenv("CONTRACT_ADDRESS")
-    
-    # Log environment variable details
-    logger.debug(f"PROXY_ROUTER_URL: {settings.PROXY_ROUTER_URL}")
-    logger.debug(f"PROXY_ROUTER_USERNAME: {settings.PROXY_ROUTER_USERNAME}")
-    logger.debug(f"CHAIN_ID: {chain_id}")
-    logger.debug(f"DIAMOND_CONTRACT_ADDRESS: {diamond_contract_address}")
-    logger.debug(f"CONTRACT_ADDRESS: {contract_address}")
-    
-    # Setup auth for proxy router
-    auth = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
-    
-    # Try to fetch bid details to get provider address
-    provider_address = None
     try:
-        # Build the URL to get bid details
-        bid_details_url = f"{settings.PROXY_ROUTER_URL}/blockchain/bids/{bid_id}"
-        logger.info(f"Fetching bid details from: {bid_details_url}")
+        # First, deactivate any existing sessions for this API key
+        await session_crud.deactivate_existing_sessions(db, api_key.id)
         
-        # Make the request to get bid details
-        async with httpx.AsyncClient() as client:
-            bid_response = await client.get(
-                bid_details_url,
-                auth=auth,
-                timeout=10.0
-            )
-            bid_response.raise_for_status()
-            bid_details = bid_response.json()
+        # Use the proxy router to get bid details and create a session
+        provider_address = None
+        try:
+            bid_details_url = f"{settings.PROXY_ROUTER_URL}/blockchain/bids/{bid_id}"
+            logger.info(f"Fetching bid details from: {bid_details_url}")
             
-            # Log the bid details (excluding any sensitive information)
-            logger.debug(f"Bid details: {json.dumps(bid_details)}")
+            bid_response = await execute_proxy_router_operation(
+                "GET",
+                f"blockchain/bids/{bid_id}",
+                max_retries=2
+            )
             
             # Extract provider address from bid details if available
-            if isinstance(bid_details, dict):
-                # The structure depends on the proxy router API, adjust as needed
-                if "bid" in bid_details and "provider" in bid_details["bid"]:
-                    provider_address = bid_details["bid"]["provider"]
-                elif "provider" in bid_details:
-                    provider_address = bid_details["provider"]
+            if isinstance(bid_response, dict):
+                if "bid" in bid_response and "provider" in bid_response["bid"]:
+                    provider_address = bid_response["bid"]["provider"]
+                elif "provider" in bid_response:
+                    provider_address = bid_response["provider"]
             
             if provider_address:
                 logger.info(f"Found provider address in bid details: {provider_address}")
             else:
                 logger.warning("Could not find provider address in bid details")
-            
-    except Exception as e:
-        logger.error(f"Error fetching bid details: {str(e)}")
-        logger.warning("Proceeding without provider address, may fail if required by proxy router")
-    
-    # Create the session with the bid using our updated utility function with fallback
-    try:
-        # Make direct call to avoid nested async issues
-        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-        from sqlalchemy.orm import sessionmaker
+        except Exception as e:
+            logger.error(f"Error fetching bid details: {str(e)}")
+            logger.warning("Proceeding without provider address, may fail if required by proxy router")
         
-        # Get a private key (with possible fallback)
-        private_key, using_fallback = await private_key_crud.get_private_key_with_fallback(db, user.id)
-        
-        if not private_key:
-            logger.error("No private key found and no fallback configured")
-            return {
-                "error": {
-                    "message": "No private key found and no fallback key configured. Please set up your private key.",
-                    "type": "PrivateKeyNotFound"
-                }
-            }
-        
-        # Log private key details (but not the actual key)
-        if using_fallback:
-            logger.warning(f"DEBUGGING MODE: Using fallback private key for user {user.id} - this should never be used in production!")
-            logger.debug(f"Fallback key length: {len(private_key)}")
-            logger.debug(f"Fallback key first 6 chars: {private_key[:6]}...")
-        else:
-            logger.info(f"Using user's private key for user {user.id}")
-            logger.debug(f"User key length: {len(private_key)}")
-            logger.debug(f"User key first 6 chars: {private_key[:6]}...")
+        # Get required environment variables
+        chain_id = os.getenv("CHAIN_ID")
+        diamond_contract_address = os.getenv("DIAMOND_CONTRACT_ADDRESS")
+        contract_address = os.getenv("CONTRACT_ADDRESS")
         
         # Check for required environment variables
         missing_vars = []
@@ -328,235 +264,83 @@ async def create_bid_session(
         if missing_vars:
             error_msg = f"Missing required environment variables: {', '.join(missing_vars)}"
             logger.error(error_msg)
-            return {
-                "error": {
-                    "message": error_msg,
-                    "type": "ConfigurationError",
-                    "missing_vars": missing_vars
-                }
-            }
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=error_msg
+            )
         
-        # Add required parameters to the session data if not present
-        if not isinstance(session_data, dict):
-            session_data = {"sessionDuration": 3600}
-            
-        # Add required parameters to the session data if not present
-        if "sessionDuration" not in session_data:
-            session_data["sessionDuration"] = 3600  # Default to 1 hour
-            
-        # Add required flags to the session data if not present (using same defaults as the direct call)
-        if "failover" not in session_data:
-            session_data["failover"] = False
-            
-        if "directPayment" not in session_data:
-            session_data["directPayment"] = False
-            
-        # Add provider information if not present
-        if "provider" not in session_data and provider_address:
-            logger.info(f"Adding provider address from bid details: {provider_address}")
-            session_data["provider"] = provider_address
-            
-        # Add chain_id to the session data if not present
-        if "chainId" not in session_data and chain_id:
-            try:
-                session_data["chainId"] = int(chain_id)
-            except ValueError:
-                logger.warning(f"Could not convert chain_id '{chain_id}' to integer, using as string")
-                session_data["chainId"] = chain_id
-            
-        # Add contract addresses to the session data
-        if "modelContract" not in session_data and contract_address:
-            session_data["modelContract"] = contract_address
-            
-        if "diamondContract" not in session_data and diamond_contract_address:
-            session_data["diamondContract"] = diamond_contract_address
-            
-        # Log the final session data
-        logger.debug(f"Final session data: {json.dumps(session_data)}")
+        # Prepare session data
+        session_data_dict = {
+            "sessionDuration": session_data.sessionDuration,
+            "failover": session_data.failover,
+            "directPayment": session_data.directPayment
+        }
         
-        # Now make direct call to the proxy-router
-        full_url = f"{settings.PROXY_ROUTER_URL}/blockchain/bids/{bid_id}/session"
-        auth = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
+        # Add provider information if available
+        if provider_address:
+            session_data_dict["provider"] = provider_address
+            
+        # Add chain_id and contract addresses
+        try:
+            session_data_dict["chainId"] = int(chain_id)
+        except ValueError:
+            session_data_dict["chainId"] = chain_id
+            
+        session_data_dict["modelContract"] = contract_address
+        session_data_dict["diamondContract"] = diamond_contract_address
         
-        # Add chain ID header which may be needed by the proxy router
+        # Get a private key (with possible fallback)
+        private_key, using_fallback = await private_key_crud.get_private_key_with_fallback(db, user.id)
+        
+        if not private_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No private key found and no fallback key configured"
+            )
+        
+        # Add private key to headers
         headers = {
             "X-Private-Key": private_key,
             "X-Chain-ID": chain_id,
             "X-Contract-Address": diamond_contract_address
         }
         
-        # Log request details
-        logger.info(f"Making request to proxy-router: {full_url}")
-        logger.debug(f"Request body: {json.dumps(session_data)}")
-        logger.debug(f"Using auth user: {settings.PROXY_ROUTER_USERNAME}")
-        logger.debug(f"Headers: {json.dumps({k: ('***' if k == 'X-Private-Key' else v) for k, v in headers.items()})}")
-        
-        # Monitor start time for request
-        import time
-        start_time = time.time()
-        
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    full_url,
-                    json=session_data,
-                    headers=headers,
-                    auth=auth,
-                    timeout=30.0
-                )
-                
-                # Log response time
-                elapsed = time.time() - start_time
-                logger.info(f"Response received in {elapsed:.2f} seconds")
-                
-                # Log response details
-                logger.info(f"Response status code: {response.status_code}")
-                logger.debug(f"Response headers: {dict(response.headers)}")
-                
-                # Try to parse the response as JSON
-                raw_text = response.text
-                
-                try:
-                    response_json = response.json()
-                    logger.debug(f"Response body (JSON): {json.dumps(response_json)}")
-                except Exception as json_err:
-                    logger.error(f"Could not parse response as JSON: {str(json_err)}")
-                    logger.debug(f"Raw response text: {raw_text}")
-                    
-                    # Try to clean the response and parse it again
-                    try:
-                        # Clean the raw response text
-                        cleaned_text = raw_text.strip().replace('\n', '')
-                        response_json = json.loads(cleaned_text)
-                        logger.info(f"Successfully parsed JSON after cleaning")
-                    except Exception as clean_err:
-                        logger.error(f"Could not parse response as JSON even after cleaning: {str(clean_err)}")
-                        # If we can't parse as JSON, create a error response
-                        return {
-                            "error": {
-                                "message": f"Proxy router returned non-JSON response: {raw_text[:200]}...",
-                                "type": "InvalidResponseFormat",
-                                "raw_response": raw_text[:500] if len(raw_text) > 500 else raw_text
-                            }
-                        }
-                
-                # Inspect response for error information
-                if 400 <= response.status_code < 600:
-                    error_detail = "Unknown error"
-                    if isinstance(response_json, dict):
-                        if "error" in response_json:
-                            error_detail = response_json["error"]
-                        elif "detail" in response_json:
-                            error_detail = response_json["detail"]
-                        elif "message" in response_json:
-                            error_detail = response_json["message"]
-                    
-                    logger.error(f"Proxy router error response: {error_detail}")
-                    return {
-                        "error": {
-                            "message": f"Proxy router error: {error_detail}",
-                            "type": "ProxyRouterError",
-                            "status_code": response.status_code,
-                            "response": response_json
-                        }
-                    }
-                
-                # Force raising if there was an HTTP error
-                response.raise_for_status()
-                
-                session_response = response_json
-                
-                # Extra validation for the response format
-                if not isinstance(session_response, dict):
-                    error_msg = f"Unexpected response format from proxy-router: {type(session_response)}"
-                    logger.error(error_msg)
-                    return {
-                        "error": {
-                            "message": error_msg,
-                            "type": "InvalidResponseFormat",
-                            "response": session_response
-                        }
-                    }
-                
-                # Log the session ID if we can find it
-                session_id = session_response.get("session", {}).get("id")
-                if session_id:
-                    logger.info(f"Successfully created session with ID: {session_id}")
-                else:
-                    logger.warning("Session ID not found in response")
-                    logger.debug(f"Response keys: {list(session_response.keys())}")
-                    if "session" in session_response:
-                        logger.debug(f"Session keys: {list(session_response['session'].keys())}")
-                    else:
-                        logger.debug(f"Complete response: {json.dumps(session_response)}")
-            
-            except httpx.HTTPError as http_err:
-                logger.error(f"HTTP error: {str(http_err)}")
-                if hasattr(http_err, 'response'):
-                    logger.error(f"Response status: {http_err.response.status_code}")
-                    logger.error(f"Response body: {http_err.response.text}")
-                
-                return {
-                    "error": {
-                        "message": f"HTTP error communicating with proxy router: {str(http_err)}",
-                        "type": "HTTPError",
-                        "status_code": http_err.response.status_code if hasattr(http_err, 'response') else 500,
-                        "response": http_err.response.text if hasattr(http_err, 'response') else "No response"
-                    }
-                }
-        
-        # Check for a valid session ID in the response - handle different response formats
-        blockchain_session_id = None
-        
-        # First check common response formats 
-        if isinstance(session_response, dict):
-            # Check for "sessionID" format (direct response from proxy router)
-            if "sessionID" in session_response:
-                blockchain_session_id = session_response["sessionID"]
-                logger.info(f"Found session ID in sessionID field: {blockchain_session_id}")
-            # Handle case where sessionID might have a newline character or spaces
-            elif any(key.strip() == "sessionID" for key in session_response.keys()):
-                for key in session_response.keys():
-                    if key.strip() == "sessionID":
-                        blockchain_session_id = session_response[key]
-                        logger.info(f"Found session ID in sessionID field (after stripping): {blockchain_session_id}")
-                        break
-            # Check for "session.id" format (older format)
-            elif "session" in session_response and isinstance(session_response["session"], dict) and "id" in session_response["session"]:
-                blockchain_session_id = session_response["session"]["id"]
-                logger.info(f"Found session ID in session.id field: {blockchain_session_id}")
-            # Check for direct "id" field
-            elif "id" in session_response:
-                blockchain_session_id = session_response["id"]
-                logger.info(f"Found session ID in id field: {blockchain_session_id}")
-        
-        if not blockchain_session_id:
-            error_msg = "Invalid session response from proxy-router - no session ID found"
-            logger.error(error_msg)
-            logger.error(f"Complete response: {json.dumps(session_response)}")
-            
-            # Instead of raising an exception, return a meaningful error response
-            return {
-                "error": {
-                    "message": error_msg,
-                    "type": "InvalidResponseFormat",
-                    "response": session_response
-                }
-            }
-        
-        # Store session information in the database
-        session_duration = session_data.get("sessionDuration", 3600)
-        now = datetime.utcnow()
-        expires_at = now + timedelta(seconds=session_duration)
-        
-        db_session = await session_crud.create_session(
-            db, 
-            api_key.id, 
-            blockchain_session_id, 
-            bid_id,
-            expires_at
+        # Create session with proxy router
+        response = await execute_proxy_router_operation(
+            "POST",
+            f"blockchain/bids/{bid_id}/session",
+            headers=headers,
+            json=session_data_dict,
+            max_retries=3
         )
         
+        # Extract session ID from response
+        blockchain_session_id = None
+        
+        if isinstance(response, dict):
+            blockchain_session_id = (response.get("sessionID") or 
+                                   response.get("session", {}).get("id") or 
+                                   response.get("id"))
+        
+        if not blockchain_session_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Invalid session response from proxy-router - no session ID found"
+            )
+        
+        # Store session in database using the new session model
+        expiry_time = datetime.utcnow() + timedelta(seconds=session_data.sessionDuration)
+        db_session = await session_crud.create_session(
+            db=db,
+            session_id=blockchain_session_id,
+            api_key_id=api_key.id,
+            user_id=user.id,
+            model=bid_id,
+            session_type="bid",
+            expires_at=expiry_time
+        )
+        
+        # Return success response
         result = {
             "success": True,
             "message": "Session created and associated with API key",
@@ -569,29 +353,24 @@ async def create_bid_session(
             result["note"] = "Private Key not set, using fallback key (FOR DEBUGGING ONLY)"
             
         return result
-    except Exception as e:
+    except ValueError as e:
         logger.error(f"Error creating bid session: {str(e)}")
-        
-        if isinstance(e, httpx.HTTPStatusError):
-            logger.error(f"HTTP Status code: {e.response.status_code}")
-            logger.error(f"Response text: {e.response.text}")
-            
-            # Try to parse error response
-            try:
-                error_json = e.response.json()
-                return {
-                    "error": {
-                        "message": f"Proxy router error: {str(e)}",
-                        "type": "ProxyRouterError",
-                        "status_code": e.response.status_code,
-                        "response": error_json
-                    }
-                }
-            except:
-                pass
-        
-        # Default to the standard error handler
-        return handle_proxy_error(e, "creating bid session")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error creating bid session: {str(e)}")
+        raise HTTPException(
+            status_code=e.response.status_code if hasattr(e, 'response') else 500,
+            detail=f"Error from proxy router: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error creating bid session: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Unexpected error: {str(e)}"
+        )
 
 @router.post("/modelsession")
 async def create_model_session(
@@ -635,288 +414,97 @@ async def create_model_session(
             detail="API key not found"
         )
     
-    # Check if there's already an active session
-    existing_session = await session_crud.get_session_by_api_key_id(db, api_key.id)
-    if existing_session and existing_session.is_active:
-        # Close the existing session
-        try:
-            # Try to close session but don't raise an error if it fails
-            try:
-                # Use our updated utility function that supports fallback private key
-                await execute_proxy_router_operation(
-                    endpoint=f"blockchain/sessions/{existing_session.session_id}/close",
-                    user_id=user.id,
-                    db=db
-                )
-            except Exception as e:
-                # Log the error but continue with creating a new session
-                logger.warning(f"Failed to close existing session: {str(e)}")
-            
-            # Mark the session as inactive in the database
-            await session_crud.update_session_status(db, existing_session.id, False)
-        except Exception as close_err:
-            logger.error(f"Error updating session status: {close_err}")
-            # Continue despite error - we'll create a new session anyway
-    
-    # Create the session with the model using our updated utility function with fallback
     try:
-        # Make direct call to avoid nested async issues
-        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-        from sqlalchemy.orm import sessionmaker
+        # First, deactivate any existing sessions for this API key
+        await session_crud.deactivate_existing_sessions(db, api_key.id)
+        
+        # Prepare session data
+        session_data_dict = {
+            "sessionDuration": session_data.sessionDuration,
+            "failover": session_data.failover,
+            "directPayment": session_data.directPayment
+        }
         
         # Get a private key (with possible fallback)
         private_key, using_fallback = await private_key_crud.get_private_key_with_fallback(db, user.id)
         
         if not private_key:
-            logger.error("No private key found and no fallback configured")
-            return {
-                "error": {
-                    "message": "No private key found and no fallback key configured. Please set up your private key.",
-                    "type": "PrivateKeyNotFound"
-                }
-            }
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No private key found and no fallback key configured"
+            )
         
-        # Log private key details (but not the actual key)
-        if using_fallback:
-            logger.warning(f"DEBUGGING MODE: Using fallback private key for user {user.id} - this should never be used in production!")
-            logger.debug(f"Fallback key length: {len(private_key)}")
-            logger.debug(f"Fallback key first 6 chars: {private_key[:6]}...")
-        else:
-            logger.info(f"Using user's private key for user {user.id}")
-            logger.debug(f"User key length: {len(private_key)}")
-            logger.debug(f"User key first 6 chars: {private_key[:6]}...")
-        
-        # Check proxy router settings
-        logger.debug(f"PROXY_ROUTER_URL: {settings.PROXY_ROUTER_URL}")
-        logger.debug(f"PROXY_ROUTER_USERNAME: {settings.PROXY_ROUTER_USERNAME}")
-        
-        # Prepare the request body with only the required parameters
-        request_body = {
-            "sessionDuration": session_data.sessionDuration,
-            "directPayment": session_data.directPayment,
-            "failover": session_data.failover
-        }
-        
-        # Log the final request body
-        logger.debug(f"Final request body: {json.dumps(request_body)}")
-        
-        # Now make direct call to the proxy-router
-        full_url = f"{settings.PROXY_ROUTER_URL}/blockchain/models/{model_id}/session"
-        auth = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
-        
-        # Add private key header
+        # Add private key to headers
         headers = {
             "X-Private-Key": private_key
         }
         
-        # Log request details
-        logger.info(f"Making request to proxy-router: {full_url}")
-        logger.debug(f"Request body: {json.dumps(request_body)}")
-        logger.debug(f"Using auth user: {settings.PROXY_ROUTER_USERNAME}")
-        logger.debug(f"Headers: {json.dumps({k: ('***' if k == 'X-Private-Key' else v) for k, v in headers.items()})}")
+        # Create session with proxy router
+        response = await execute_proxy_router_operation(
+            "POST",
+            f"blockchain/models/{model_id}/session",
+            headers=headers,
+            json=session_data_dict,
+            max_retries=3
+        )
         
-        # Monitor start time for request
-        import time
-        start_time = time.time()
+        # Extract session ID from response
+        blockchain_session_id = None
         
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    full_url,
-                    json=request_body,
-                    headers=headers,
-                    auth=auth,
-                    timeout=30.0
-                )
-                
-                # Log response time
-                elapsed = time.time() - start_time
-                logger.info(f"Response received in {elapsed:.2f} seconds")
-                
-                # Log response details
-                logger.info(f"Response status code: {response.status_code}")
-                logger.debug(f"Response headers: {dict(response.headers)}")
-                
-                # Try to parse the response as JSON
-                raw_text = response.text
-                
-                try:
-                    response_json = response.json()
-                    logger.debug(f"Response body (JSON): {json.dumps(response_json)}")
-                except Exception as json_err:
-                    logger.error(f"Could not parse response as JSON: {str(json_err)}")
-                    logger.debug(f"Raw response text: {raw_text}")
-                    
-                    # Try to clean the response and parse it again
-                    try:
-                        # Clean the raw response text
-                        cleaned_text = raw_text.strip().replace('\n', '')
-                        response_json = json.loads(cleaned_text)
-                        logger.info(f"Successfully parsed JSON after cleaning")
-                    except Exception as clean_err:
-                        logger.error(f"Could not parse response as JSON even after cleaning: {str(clean_err)}")
-                        # If we can't parse as JSON, create a error response
-                        return {
-                            "error": {
-                                "message": f"Proxy router returned non-JSON response: {raw_text[:200]}...",
-                                "type": "InvalidResponseFormat",
-                                "raw_response": raw_text[:500] if len(raw_text) > 500 else raw_text
-                            }
-                        }
-                
-                # Inspect response for error information
-                if 400 <= response.status_code < 600:
-                    error_detail = "Unknown error"
-                    if isinstance(response_json, dict):
-                        if "error" in response_json:
-                            error_detail = response_json["error"]
-                        elif "detail" in response_json:
-                            error_detail = response_json["detail"]
-                        elif "message" in response_json:
-                            error_detail = response_json["message"]
-                    
-                    logger.error(f"Proxy router error response: {error_detail}")
-                    return {
-                        "error": {
-                            "message": f"Proxy router error: {error_detail}",
-                            "type": "ProxyRouterError",
-                            "status_code": response.status_code,
-                            "response": response_json
-                        }
-                    }
-                
-                # Force raising if there was an HTTP error
-                response.raise_for_status()
-                
-                session_response = response_json
-                
-                # Extra validation for the response format
-                if not isinstance(session_response, dict):
-                    error_msg = f"Unexpected response format from proxy-router: {type(session_response)}"
-                    logger.error(error_msg)
-                    return {
-                        "error": {
-                            "message": error_msg,
-                            "type": "InvalidResponseFormat",
-                            "response": session_response
-                        }
-                    }
-                
-                # Log the session ID if we can find it
-                session_id = session_response.get("session", {}).get("id")
-                if session_id:
-                    logger.info(f"Successfully created session with ID: {session_id}")
-                else:
-                    logger.warning("Session ID not found in response")
-                    logger.debug(f"Response keys: {list(session_response.keys())}")
-                    if "session" in session_response:
-                        logger.debug(f"Session keys: {list(session_response['session'].keys())}")
-                    else:
-                        logger.debug(f"Complete response: {json.dumps(session_response)}")
-            
-            except httpx.HTTPError as http_err:
-                logger.error(f"HTTP error: {str(http_err)}")
-                if hasattr(http_err, 'response'):
-                    logger.error(f"Response status: {http_err.response.status_code}")
-                    logger.error(f"Response body: {http_err.response.text}")
-                
-                return {
-                    "error": {
-                        "message": f"HTTP error communicating with proxy router: {str(http_err)}",
-                        "type": "HTTPError",
-                        "status_code": http_err.response.status_code if hasattr(http_err, 'response') else 500,
-                        "response": http_err.response.text if hasattr(http_err, 'response') else "No response"
-                    }
-                }
-            
-            # Check for a valid session ID in the response - handle different response formats
-            blockchain_session_id = None
-            
-            # First check common response formats 
-            if isinstance(session_response, dict):
-                # Check for "sessionID" format (direct response from proxy router)
-                if "sessionID" in session_response:
-                    blockchain_session_id = session_response["sessionID"]
-                    logger.info(f"Found session ID in sessionID field: {blockchain_session_id}")
-                # Handle case where sessionID might have a newline character or spaces
-                elif any(key.strip() == "sessionID" for key in session_response.keys()):
-                    for key in session_response.keys():
-                        if key.strip() == "sessionID":
-                            blockchain_session_id = session_response[key]
-                            logger.info(f"Found session ID in sessionID field (after stripping): {blockchain_session_id}")
-                            break
-                # Check for "session.id" format (older format)
-                elif "session" in session_response and isinstance(session_response["session"], dict) and "id" in session_response["session"]:
-                    blockchain_session_id = session_response["session"]["id"]
-                    logger.info(f"Found session ID in session.id field: {blockchain_session_id}")
-                # Check for direct "id" field
-                elif "id" in session_response:
-                    blockchain_session_id = session_response["id"]
-                    logger.info(f"Found session ID in id field: {blockchain_session_id}")
-            
-            if not blockchain_session_id:
-                error_msg = "Invalid session response from proxy-router - no session ID found"
-                logger.error(error_msg)
-                logger.error(f"Complete response: {json.dumps(session_response)}")
-                
-                # Instead of raising an exception, return a meaningful error response
-                return {
-                    "error": {
-                        "message": error_msg,
-                        "type": "InvalidResponseFormat",
-                        "response": session_response
-                    }
-                }
-            
-            # Store session information in the database
-            session_duration = session_data.sessionDuration
-            now = datetime.utcnow()
-            expires_at = now + timedelta(seconds=session_duration)
-            
-            db_session = await session_crud.create_session(
-                db, 
-                api_key.id, 
-                blockchain_session_id, 
-                model_id,
-                expires_at
+        if isinstance(response, dict):
+            blockchain_session_id = (response.get("sessionID") or 
+                                   response.get("session", {}).get("id") or 
+                                   response.get("id"))
+        
+        if not blockchain_session_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Invalid session response from proxy-router - no session ID found"
             )
-                
-            result = {
-                "success": True,
-                "message": "Session created and associated with API key",
-                "session_id": blockchain_session_id,
-                "api_key_prefix": api_key_prefix
-            }
+        
+        # Store session in database using the new session model
+        expiry_time = datetime.utcnow() + timedelta(seconds=session_data.sessionDuration)
+        db_session = await session_crud.create_session(
+            db=db,
+            session_id=blockchain_session_id,
+            api_key_id=api_key.id,
+            user_id=user.id,
+            model=model_id,
+            session_type="model",
+            expires_at=expiry_time
+        )
+        
+        # Return success response
+        result = {
+            "success": True,
+            "message": "Session created and associated with API key",
+            "session_id": blockchain_session_id,
+            "api_key_prefix": api_key_prefix
+        }
+        
+        # Add note about fallback key usage
+        if using_fallback:
+            result["note"] = "Private Key not set, using fallback key (FOR DEBUGGING ONLY)"
             
-            # Add note about fallback key usage
-            if using_fallback:
-                result["note"] = "Private Key not set, using fallback key (FOR DEBUGGING ONLY)"
-                
-            return result
-                
-    except Exception as e:
+        return result
+    except ValueError as e:
         logger.error(f"Error creating model session: {str(e)}")
-        
-        if isinstance(e, httpx.HTTPStatusError):
-            logger.error(f"HTTP Status code: {e.response.status_code}")
-            logger.error(f"Response text: {e.response.text}")
-            
-            # Try to parse error response
-            try:
-                error_json = e.response.json()
-                return {
-                    "error": {
-                        "message": f"Proxy router error: {str(e)}",
-                        "type": "ProxyRouterError",
-                        "status_code": e.response.status_code,
-                        "response": error_json
-                    }
-                }
-            except:
-                pass
-        
-        # Default to the standard error handler
-        return handle_proxy_error(e, "creating model session")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error creating model session: {str(e)}")
+        raise HTTPException(
+            status_code=e.response.status_code if hasattr(e, 'response') else 500,
+            detail=f"Error from proxy router: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error creating model session: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Unexpected error: {str(e)}"
+        )
 
 @router.post("/closesession")
 async def close_session(
@@ -950,60 +538,45 @@ async def close_session(
                 detail="API key not found"
             )
         
-        # Get session associated with the API key
-        session = await session_crud.get_session_by_api_key_id(db, api_key.id)
+        # Get session associated with the API key using the new CRUD function
+        session = await session_crud.get_active_session_by_api_key(db, api_key.id)
         
-        if not session or not session.is_active:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No active session found for this API key"
-            )
-        
-        # Get a private key (with possible fallback)
-        private_key, using_fallback = await private_key_crud.get_private_key_with_fallback(db, user.id)
-        
-        if not private_key:
-                return {
-                "error": {
-                    "message": "No private key found and no fallback key configured. Please set up your private key.",
-                    "type": "PrivateKeyNotFound"
-                }
+        if not session:
+            return {
+                "success": True,
+                "message": "No active session found to close",
+                "session_id": None
             }
         
-        if using_fallback:
-            logging.warning(f"DEBUGGING MODE: Using fallback private key for user {user.id} - this should never be used in production!")
+        if session.is_expired:
+            # Just mark as inactive if already expired
+            await session_crud.mark_session_inactive(db, session.id)
+            return {
+                "success": True,
+                "message": "Expired session marked as inactive",
+                "session_id": session.id
+            }
         
-        # Make direct call to the proxy-router
-        full_url = f"{settings.PROXY_ROUTER_URL}/blockchain/sessions/{session.session_id}/close"
-        auth = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
-        headers = {"X-Private-Key": private_key}
+        # Use the session service to close the session
+        success = await session_service.close_session(db, session.id)
         
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                full_url,
-                headers=headers,
-                auth=auth,
-                timeout=30.0
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to close session"
             )
-            response.raise_for_status()
-            close_response = response.json()
         
-        # Mark the session as inactive in the database
-        await session_crud.update_session_status(db, session.id, False)
-        
-        result = {
+        return {
             "success": True,
             "message": "Session closed successfully",
-            "session_id": session.session_id
+            "session_id": session.id
         }
-        
-        # Add note about fallback key usage
-        if using_fallback:
-            result["note"] = "Private Key not set, using fallback key (FOR DEBUGGING ONLY)"
-            
-        return result
     except Exception as e:
-        return handle_proxy_error(e, "closing session")
+        logging.error(f"Error in close_session: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error closing session: {str(e)}"
+        )
 
 @router.post("/pingsession")
 async def ping_session(
@@ -1032,14 +605,25 @@ async def ping_session(
                 detail="API key not found"
             )
             
-        # Get session associated with the API key
-        session = await session_crud.get_session_by_api_key_id(db, api_key.id)
+        # Get session associated with the API key using the new CRUD function
+        session = await session_crud.get_active_session_by_api_key(db, api_key.id)
         
-        if not session or not session.is_active:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No active session found for this API key"
-            )
+        if not session:
+            return {
+                "status": "no_session",
+                "message": "No active session found for this API key",
+                "success": False
+            }
+        
+        if session.is_expired:
+            # If session is expired, mark it as inactive
+            await session_crud.mark_session_inactive(db, session.id)
+            return {
+                "status": "expired",
+                "message": "Session is expired and has been marked as inactive",
+                "session_id": session.id,
+                "success": False
+            }
         
         # Prepare a simple chat completion request
         test_message = {
@@ -1056,13 +640,13 @@ async def ping_session(
             "authorization": f"Basic {auth_b64}",
             "Content-Type": "application/json",
             "accept": "text/event-stream",
-            "session_id": session.session_id
+            "session_id": session.id
         }
         
         # Make request to chat completions endpoint
         endpoint = f"{settings.PROXY_ROUTER_URL}/v1/chat/completions"
         
-        logger.info(f"Testing session {session.session_id} with chat completion")
+        logger.info(f"Testing session {session.id} with chat completion")
         
         async with httpx.AsyncClient() as client:
             try:
@@ -1080,9 +664,10 @@ async def ping_session(
                     async for chunk in response.aiter_bytes():
                         # If we get any response chunk, the session is alive
                         return {
-                            "success": True,
+                            "status": "alive",
                             "message": "Session is alive",
-                            "session_id": session.session_id
+                            "session_id": session.id,
+                            "success": True
                         }
                     
                     # If we get here with no chunks, something is wrong
@@ -1090,47 +675,23 @@ async def ping_session(
                     
             except Exception as e:
                 logger.error(f"Chat completion test failed: {str(e)}")
-                logger.info(f"Closing dead session {session.session_id}")
+                logger.info(f"Closing dead session {session.id}")
                 
-                # Session is dead, try to close it
-                try:
-                    # Get a private key (with possible fallback)
-                    private_key, using_fallback = await private_key_crud.get_private_key_with_fallback(db, user.id)
-                    
-                    if private_key:
-                        # Setup headers for closing session
-                        close_headers = {
-                            "X-Private-Key": private_key,
-                            "X-Chain-ID": os.getenv("CHAIN_ID"),
-                            "X-Contract-Address": os.getenv("DIAMOND_CONTRACT_ADDRESS")
-                        }
-                        
-                        # Try to close the session on the blockchain
-                        await execute_proxy_router_operation(
-                            endpoint=f"blockchain/sessions/{session.session_id}/close",
-                            headers=close_headers,
-                            user_id=user.id,
-                            db=db
-                        )
-                except Exception as close_err:
-                    logger.error(f"Error closing dead session: {str(close_err)}")
-                
-                # Mark session as inactive in database regardless of blockchain close result
-                await session_crud.update_session_status(db, session.id, False)
+                # Session is dead, close it using the session service
+                await session_service.close_session(db, session.id)
                 
                 return {
-                    "error": {
-                        "message": "Session is dead and has been closed",
-                        "type": "DeadSession",
-                        "original_error": str(e)
-                    }
+                    "status": "dead",
+                    "message": "Session is dead and has been closed",
+                    "session_id": session.id,
+                    "success": False,
+                    "error": str(e)
                 }
                 
     except Exception as e:
         logger.error(f"Error in ping_session: {str(e)}")
         return {
-            "error": {
-                "message": f"Error checking session status: {str(e)}",
-                "type": "PingError"
-            }
+            "status": "error",
+            "message": f"Error checking session status: {str(e)}",
+            "success": False
         } 

@@ -1,6 +1,58 @@
 {
   "models": [
     {
+      "Id": "0x8e5c0229ab1dac1753b24e6614ae7c4a4896463ca4929d7601b2b241384d3bbd",
+      "IpfsCID": "0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "Fee": 300000000000,
+      "Stake": 100000000000000000,
+      "Owner": "0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "Name": "default",
+      "Tags": [
+        "default"
+      ],
+      "CreatedAt": 1736545010,
+      "IsDeleted": false
+    },
+    {
+      "Id": "0x8aa1805da765f677aa175a908ce360eb35023defe8b124a7026d61b8807290f0",
+      "IpfsCID": "0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "Fee": 300000000000,
+      "Stake": 100000000000000000,
+      "Owner": "0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "Name": "code",
+      "Tags": [
+        "code"
+      ],
+      "CreatedAt": 1736545010,
+      "IsDeleted": false
+    },
+    {
+      "Id": "0x2efb0a07cf0fc72f359e93120397d80073ce2d11f6b9fa00978bfad17485cbb1",
+      "IpfsCID": "0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "Fee": 300000000000,
+      "Stake": 100000000000000000,
+      "Owner": "0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "Name": "image",
+      "Tags": [
+        "image"
+      ],
+      "CreatedAt": 1736545010,
+      "IsDeleted": false
+    },
+    {
+      "Id": "0x5c6a8dd17e4b0d705a8f8b66a2a301db6f1486a0a4034271ff17f856fe7ec508",
+      "IpfsCID": "0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "Fee": 300000000000,
+      "Stake": 100000000000000000,
+      "Owner": "0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "Name": "agents",
+      "Tags": [
+        "agents"
+      ],
+      "CreatedAt": 1736545010,
+      "IsDeleted": false
+    },
+    {
       "Id": "0x8f9f631f647b318e720ec00e6aaeeaa60ca2c52db9362a292d44f217e66aa04f",
       "IpfsCID": "0x2096b7bbe6599bc0bd9bad7157a138ae78e22b96198083c11d3d36c8a7b83c3f",
       "Fee": 300000000000,
@@ -324,6 +376,32 @@
         "Default"
       ],
       "CreatedAt": 1745330395,
+      "IsDeleted": false
+    },
+    {
+      "Id": "0xdf474728f624712570170f311a866a6937436c14861568f38593a531b7f45845",
+      "IpfsCID": "0x7ad1f1c00d72d075bb28bb67fce7ffaa60e54bdfe13958e1e355b98ef41ca4be",
+      "Fee": 1,
+      "Stake": 100000000000000000,
+      "Owner": "0x23d25ead101cb9bfdd7970176597e72da344557e",
+      "Name": "llama-3.3-70b",
+      "Tags": [
+        "llama-3.3-70b"
+      ],
+      "CreatedAt": 1745518131,
+      "IsDeleted": false
+    },
+    {
+      "Id": "0xf84eaf06d8ef0f3d22fe9cfbfeac0fa828cd1b2278ef801f123ac6bc2fc9de25",
+      "IpfsCID": "0xa2e63bdb660970b471ae0f182a43d971769ae010653c73ffc7779426aedc03f3",
+      "Fee": 1,
+      "Stake": 100000000000000000,
+      "Owner": "0x23d25ead101cb9bfdd7970176597e72da344557e",
+      "Name": "llama-3.2-3b",
+      "Tags": [
+        "llama-3.2-3b"
+      ],
+      "CreatedAt": 1745518543,
       "IsDeleted": false
     }
   ]

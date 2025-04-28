@@ -178,7 +178,85 @@ async def get_api_key_user(
             detail=f"Unexpected error validating API key: {str(e)}"
         )
 
+async def get_current_api_key(
+    db: AsyncSession = Depends(get_db),
+    api_key_str: str = Security(api_key_header)
+) -> APIKey:
+    """
+    Validate an API key and return the APIKey object.
+    
+    The API key is expected in the format: "Bearer sk-xxxxxx" or just "sk-xxxxxx"
+    
+    Args:
+        db: Database session
+        api_key_str: API key from Authorization header
+        
+    Returns:
+        APIKey object if valid
+        
+    Raises:
+        HTTPException: If API key is invalid or missing
+    """
+    if not api_key_str:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API key missing",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        
+    # Extract the key without the Bearer prefix if present
+    if api_key_str.startswith("Bearer "):
+        api_key_str = api_key_str.replace("Bearer ", "")
+    
+    # Validate API key format
+    if not api_key_str.startswith("sk-"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key format. Must start with sk-",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Extract the key prefix - "sk-" plus the next 6 characters 
+    key_prefix = api_key_str[:9] if len(api_key_str) >= 9 else api_key_str
+    
+    try:
+        # Get the API key with its user relationship loaded
+        api_key_query = select(APIKey).options(
+            joinedload(APIKey.user)
+        ).where(APIKey.key_prefix == key_prefix, APIKey.is_active == True)
+        
+        db_api_key = (await db.execute(api_key_query)).scalar_one_or_none()
+        
+        if not db_api_key:
+            # Log the key prefix for debugging
+            logging.error(f"Could not find API key with prefix: {key_prefix}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Update last used timestamp
+        await api_key_crud.update_last_used(db, db_api_key)
+        
+        return db_api_key
+        
+    except Exception as e:
+        # Log the error
+        logging.error(f"Error in get_current_api_key: {str(e)}")
+        
+        # Re-raise HTTP exceptions
+        if isinstance(e, HTTPException):
+            raise
+            
+        # Otherwise raise a generic error
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Unexpected error validating API key: {str(e)}"
+        )
+
 # Type aliases for commonly used dependency chains
 CurrentUser = Annotated[User, Depends(get_current_user)]
 APIKeyUser = Annotated[User, Depends(get_api_key_user)]
+CurrentAPIKey = Annotated[APIKey, Depends(get_current_api_key)]
 DBSession = Annotated[AsyncSession, Depends(get_db)] 

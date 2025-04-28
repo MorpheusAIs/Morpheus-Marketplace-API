@@ -13,10 +13,14 @@ import pathlib
 import datetime
 from fastapi.routing import APIRoute, APIRouter
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from sqlalchemy import select, text
 
 from src.api.v1 import models, chat, session, auth, automation
 from src.core.config import settings
 from src.api.v1.custom_route import FixedDependencyAPIRoute
+from src.db.models import Session as DbSession
+from src.services import session_service
 
 # Add the import for testing database connection
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -205,27 +209,6 @@ async def custom_swagger_ui_html():
 templates_path = pathlib.Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(templates_path))
 
-# Scalar UI documentation endpoint
-@app.get("/scalar", include_in_schema=False)
-async def get_scalar_docs(request: Request):
-    """
-    Serve the Scalar API documentation UI.
-    
-    This is a modern alternative to Swagger UI with a cleaner interface.
-    """
-    return templates.TemplateResponse(
-        "scalar_docs.html",
-        {
-            "request": request,
-            "title": f"{app.title} - API Documentation",
-            "description": app.description,
-            "openapi_url": app.openapi_url,
-            "favicon_url": "https://fastapi.tiangolo.com/img/favicon.png",
-            "scalar_js_url": "https://cdn.jsdelivr.net/npm/@scalar/api-reference",
-            "oauth2_redirect_url": app.swagger_ui_oauth2_redirect_url or "",
-        }
-    )
-
 # Error handler for OpenAI-compatible error responses
 @app.exception_handler(Exception)
 async def openai_exception_handler(request: Request, exc: Exception):
@@ -246,6 +229,47 @@ async def openai_exception_handler(request: Request, exc: Exception):
         }
     )
 
+# Session cleanup background task
+async def cleanup_expired_sessions():
+    """
+    Periodic task to clean up expired sessions.
+    
+    Scans for sessions that have expired but are still marked as active,
+    and marks them as inactive while also closing them at the proxy router level.
+    """
+    from src.db.database import AsyncSessionLocal, engine
+    from sqlalchemy.ext.asyncio import AsyncSession
+    
+    logger = logging.getLogger("session_cleanup")
+    logger.info("Starting expired session cleanup task")
+    
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                # Find expired active sessions
+                now = datetime.utcnow()
+                result = await db.execute(
+                    select(DbSession)
+                    .where(DbSession.is_active == True, DbSession.expires_at < now)
+                )
+                expired_sessions = result.scalars().all()
+                
+                if expired_sessions:
+                    logger.info(f"Found {len(expired_sessions)} expired sessions to clean up")
+                    
+                    # Process each expired session
+                    for session in expired_sessions:
+                        logger.info(f"Cleaning up expired session {session.id}")
+                        await session_service.close_session(db, session.id)
+                else:
+                    logger.info("No expired sessions found to clean up")
+        
+        except Exception as e:
+            logger.error(f"Error in session cleanup task: {e}")
+        
+        # Run every 15 minutes
+        await asyncio.sleep(15 * 60)
+
 # Application startup event
 @app.on_event("startup")
 async def startup_event():
@@ -257,6 +281,10 @@ async def startup_event():
         update_router_route_class(router, FixedDependencyAPIRoute)
     
     logger.info("Application startup complete. Using FixedDependencyAPIRoute for all routes.")
+    
+    # Start the background tasks
+    asyncio.create_task(cleanup_expired_sessions())
+    logger.info("Started background task for expired session cleanup")
 
 # Update router route classes
 def update_router_route_class(router: APIRouter, route_class=FixedDependencyAPIRoute):
@@ -304,8 +332,7 @@ async def root():
         "version": "0.1.0",
         "description": "OpenAI-compatible API gateway for Morpheus blockchain models",
         "documentation": {
-            "swagger_ui": "/docs",
-            "scalar": "/scalar"
+            "swagger_ui": "/docs"
         }
     }
 
