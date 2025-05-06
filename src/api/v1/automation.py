@@ -14,8 +14,16 @@ router = APIRouter(tags=["Automation"])
 
 # Define the automation settings model
 class AutomationSettingsBase(BaseModel):
-    is_enabled: Optional[bool] = None
-    session_duration: Optional[int] = None
+    is_enabled: Optional[bool] = True
+    session_duration: Optional[int] = 3600
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "is_enabled": True,
+                "session_duration": 3600
+            }
+        }
 
 class AutomationSettings(AutomationSettingsBase):
     user_id: int

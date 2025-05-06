@@ -239,12 +239,16 @@ async def cleanup_expired_sessions():
     """
     from src.db.database import AsyncSessionLocal, engine
     from sqlalchemy.ext.asyncio import AsyncSession
+    import traceback
     
     logger = logging.getLogger("session_cleanup")
     logger.info("Starting expired session cleanup task")
     
     while True:
         try:
+            # Log connection attempt for debugging
+            logger.info("Attempting to connect to database for session cleanup")
+            
             async with AsyncSessionLocal() as db:
                 # Find expired active sessions
                 now = datetime.utcnow()
@@ -265,7 +269,8 @@ async def cleanup_expired_sessions():
                     logger.info("No expired sessions found to clean up")
         
         except Exception as e:
-            logger.error(f"Error in session cleanup task: {e}")
+            logger.error(f"Error in session cleanup task: {str(e)}")
+            logger.error(traceback.format_exc())
         
         # Run every 15 minutes
         await asyncio.sleep(15 * 60)
@@ -351,7 +356,7 @@ async def health_check():
     
     return {
         "status": "ok",
-        "timestamp": datetime.datetime.now().isoformat(),
+        "timestamp": datetime.now().isoformat(),
         "version": "0.1.0",
         "database": db_status
     }
@@ -441,7 +446,7 @@ def custom_openapi():
             if path_key == "/api/v1/chat/completions" and method == "post" and "requestBody" in operation:
                 for content_type in operation["requestBody"]["content"]:
                     operation["requestBody"]["content"][content_type]["example"] = {
-                        "model": "gpt-3.5-turbo",
+                        "model": "default",
                         "messages": [
                             {"role": "system", "content": "You are a helpful assistant."},
                             {"role": "user", "content": "Hello, how are you?"}
@@ -455,6 +460,20 @@ def custom_openapi():
                         schema = operation["requestBody"]["content"][content_type]["schema"]
                         description = schema.get("description", "")
                         schema["description"] = description + "\n\nNote: You can optionally include 'session_id' if you want to use a specific session."
+            
+            # Add example for automation settings endpoint
+            if path_key == "/api/v1/automation/settings" and method == "put" and "requestBody" in operation:
+                for content_type in operation["requestBody"]["content"]:
+                    operation["requestBody"]["content"][content_type]["example"] = {
+                        "is_enabled": True,
+                        "session_duration": 3600
+                    }
+                    
+                    # Add description about session_duration
+                    if "schema" in operation["requestBody"]["content"][content_type]:
+                        schema = operation["requestBody"]["content"][content_type]["schema"]
+                        description = schema.get("description", "")
+                        schema["description"] = description + "\n\nNote: session_duration is in seconds. Default is 3600 (1 hour). Min: 60, Max: 86400 (24 hours)."
         
             # Determine which security scheme to apply based on the endpoint
             if path_key.startswith("/api/v1/auth/login") or path_key.startswith("/api/v1/auth/register"):
@@ -486,7 +505,7 @@ async def api_docs_landing(request: Request):
         {
             "request": request,
             "title": app.title,
-            "year": datetime.datetime.now().year
+            "year": datetime.now().year
         }
     )
 

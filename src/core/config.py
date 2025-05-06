@@ -26,7 +26,7 @@ class Settings(BaseSettings):
             return v
         return v
     
-    # Database Connection
+    # Database Connection - Using default port 5432 to match running Docker container
     DATABASE_URL: PostgresDsn = Field(default=os.getenv("DATABASE_URL", "postgresql+asyncpg://morpheus_user:morpheus_password@localhost:5432/morpheus_db"))
     
     # Database Settings (placeholders for Docker)

@@ -144,7 +144,7 @@ async def update_last_used(db: AsyncSession, api_key: APIKey) -> APIKey:
         Updated APIKey object
     """
     # Update the last_used_at timestamp with a naive datetime
-    api_key.last_used_at = datetime.datetime.utcnow()
+    api_key.last_used_at = datetime.utcnow()
     await db.commit()
     
     return api_key 

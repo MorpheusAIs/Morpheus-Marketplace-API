@@ -125,6 +125,7 @@ setup_fresh_instance() {
         "7c29c35fc9bc"  # add user sessions table
         "fix_session_constraints"
         "d00825f2a89a"  # add delegation table and user automation settings
+        "881e615d25ac"  #consolidate session model
     )
     
     # Run migrations one by one
