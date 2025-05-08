@@ -1,65 +1,67 @@
-version: '3.8'
-
 services:
+  db:
+    image: postgres:15-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-morpheus_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-morpheus_password}
+      POSTGRES_DB: ${POSTGRES_DB:-morpheus_db}
+    ports:
+      - "5433:5432" # Changed from 5432:5432 to avoid conflicts with local PostgreSQL
+    healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+        interval: 5s
+        timeout: 5s
+        retries: 5
+    networks:
+      - morpheus_net
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD:-supersecretredis}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379" # Expose only if needed for external inspection
+    healthcheck:
+        test: ["CMD", "redis-cli", "-a", "$${REDIS_PASSWORD:-supersecretredis}", "ping"]
+        interval: 5s
+        timeout: 5s
+        retries: 5
+    networks:
+      - morpheus_net
+
   api:
     build:
       context: .
       dockerfile: Dockerfile
+    env_file:
+      - .env # Load environment variables from .env file
     ports:
-      - "3000:3000"
-    environment:
-      - NODE_ENV=development
-      - PORT=3000
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_USER=postgres
-      - DB_PASSWORD=postgres
-      - DB_NAME=morpheus
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - PROXY_ROUTER_URL=http://proxy-router:3333
-    volumes:
-      - ./:/app
-      - /app/node_modules
+      - "8000:8000"
     depends_on:
-      - postgres
-      - redis
-    command: npm run dev
-    restart: unless-stopped
-
-  postgres:
-    image: postgres:14-alpine
-    ports:
-      - "5432:5432"
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=morpheus
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-morpheus_user}:${POSTGRES_PASSWORD:-morpheus_password}@localhost:5433/${POSTGRES_DB:-morpheus_db}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-supersecretredis}@localhost:6379/0
+      PROXY_ROUTER_URL: http://localhost:8082
+      # Other env vars like JWT_SECRET_KEY, KMS settings etc. will be loaded from .env
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    restart: unless-stopped
-
-  proxy-router:
-    image: morpheus-proxy-router:latest
-    # Note: You would need to build this image from the Morpheus-Lumerin-Node/proxy-router directory
-    ports:
-      - "3333:3333"
-      - "8082:8082"
-    volumes:
-      - ../Morpheus-Lumerin-Node/proxy-router:/app
-    environment:
-      - PROXY_STORE_CHAT_CONTEXT=true
-      # Add other necessary environment variables from .env file
-    restart: unless-stopped
+      - ./src:/app/src # Mount src for development hot-reloading (optional)
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+    network_mode: "host"
+    # For development with hot-reload using uvicorn directly:
+    # command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:
   postgres_data:
-  redis_data: 
+  redis_data:
+
+networks:
+  morpheus_net:
+    driver: bridge 

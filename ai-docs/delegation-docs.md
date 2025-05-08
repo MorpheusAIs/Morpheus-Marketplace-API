@@ -1,0 +1,26 @@
+# https://docs.gator.metamask.io/development llms.txt
+
+- [Introduction to the MetaMask Delegation Toolkit | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development): High-level overview of the Delegation Toolkit, its benefits, and where to start in the documentation.
+- [Get started with the Delegation Toolkit | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/get-started):
+- [Install and set up the Delegation Toolkit | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/get-started/install-delegation-toolkit): Learn how to install and set up the MetaMask Delegation Toolkit.
+- [Delegation Toolkit quickstart | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/get-started/delegation-toolkit-quickstart): Get started quickly with the MetaMask Delegation Toolkit.
+- [Delegation Toolkit CLI quickstart | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/get-started/delegation-toolkit-cli-quickstart): Get started with the MetaMask Delegation Toolkit using the `create-gator-app` CLI.
+- [Delegation Toolkit LLM context | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/get-started/delegation-toolkit-llm-context): Context about the MetaMask Delegation Toolkit that can be provided to an LLM.
+- [Delegation Toolkit concepts | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/concepts):
+- [Delegator accounts | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/concepts/delegator-accounts): Learn about account abstraction, the delegator account flow, and account types.
+- [Delegation | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/concepts/delegation): Learn about delegation, the delegation lifecycle, and the Delegation Framework.
+- [Delegator environment | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/concepts/environment): Learn about the delegator environment object `DeleGatorEnvironment` and how to use it.
+- [Caveat enforcers | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/concepts/caveat-enforcers): Learn about caveat enforcers and how they restrict delegations.
+- [Delegation Toolkit how-to guides | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/how-to):
+- [Configure the Delegation Toolkit | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/how-to/configure-delegation-toolkit): Learn how to configure the MetaMask Delegation Toolkit using Viem.
+- [Create a delegator account | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/how-to/create-delegator-account): Learn how to create a delegator account using Viem.
+- [Configure delegator accounts and signers | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/how-to/configure-delegator-accounts-signers): Learn how to configure different types of delegator accounts and signers using Viem.
+- [Send a user operation | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/how-to/send-user-operation): Learn how to send an ERC-4337 user operation using Viem.
+- [Create a delegation | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/how-to/create-delegation): Learn how to create different types of delegations, and how to sign a delegation.
+- [Restrict a delegation | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/how-to/create-delegation/restrict-delegation): Learn how to restrict a delegation using caveat enforcers, and the available caveat types.
+- [Create a custom caveat enforcer | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/how-to/create-delegation/create-custom-caveat-enforcer): Learn how to create, deploy, and apply a custom caveat enforcer
+- [Redeem a delegation | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/how-to/redeem-delegation): Learn how to redeem a delegation with a smart contract account (SCA) or an externally owned account (EOA).
+- [Store and retrieve delegations | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/experimental/store-retrieve-delegations): Store and retrieve delegations using the `DelegationStorageClient`.
+- [ERC-7715: Request permissions | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/experimental/erc-7715-request-permissions): Learn how to request ERC-7715 permissions.
+- [ERC-7710: Redeem delegations | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/experimental/erc-7710-redeem-delegations): Learn how to redeem ERC-7710 delegations with a smart contract account or an externally owned account (EOA).
+- [Chatbot | MetaMask Delegation Toolkit](https://docs.gator.metamask.io/development/chatbot):
