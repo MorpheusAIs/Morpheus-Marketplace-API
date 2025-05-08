@@ -1,5 +1,5 @@
 from typing import Optional, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -95,7 +95,12 @@ async def create_session(
         Created Session object
     """
     if not expires_at:
-        expires_at = datetime.utcnow() + timedelta(hours=24)
+        # Create a UTC datetime and convert to naive
+        expires_at_with_tz = datetime.now(timezone.utc) + timedelta(hours=24)
+        expires_at = expires_at_with_tz.replace(tzinfo=None)
+    elif expires_at.tzinfo is not None:
+        # If the provided expires_at has timezone info, convert to naive
+        expires_at = expires_at.replace(tzinfo=None)
         
     session = Session(
         id=session_id,

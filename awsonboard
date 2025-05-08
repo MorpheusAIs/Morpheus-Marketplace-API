@@ -39,14 +39,19 @@ setup_fresh_instance() {
     VENV_DIR="/home/ec2-user/venv-morpheus"
     SERVICE_USER="ec2-user"
 
-    # Clean any existing installation
-    sudo rm -rf $PROJECT_DIR
+    # Create project directory if it doesn't exist
+    sudo mkdir -p $PROJECT_DIR
+    sudo chown $SERVICE_USER:$SERVICE_USER $PROJECT_DIR
+
+    # Clean virtual environment if it exists
     sudo rm -rf $VENV_DIR
 
     # Clone Repository (assumes SSH key is already configured)
     echo "Cloning repository..."
-    sudo -u $SERVICE_USER git clone --depth 1 -b dev-k1 git@github.com:bowtiedbluefin/morpheus-API.git $PROJECT_DIR
     cd $PROJECT_DIR
+    sudo -u $SERVICE_USER git clone --depth 1 -b dev-k1 git@github.com:bowtiedbluefin/morpheus-API.git temp_repo
+    sudo -u $SERVICE_USER cp -r temp_repo/. .
+    sudo -u $SERVICE_USER rm -rf temp_repo
 
     # Setup Python Environment
     echo "Setting up Python virtual environment..."

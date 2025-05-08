@@ -5,7 +5,7 @@ import os
 import json
 from typing import Optional, Dict, Any, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import base64
 
 from ..db.models import Session
@@ -89,7 +89,9 @@ async def create_automated_session(
                     raise ValueError("No session ID found in proxy router response")
                 
                 # Store session in database
-                expiry_time = datetime.utcnow() + timedelta(seconds=session_duration)
+                expiry_time_with_tz = datetime.now(timezone.utc) + timedelta(seconds=session_duration)
+                # Convert to naive datetime for DB compatibility
+                expiry_time = expiry_time_with_tz.replace(tzinfo=None)
                 session = await session_crud.create_session(
                     db=db,
                     session_id=blockchain_session_id,

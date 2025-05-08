@@ -1,5 +1,6 @@
 import datetime
 from typing import Optional, List
+from datetime import timezone
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -143,8 +144,14 @@ async def update_last_used(db: AsyncSession, api_key: APIKey) -> APIKey:
     Returns:
         Updated APIKey object
     """
-    # Update the last_used_at timestamp with a naive datetime
-    api_key.last_used_at = datetime.utcnow()
+    # Get current UTC time as timezone-aware datetime
+    now_with_tz = datetime.datetime.now(timezone.utc)
+    
+    # Convert to naive datetime (remove timezone info) for DB compatibility
+    naive_datetime = now_with_tz.replace(tzinfo=None)
+    
+    # Update the last_used_at timestamp
+    api_key.last_used_at = naive_datetime
     await db.commit()
     
     return api_key 

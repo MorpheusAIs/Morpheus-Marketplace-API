@@ -13,7 +13,7 @@ import pathlib
 import datetime
 from fastapi.routing import APIRoute, APIRouter
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, text
 
 from src.api.v1 import models, chat, session, auth, automation
@@ -229,14 +229,14 @@ async def openai_exception_handler(request: Request, exc: Exception):
         }
     )
 
-# Session cleanup background task
+# Background task to clean up expired sessions
 async def cleanup_expired_sessions():
     """
-    Periodic task to clean up expired sessions.
-    
-    Scans for sessions that have expired but are still marked as active,
-    and marks them as inactive while also closing them at the proxy router level.
+    Background task to clean up expired sessions.
     """
+    from src.db.models import Session as DbSession
+    from sqlalchemy import select
+    from src.services import session_service
     from src.db.database import AsyncSessionLocal, engine
     from sqlalchemy.ext.asyncio import AsyncSession
     import traceback
@@ -251,7 +251,9 @@ async def cleanup_expired_sessions():
             
             async with AsyncSessionLocal() as db:
                 # Find expired active sessions
-                now = datetime.utcnow()
+                now_with_tz = datetime.now(timezone.utc)
+                # Convert to naive datetime for DB compatibility
+                now = now_with_tz.replace(tzinfo=None)
                 result = await db.execute(
                     select(DbSession)
                     .where(DbSession.is_active == True, DbSession.expires_at < now)
