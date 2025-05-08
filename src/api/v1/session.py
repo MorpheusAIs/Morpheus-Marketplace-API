@@ -417,79 +417,46 @@ async def create_model_session(
         )
     
     try:
-        # First, deactivate any existing sessions for this API key
-        await session_crud.deactivate_existing_sessions(db, api_key.id)
+        # Use the new session_service.switch_model function to safely switch models
+        logger.info(f"Switching to model {model_id} for API key {api_key.id}")
         
-        # Prepare session data
-        session_data_dict = {
-            "sessionDuration": session_data.sessionDuration,
-            "failover": session_data.failover,
-            "directPayment": session_data.directPayment
-        }
+        # Override the session duration from the request
+        session_duration = session_data.sessionDuration
         
-        # Get a private key (with possible fallback)
-        private_key, using_fallback = await private_key_crud.get_private_key_with_fallback(db, user.id)
-        
-        if not private_key:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No private key found and no fallback key configured"
-            )
-        
-        # Add private key to headers
-        headers = {
-            "X-Private-Key": private_key
-        }
-        
-        # Create session with proxy router
-        response = await execute_proxy_router_operation(
-            "POST",
-            f"blockchain/models/{model_id}/session",
-            headers=headers,
-            json=session_data_dict,
-            max_retries=3
-        )
-        
-        # Extract session ID from response
-        blockchain_session_id = None
-        
-        if isinstance(response, dict):
-            blockchain_session_id = (response.get("sessionID") or 
-                                   response.get("session", {}).get("id") or 
-                                   response.get("id"))
-        
-        if not blockchain_session_id:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Invalid session response from proxy-router - no session ID found"
-            )
-        
-        # Store session in database using the new session model
-        expiry_time_with_tz = datetime.now(timezone.utc) + timedelta(seconds=session_data.sessionDuration)
-        # Convert to naive datetime for DB compatibility
-        expiry_time = expiry_time_with_tz.replace(tzinfo=None)
-        db_session = await session_crud.create_session(
+        # Use our enhanced model switching function that properly ensures session cleanup
+        db_session = await session_service.switch_model(
             db=db,
-            session_id=blockchain_session_id,
             api_key_id=api_key.id,
             user_id=user.id,
-            model=model_id,
-            session_type="model",
-            expires_at=expiry_time
+            new_model=model_id
         )
         
+        if not db_session:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create new session"
+            )
+        
+        # Verify the new session is active in both DB and proxy
+        is_valid = await session_service.verify_session_status(db, db_session.id)
+        if not is_valid:
+            logger.error(f"Created session {db_session.id} is not valid in proxy router")
+            # Try to close it cleanly
+            await session_service.close_session(db, db_session.id)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Session created but not valid in proxy router"
+            )
+            
         # Return success response
         result = {
             "success": True,
             "message": "Session created and associated with API key",
-            "session_id": blockchain_session_id,
-            "api_key_prefix": api_key_prefix
+            "session_id": db_session.id,
+            "api_key_prefix": api_key_prefix,
+            "model": model_id
         }
         
-        # Add note about fallback key usage
-        if using_fallback:
-            result["note"] = "Private Key not set, using fallback key (FOR DEBUGGING ONLY)"
-            
         return result
     except ValueError as e:
         logger.error(f"Error creating model session: {str(e)}")

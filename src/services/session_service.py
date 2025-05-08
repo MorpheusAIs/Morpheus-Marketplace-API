@@ -3,7 +3,7 @@ import logging
 import httpx
 import os
 import json
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta, timezone
 import base64
@@ -119,7 +119,7 @@ async def close_session(
     session_id: str
 ) -> bool:
     """
-    Close an existing session.
+    Close an existing session with enhanced validation.
     
     Args:
         db: Database session
@@ -132,7 +132,7 @@ async def close_session(
         # Get session from database
         session = await session_crud.get_session(db, session_id)
         if not session:
-            logger.warning(f"Session {session_id} not found")
+            logger.warning(f"Session {session_id} not found in database")
             return False
             
         # Call proxy router to close session
@@ -142,33 +142,55 @@ async def close_session(
             "Content-Type": "application/json"
         }
         
+        proxy_success = False
         try:
-            await execute_proxy_router_operation(
+            response = await execute_proxy_router_operation(
                 "DELETE",
                 f"/v1/sessions/{session_id}",
                 headers=headers,
-                max_retries=2
+                max_retries=3  # Increased retries
             )
             logger.info(f"Successfully closed session {session_id} at proxy level")
+            proxy_success = True
         except ValueError as proxy_error:
             # Check if this is a 404 error (session doesn't exist at proxy)
             if "404 Not Found" in str(proxy_error):
                 logger.info(f"Session {session_id} not found at proxy level, considering already closed")
+                proxy_success = True
             else:
-                # Log other errors but continue to mark session as inactive
-                logger.warning(f"Error closing session at proxy level: {proxy_error}")
+                # Log other errors but don't mark success
+                logger.error(f"Error closing session at proxy level: {proxy_error}")
+                # Try to verify session status at proxy
+                try:
+                    status = await check_proxy_session_status(session_id)
+                    if status.get("closed", False):
+                        logger.info(f"Session {session_id} verified as closed despite error")
+                        proxy_success = True
+                except Exception as verify_error:
+                    logger.error(f"Failed to verify session status: {verify_error}")
         
-        # Mark session as inactive in database regardless of proxy result
-        await session_crud.mark_session_inactive(db, session_id)
-        
-        logger.info(f"Successfully marked session {session_id} as inactive in database")
-        return True
+        # Only mark session as inactive if proxy closure was successful
+        if proxy_success:
+            await session_crud.mark_session_inactive(db, session_id)
+            logger.info(f"Successfully marked session {session_id} as inactive in database")
+            return True
+        else:
+            # If proxy failed but session is expired, still mark inactive in DB
+            if session.is_expired:
+                logger.warning(f"Session {session_id} is expired, marking inactive despite proxy failure")
+                await session_crud.mark_session_inactive(db, session_id)
+                return True
+            else:
+                # If proxy failed and session isn't expired, don't update DB to maintain consistency
+                logger.warning(f"Not marking session {session_id} as inactive in DB due to proxy failure")
+                return False
     
     except Exception as e:
         logger.error(f"Error closing session {session_id}: {e}")
-        # Still mark as inactive in our database even if proxy router call fails
         try:
+            # On critical errors, still try to mark the session inactive
             await session_crud.mark_session_inactive(db, session_id)
+            logger.warning(f"Marked session {session_id} inactive despite error: {e}")
         except Exception as inner_e:
             logger.error(f"Failed to mark session {session_id} as inactive: {inner_e}")
         return False
@@ -201,4 +223,137 @@ async def get_or_create_session(
         db=db,
         api_key_id=api_key_id,
         requested_model=requested_model
+    )
+
+async def check_proxy_session_status(session_id: str) -> Dict[str, Any]:
+    """
+    Check the status of a session directly in the proxy router.
+    
+    Args:
+        session_id: ID of the session to check
+        
+    Returns:
+        Dict with session status information, including 'closed' boolean
+    """
+    try:
+        response = await execute_proxy_router_operation(
+            "GET",
+            f"/v1/sessions/{session_id}",
+            max_retries=2
+        )
+        
+        if response and isinstance(response, dict):
+            # Check if session is closed based on ClosedAt field
+            closed = False
+            if "ClosedAt" in response and response["ClosedAt"] > 0:
+                closed = True
+            
+            return {
+                "exists": True,
+                "closed": closed,
+                "data": response
+            }
+        else:
+            return {"exists": False, "closed": True, "data": None}
+    except Exception as e:
+        if "404 Not Found" in str(e):
+            # Session doesn't exist in proxy router
+            return {"exists": False, "closed": True, "data": None}
+        logger.error(f"Error checking session status for {session_id}: {e}")
+        return {"exists": False, "closed": False, "error": str(e)}
+
+async def verify_session_status(db: AsyncSession, session_id: str) -> bool:
+    """
+    Verify session status in both database and proxy router.
+    
+    Args:
+        db: Database session
+        session_id: ID of the session to verify
+        
+    Returns:
+        bool: True if session is valid and active, False otherwise
+    """
+    # Check database status
+    session = await session_crud.get_session(db, session_id)
+    if not session or not session.is_active or session.is_expired:
+        logger.info(f"Session {session_id} is invalid in database")
+        return False
+        
+    # Check proxy router status
+    proxy_status = await check_proxy_session_status(session_id)
+    return proxy_status.get("exists", False) and not proxy_status.get("closed", True)
+
+async def synchronize_sessions(db: AsyncSession):
+    """
+    Synchronize session states between database and proxy router.
+    
+    Args:
+        db: Database session
+    """
+    logger.info("Starting session synchronization")
+    
+    # Get all sessions marked as active in database
+    active_sessions = await session_crud.get_all_active_sessions(db)
+    
+    for session in active_sessions:
+        # Verify each session's status in proxy router
+        try:
+            proxy_status = await check_proxy_session_status(session.id)
+            
+            # Session doesn't exist or is closed in proxy router
+            if not proxy_status.get("exists", False) or proxy_status.get("closed", True):
+                logger.info(f"Session {session.id} is closed in proxy but active in DB, synchronizing")
+                await session_crud.mark_session_inactive(db, session.id)
+        except Exception as e:
+            logger.error(f"Error checking session {session.id} in proxy: {e}")
+            # Don't automatically mark as inactive on error
+
+async def switch_model(
+    db: AsyncSession, 
+    api_key_id: int, 
+    user_id: int,
+    new_model: str
+) -> Session:
+    """
+    Safely switch from one model to another by ensuring clean session closure.
+    
+    Args:
+        db: Database session
+        api_key_id: API key ID associated with the session
+        user_id: User ID associated with the session
+        new_model: ID or name of the model to switch to
+        
+    Returns:
+        Session: The newly created session object
+    """
+    logger.info(f"Switching to model {new_model} for API key {api_key_id}")
+    
+    # Get current active session
+    current_session = await session_crud.get_active_session_by_api_key(db, api_key_id)
+    
+    # Close current session if it exists
+    if current_session:
+        logger.info(f"Found existing session {current_session.id}, closing before switching models")
+        # Try closing up to 3 times
+        for attempt in range(3):
+            success = await close_session(db, current_session.id)
+            if success:
+                logger.info(f"Successfully closed session {current_session.id} on attempt {attempt+1}")
+                break
+            logger.warning(f"Failed to close session on attempt {attempt+1}, retrying...")
+            await asyncio.sleep(1)  # Wait before retry
+        
+        # Verify closure with proxy router
+        proxy_status = await check_proxy_session_status(current_session.id)
+        if not proxy_status.get("closed", False) and proxy_status.get("exists", False):
+            logger.error(f"Failed to close session {current_session.id} in proxy after multiple attempts")
+            # Force mark as inactive in DB to prevent orphaned sessions
+            await session_crud.mark_session_inactive(db, current_session.id)
+    
+    # Create new session
+    return await create_automated_session(
+        db=db,
+        api_key_id=api_key_id,
+        user_id=user_id,
+        requested_model=new_model
     ) 

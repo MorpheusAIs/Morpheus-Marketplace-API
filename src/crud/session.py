@@ -24,6 +24,24 @@ async def get_active_session_by_api_key(
     )
     return result.scalars().first()
 
+async def get_all_active_sessions(
+    db: AsyncSession
+) -> List[Session]:
+    """
+    Get all active sessions from the database.
+    
+    Args:
+        db: Database session
+        
+    Returns:
+        List of active Session objects
+    """
+    result = await db.execute(
+        select(Session)
+        .where(Session.is_active == True)
+    )
+    return result.scalars().all()
+
 async def deactivate_existing_sessions(
     db: AsyncSession, api_key_id: int
 ) -> None:
