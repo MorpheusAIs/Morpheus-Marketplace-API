@@ -60,10 +60,9 @@ app = FastAPI(
     },
     servers=[
         {
-            "url": "https://api.morpheus.org",
+            "url": "http://api.morpheus.org",
             "description": "Production"
-        },
-        
+        } 
     ]
 )
 
@@ -459,6 +458,7 @@ def custom_openapi():
         version=app.version,
         description=app.description,
         routes=app.routes,
+        servers=app.servers,
     )
 
     # Add custom info about authentication
