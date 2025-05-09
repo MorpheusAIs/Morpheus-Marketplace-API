@@ -19,6 +19,7 @@ alembic = "^1.13.1"
 redis = "^5.0.1"
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}
 passlib = {extras = ["bcrypt"], version = "^1.7.4"}
+bcrypt = "==4.0.1"
 httpx = "^0.26.0"
 cryptography = "^42.0.0"
 python-dotenv = "^1.0.0"

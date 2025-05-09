@@ -19,7 +19,7 @@ from sqlalchemy import select, text
 from src.api.v1 import models, chat, session, auth, automation
 from src.core.config import settings
 from src.api.v1.custom_route import FixedDependencyAPIRoute
-from src.db.models import Session as DbSession
+from src.db.models import Session as DbSession, Base
 from src.services import session_service
 
 # Add the import for testing database connection
@@ -580,3 +580,9 @@ async def api_docs_landing(request: Request):
 # The test-private-key endpoint has been removed
 
 # The set-private-key endpoint has been removed 
+
+@app.on_event("startup")
+async def init_db():
+    """Initialize database tables on startup"""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all) 
