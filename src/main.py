@@ -60,7 +60,7 @@ app = FastAPI(
     },
     servers=[
         {
-            "url": "http://api.morpheus.org",
+            "url": "http://api.mor.org",
             "description": "Production"
         } 
     ]
