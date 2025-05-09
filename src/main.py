@@ -57,7 +57,14 @@ app = FastAPI(
         "deepLinking": True,
         "tryItOutEnabled": True,
         "docExpansion": "list"
-    }
+    },
+    servers=[
+        {
+            "url": "https://api.morpheus.org",
+            "description": "Production"
+        },
+        
+    ]
 )
 
 # Set our fixed dependency route class for all APIRouters
