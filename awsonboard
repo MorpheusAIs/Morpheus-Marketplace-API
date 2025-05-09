@@ -40,7 +40,12 @@ setup_fresh_instance() {
     SERVICE_USER="ec2-user"
 
     # Create project directory if it doesn't exist
+    echo "Creating project directory at $PROJECT_DIR..."
     sudo mkdir -p $PROJECT_DIR
+    if [ ! -d "$PROJECT_DIR" ]; then
+        echo "ERROR: Failed to create $PROJECT_DIR directory"
+        exit 1
+    fi
     sudo chown $SERVICE_USER:$SERVICE_USER $PROJECT_DIR
 
     # Clean virtual environment if it exists
@@ -49,7 +54,7 @@ setup_fresh_instance() {
     # Clone Repository (assumes SSH key is already configured)
     echo "Cloning repository..."
     cd $PROJECT_DIR
-    sudo -u $SERVICE_USER git clone --depth 1 -b dev-k1 git@github.com:bowtiedbluefin/morpheus-API.git temp_repo
+    sudo -u $SERVICE_USER git clone --depth 1 -b main git@github.com:bowtiedbluefin/morpheus-API.git temp_repo
     sudo -u $SERVICE_USER cp -r temp_repo/. .
     sudo -u $SERVICE_USER rm -rf temp_repo
 
