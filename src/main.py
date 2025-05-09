@@ -13,7 +13,7 @@ import pathlib
 import datetime
 from fastapi.routing import APIRoute, APIRouter
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, text
 
 from src.api.v1 import models, chat, session, auth, automation
@@ -229,14 +229,14 @@ async def openai_exception_handler(request: Request, exc: Exception):
         }
     )
 
-# Session cleanup background task
+# Background task to clean up expired sessions
 async def cleanup_expired_sessions():
     """
-    Periodic task to clean up expired sessions.
-    
-    Scans for sessions that have expired but are still marked as active,
-    and marks them as inactive while also closing them at the proxy router level.
+    Background task to clean up expired sessions and synchronize session states.
     """
+    from src.db.models import Session as DbSession
+    from sqlalchemy import select
+    from src.services import session_service
     from src.db.database import AsyncSessionLocal, engine
     from sqlalchemy.ext.asyncio import AsyncSession
     import traceback
@@ -251,7 +251,9 @@ async def cleanup_expired_sessions():
             
             async with AsyncSessionLocal() as db:
                 # Find expired active sessions
-                now = datetime.utcnow()
+                now_with_tz = datetime.now(timezone.utc)
+                # Convert to naive datetime for DB compatibility
+                now = now_with_tz.replace(tzinfo=None)
                 result = await db.execute(
                     select(DbSession)
                     .where(DbSession.is_active == True, DbSession.expires_at < now)
@@ -267,6 +269,15 @@ async def cleanup_expired_sessions():
                         await session_service.close_session(db, session.id)
                 else:
                     logger.info("No expired sessions found to clean up")
+                
+                # Synchronize session states between database and proxy router
+                try:
+                    logger.info("Starting session state synchronization")
+                    await session_service.synchronize_sessions(db)
+                    logger.info("Session state synchronization completed")
+                except Exception as sync_error:
+                    logger.error(f"Error during session synchronization: {str(sync_error)}")
+                    logger.error(traceback.format_exc())
         
         except Exception as e:
             logger.error(f"Error in session cleanup task: {str(e)}")
@@ -281,6 +292,9 @@ async def startup_event():
     """
     Perform startup initialization.
     """
+    # Verify database migrations are up to date
+    await verify_database_migrations()
+    
     # Make sure all routers use our fixed route class
     for router in [auth, models, chat, session, automation]:
         update_router_route_class(router, FixedDependencyAPIRoute)
@@ -290,6 +304,60 @@ async def startup_event():
     # Start the background tasks
     asyncio.create_task(cleanup_expired_sessions())
     logger.info("Started background task for expired session cleanup")
+
+async def verify_database_migrations():
+    """
+    Verify that database migrations are up to date.
+    """
+    try:
+        # Import what we need to check migration revisions
+        from alembic.script import ScriptDirectory
+        from alembic.config import Config
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import AsyncSession
+        from src.db.database import engine
+        import os
+        
+        # Get the expected head revision
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "alembic.ini")
+        config = Config(config_path)
+        script = ScriptDirectory.from_config(config)
+        head_revision = script.get_current_head()
+        
+        logger.info(f"Checking database migrations (expected head: {head_revision})")
+        
+        # Get the current database revision
+        async with AsyncSession(engine) as session:
+            try:
+                result = await session.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'alembic_version')"))
+                table_exists = result.scalar()
+                
+                if not table_exists:
+                    logger.error("Database not initialized: alembic_version table doesn't exist")
+                    logger.error("Please run 'alembic upgrade head' to initialize the database")
+                    return
+                
+                result = await session.execute(text("SELECT version_num FROM alembic_version"))
+                current_revision = result.scalar_one_or_none()
+                
+                if current_revision != head_revision:
+                    logger.error(f"Database schema out of date. Current: {current_revision}, Expected: {head_revision}")
+                    logger.error("Please run 'alembic upgrade head' to update your database schema")
+                else:
+                    logger.info(f"Database schema is up to date (revision: {current_revision})")
+                    
+                # Also check if the sessions table exists
+                result = await session.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sessions')"))
+                sessions_exists = result.scalar()
+                
+                if not sessions_exists:
+                    logger.error("Sessions table doesn't exist despite migrations being up to date")
+                    logger.error("There may be an issue with your migrations - consider recreating the database")
+            except Exception as db_error:
+                logger.error(f"Error checking migration status: {db_error}")
+    except Exception as e:
+        logger.error(f"Failed to verify migrations: {e}")
+        logger.error("Continuing startup, but there may be database schema issues")
 
 # Update router route classes
 def update_router_route_class(router: APIRouter, route_class=FixedDependencyAPIRoute):

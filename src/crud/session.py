@@ -1,5 +1,5 @@
 from typing import Optional, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +23,24 @@ async def get_active_session_by_api_key(
         .where(Session.api_key_id == api_key_id, Session.is_active == True)
     )
     return result.scalars().first()
+
+async def get_all_active_sessions(
+    db: AsyncSession
+) -> List[Session]:
+    """
+    Get all active sessions from the database.
+    
+    Args:
+        db: Database session
+        
+    Returns:
+        List of active Session objects
+    """
+    result = await db.execute(
+        select(Session)
+        .where(Session.is_active == True)
+    )
+    return result.scalars().all()
 
 async def deactivate_existing_sessions(
     db: AsyncSession, api_key_id: int
@@ -95,7 +113,12 @@ async def create_session(
         Created Session object
     """
     if not expires_at:
-        expires_at = datetime.utcnow() + timedelta(hours=24)
+        # Create a UTC datetime and convert to naive
+        expires_at_with_tz = datetime.now(timezone.utc) + timedelta(hours=24)
+        expires_at = expires_at_with_tz.replace(tzinfo=None)
+    elif expires_at.tzinfo is not None:
+        # If the provided expires_at has timezone info, convert to naive
+        expires_at = expires_at.replace(tzinfo=None)
         
     session = Session(
         id=session_id,

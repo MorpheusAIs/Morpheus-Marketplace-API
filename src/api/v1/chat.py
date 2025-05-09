@@ -91,7 +91,11 @@ async def _handle_automated_session_creation(
     try:
         logger.info(f"Attempting to create automated session for user {user.id} with model {requested_model}, duration {session_duration}")
         new_session = await session_service.create_automated_session(
-            db, user, db_api_key, requested_model, session_duration
+            db=db,
+            api_key_id=db_api_key.id,
+            user_id=user.id,
+            requested_model=requested_model,
+            session_duration=session_duration
         )
         session_id = new_session.id
         logger.info(f"Created new automated session: {session_id}")
@@ -137,6 +141,9 @@ async def create_chat_completion(
     # Log the original request details
     logger.info(f"Original request - session_id: {session_id}, model: {requested_model}")
     
+    # Store API key reference at a higher scope for later use in error handling
+    db_api_key = None
+    
     # If no session_id from body, try to get from database
     if not session_id and user.api_keys:
         try:
@@ -154,18 +161,44 @@ async def create_chat_completion(
             session = await session_crud.get_session_by_api_key_id(db, db_api_key.id)
             
             if session and session.is_active:
-                # Use the session ID from the database - using 'id' instead of 'session_id'
-                session_id = session.id
-                logger.info(f"Using existing session ID from database: {session_id}")
+                # Check if requested model is different from current session's model
+                if requested_model and session.model != requested_model:
+                    logger.info(f"Model change detected. Current: {session.model}, Requested: {requested_model}")
+                    logger.info(f"Switching models by closing current session and creating new one")
+                    
+                    # Switch to the new model
+                    try:
+                        new_session = await session_service.switch_model(
+                            db=db,
+                            api_key_id=db_api_key.id,
+                            user_id=user.id,
+                            new_model=requested_model
+                        )
+                        session_id = new_session.id
+                        logger.info(f"Successfully switched to new model with session: {session_id}")
+                        
+                        # Add a small delay to ensure the session is fully registered
+                        logger.info("Adding a brief delay to ensure session is fully registered")
+                        await asyncio.sleep(1.0)  # 1 second delay
+                    except Exception as e:
+                        logger.error(f"Error switching models: {e}")
+                        logger.exception(e)
+                        # Fall through to use existing session as fallback
+                        session_id = session.id
+                        logger.warning(f"Using existing session as fallback: {session_id}")
+                else:
+                    # Use the session ID from the database - using 'id' instead of 'session_id'
+                    session_id = session.id
+                    logger.info(f"Using existing session ID from database: {session_id}")
             else:
                 logger.info("No active session found, attempting automated session creation")
                 # No active session - try automated session creation
                 try:
                     automated_session = await session_service.create_automated_session(
-                        db,
-                        db_api_key.id,
-                        user.id,
-                        requested_model
+                        db=db,
+                        api_key_id=db_api_key.id,
+                        user_id=user.id,
+                        requested_model=requested_model
                     )
                     
                     if automated_session:
@@ -314,6 +347,65 @@ async def create_chat_completion(
                                 error_type = error_json["type"]
                     except:
                         pass
+                    
+                    # Handle session expired error by attempting to create a new session and retry
+                    if "session expired" in str(error_msg).lower() or "session not found" in str(error_msg).lower():
+                        logger.warning(f"Session {session_id} has expired, attempting to create a new one and retry")
+                        try:
+                            # Mark the session as inactive in the database
+                            await session_crud.mark_session_inactive(db, session_id)
+                            
+                            # Create a new session with the same model
+                            new_session = await session_service.create_automated_session(
+                                db=db,
+                                api_key_id=db_api_key.id,
+                                user_id=user.id,
+                                requested_model=requested_model
+                            )
+                            
+                            if new_session:
+                                new_session_id = new_session.id
+                                logger.info(f"Created new session {new_session_id} after expired session")
+                                
+                                # Small delay to ensure session is registered
+                                await asyncio.sleep(1.0)
+                                
+                                # Update the endpoint with the new session ID
+                                new_endpoint = f"{settings.PROXY_ROUTER_URL}/v1/chat/completions?session_id={new_session_id}"
+                                
+                                # Update headers with new session ID
+                                headers["session_id"] = new_session_id
+                                headers["X-Session-ID"] = new_session_id
+                                
+                                logger.info(f"Retrying request with new session ID: {new_session_id}")
+                                
+                                # Try again with the new session
+                                retry_response = await client.post(
+                                    new_endpoint,
+                                    content=body,
+                                    headers=headers,
+                                    timeout=60.0
+                                )
+                                
+                                if retry_response.status_code == 200:
+                                    logger.info("Retry with new session succeeded")
+                                    response_text = retry_response.text
+                                    
+                                    # Check if this is already SSE format
+                                    if response_text.startswith("data:"):
+                                        # It's already in SSE format, pass it through
+                                        yield response_text
+                                    else:
+                                        # Try to parse as JSON and wrap in SSE format
+                                        try:
+                                            result = json.loads(response_text)
+                                            yield f"data: {json.dumps(result)}\n\n"
+                                        except:
+                                            # Just wrap the raw text
+                                            yield f"data: {response_text}\n\n"
+                                    return
+                        except Exception as retry_err:
+                            logger.error(f"Failed to retry with new session: {retry_err}")
                     
                     error_payload = json.dumps({
                         "error": {
