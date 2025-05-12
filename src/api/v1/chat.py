@@ -34,6 +34,19 @@ class ChatMessage(BaseModel):
     content: str
     name: Optional[str] = None
 
+class ToolFunction(BaseModel):
+    name: str
+    description: Optional[str] = None
+    parameters: Dict[str, Any] = {}
+
+class Tool(BaseModel):
+    type: str = "function"
+    function: ToolFunction
+
+class ToolChoice(BaseModel):
+    type: Optional[str] = "function"
+    function: Optional[Dict[str, Any]] = None
+
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[ChatMessage]
@@ -45,6 +58,8 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
+    tools: Optional[List[Tool]] = None
+    tool_choice: Optional[Union[str, ToolChoice]] = None
     session_id: Optional[str] = Field(None, description="Optional session ID to use for this request. If not provided, the system will use the session associated with the API key.")
 
 async def _handle_automated_session_creation(
@@ -110,15 +125,33 @@ async def _handle_automated_session_creation(
         # Return None to fall back to manual session handling
         return None
 
-@router.post("/completions", response_model=None)
+@router.post("/completions", response_model=None, responses={
+    200: {
+        "description": "Chat completion response",
+        "content": {
+            "text/event-stream": {
+                "schema": {"type": "string"}
+            },
+            "application/json": {
+                "schema": openai_schemas.ChatCompletionResponse.schema()
+            }
+        }
+    }
+})
 async def create_chat_completion(
     request_data: ChatCompletionRequest,
+    request: Request,
     api_key: str = Depends(api_key_header),
     user: User = Depends(get_api_key_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Create a chat completion with automatic session creation if enabled.
+    
+    Set Accept header to 'text/event-stream' for streaming responses, especially for tool calls.
+    Set Accept header to 'application/json' for non-streaming responses.
+    
+    Note: Tool calling requires streaming mode and 'text/event-stream' Accept header.
     """
     # Check if we have a valid user from the API key
     if not user:
@@ -132,10 +165,39 @@ async def create_chat_completion(
     logger = logging.getLogger(__name__)
     logger.info(f"Processing chat completion request for user {user.id}")
     
-    # Convert the request data to a dictionary and then to JSON
+    # Get the client's desired response format from Accept header
+    accept_header = request.headers.get("accept", "text/event-stream")
+    logger.info(f"Client Accept header: {accept_header}")
+    
+    # Check if this is a tool calling request
     json_body = request_data.model_dump(exclude_none=True)
+    has_tools = "tools" in json_body and json_body["tools"]
+    
+    # Set streaming based on client preference and tools requirement
+    # Force streaming for tool calling
+    if has_tools and "text/event-stream" not in accept_header:
+        logger.warning("Tool calling detected but Accept header is not text/event-stream. Forcing text/event-stream for proper tool handling.")
+        accept_header = "text/event-stream"
+        json_body["stream"] = True
+    
+    # Extract necessary fields
     session_id = json_body.pop("session_id", None)
     requested_model = json_body.pop("model", None)
+    
+    # Check if this is a tool calling request and if the model supports it
+    if has_tools:
+        # List of models known to support tool calling - update this list as needed
+        tool_calling_models = ["llama-3.3-70b", "claude-3.5", "claude-3-opus", "gpt-4o", "gpt-4", "mistral-large", "gemini-pro"]
+        
+        if requested_model and requested_model.lower() not in [m.lower() for m in tool_calling_models]:
+            logger.warning(f"Model {requested_model} may not support tool calling. Consider using one of: {', '.join(tool_calling_models)}")
+    
+    # Log tool-related parameters if present (for debugging)
+    if "tools" in json_body:
+        logger.info(f"Request includes tools: {json.dumps(json_body['tools'])}")
+    if "tool_choice" in json_body:
+        logger.info(f"Request includes tool_choice: {json.dumps(json_body['tool_choice'])}")
+    
     body = json.dumps(json_body).encode('utf-8')
     
     # Log the original request details
@@ -250,14 +312,22 @@ async def create_chat_completion(
     auth_str = f"{settings.PROXY_ROUTER_USERNAME}:{settings.PROXY_ROUTER_PASSWORD}"
     auth_b64 = base64.b64encode(auth_str.encode('ascii')).decode('ascii')
     
-    # Simple headers that work with the proxy router
+    # Set headers with the appropriate accept header
     headers = {
         "authorization": f"Basic {auth_b64}",
         "Content-Type": "application/json",
-        "accept": "text/event-stream",
+        "accept": accept_header,
         "session_id": session_id,
         "X-Session-ID": session_id  # Try an alternate header format
     }
+    
+    # Log complete request for debugging when tools are used
+    if "tools" in json_body:
+        logger.info("===== TOOL CALLING REQUEST =====")
+        logger.info(f"Endpoint: {endpoint}")
+        logger.info(f"Headers: {json.dumps({k: v for k, v in headers.items() if k != 'authorization'})}")
+        logger.info(f"Request body: {json.dumps(json.loads(body.decode('utf-8')), indent=2)}")
+        logger.info("================================")
     
     # Check if we're using a mock session ID
     is_mock_session = session_id.startswith("mock-")
@@ -314,138 +384,139 @@ async def create_chat_completion(
                 yield "data: [DONE]\n\n"
                 return
             
-            # Try a direct request first - sometimes streaming mode causes issues
-            logger.info("Trying direct request to proxy router")
+            logger.info("Making request to proxy router with streaming")
             async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    endpoint,
-                    content=body,
-                    headers=headers,
-                    timeout=60.0
-                )
-                
-                # Log response info
-                logger.info(f"Direct request response status: {response.status_code}")
-                
-                if response.status_code != 200:
-                    error_msg = f"Proxy router returned non-200 status: {response.status_code}"
-                    error_type = "ProxyRouterError" # Default type
-                    logger.error(error_msg)
-                    
-                    # Try to get more error details from response
-                    try:
-                        error_json = response.json()
-                        if isinstance(error_json, dict):
-                            if "error" in error_json:
-                                error_msg = error_json["error"]
-                            elif "detail" in error_json:
-                                error_msg = error_json["detail"]
-                            elif "message" in error_json:
-                                error_msg = error_json["message"]
-                            
-                            if "type" in error_json:
-                                error_type = error_json["type"]
-                    except:
-                        pass
-                    
-                    # Handle session expired error by attempting to create a new session and retry
-                    if "session expired" in str(error_msg).lower() or "session not found" in str(error_msg).lower():
-                        logger.warning(f"Session {session_id} has expired, attempting to create a new one and retry")
+                # Use streaming request to avoid buffering the whole response
+                async with client.stream("POST", endpoint, content=body, headers=headers, timeout=60.0) as response:
+                    # Check response status
+                    if response.status_code != 200:
+                        error_msg = f"Proxy router error: {response.status_code}"
+                        error_type = "ProxyRouterError"
+                        
+                        # Try to get more error details from response
                         try:
-                            # Mark the session as inactive in the database
-                            await session_crud.mark_session_inactive(db, session_id)
-                            
-                            # Create a new session with the same model
-                            new_session = await session_service.create_automated_session(
-                                db=db,
-                                api_key_id=db_api_key.id,
-                                user_id=user.id,
-                                requested_model=requested_model
-                            )
-                            
-                            if new_session:
-                                new_session_id = new_session.id
-                                logger.info(f"Created new session {new_session_id} after expired session")
+                            error_text = await response.aread()
+                            error_json = json.loads(error_text)
+                            if isinstance(error_json, dict):
+                                if "error" in error_json:
+                                    error_msg = error_json["error"]
+                                elif "detail" in error_json:
+                                    error_msg = error_json["detail"]
+                                elif "message" in error_json:
+                                    error_msg = error_json["message"]
                                 
-                                # Small delay to ensure session is registered
-                                await asyncio.sleep(1.0)
+                                if "type" in error_json:
+                                    error_type = error_json["type"]
+                        except:
+                            pass
+                        
+                        # Handle session expired error cases
+                        if "session expired" in str(error_msg).lower() or "session not found" in str(error_msg).lower():
+                            # Handle session expired error by attempting to create a new session and retry
+                            logger.warning(f"Session {session_id} has expired, attempting to create a new one and retry")
+                            try:
+                                # Mark the session as inactive in the database
+                                await session_crud.mark_session_inactive(db, session_id)
                                 
-                                # Update the endpoint with the new session ID
-                                new_endpoint = f"{settings.PROXY_ROUTER_URL}/v1/chat/completions?session_id={new_session_id}"
-                                
-                                # Update headers with new session ID
-                                headers["session_id"] = new_session_id
-                                headers["X-Session-ID"] = new_session_id
-                                
-                                logger.info(f"Retrying request with new session ID: {new_session_id}")
-                                
-                                # Try again with the new session
-                                retry_response = await client.post(
-                                    new_endpoint,
-                                    content=body,
-                                    headers=headers,
-                                    timeout=60.0
+                                # Create a new session with the same model
+                                new_session = await session_service.create_automated_session(
+                                    db=db,
+                                    api_key_id=db_api_key.id,
+                                    user_id=user.id,
+                                    requested_model=requested_model
                                 )
                                 
-                                if retry_response.status_code == 200:
-                                    logger.info("Retry with new session succeeded")
-                                    response_text = retry_response.text
+                                if new_session:
+                                    new_session_id = new_session.id
+                                    logger.info(f"Created new session {new_session_id} after expired session")
                                     
-                                    # Check if this is already SSE format
-                                    if response_text.startswith("data:"):
-                                        # It's already in SSE format, pass it through
-                                        yield response_text
-                                    else:
-                                        # Try to parse as JSON and wrap in SSE format
-                                        try:
-                                            result = json.loads(response_text)
-                                            yield f"data: {json.dumps(result)}\n\n"
-                                        except:
-                                            # Just wrap the raw text
-                                            yield f"data: {response_text}\n\n"
-                                    return
-                        except Exception as retry_err:
-                            logger.error(f"Failed to retry with new session: {retry_err}")
+                                    # Small delay to ensure session is registered
+                                    await asyncio.sleep(1.0)
+                                    
+                                    # Update the endpoint with the new session ID
+                                    new_endpoint = f"{settings.PROXY_ROUTER_URL}/v1/chat/completions?session_id={new_session_id}"
+                                    
+                                    # Update headers with new session ID
+                                    headers["session_id"] = new_session_id
+                                    headers["X-Session-ID"] = new_session_id
+                                    
+                                    logger.info(f"Retrying request with new session ID: {new_session_id}")
+                                    
+                                    # Try again with the new session using streaming
+                                    async with client.stream("POST", new_endpoint, content=body, headers=headers, timeout=60.0) as retry_response:
+                                        if retry_response.status_code == 200:
+                                            logger.info("Retry with new session succeeded")
+                                            # Direct streaming without parsing - preserves tool_calls structure
+                                            async for chunk in retry_response.aiter_bytes():
+                                                yield chunk
+                                            return
+                            except Exception as retry_err:
+                                logger.error(f"Failed to retry with new session: {retry_err}")
+                        
+                        error_payload = json.dumps({
+                            "error": {
+                                "message": error_msg,
+                                "type": error_type,
+                                "status_code": response.status_code
+                            }
+                        })
+                        
+                        yield f"data: {error_payload}\n\n"
+                        return
                     
-                    error_payload = json.dumps({
-                        "error": {
-                            "message": error_msg,
-                            "type": error_type,
-                            "status_code": response.status_code
-                        }
-                    })
-                    
-                    yield f"data: {error_payload}\n\n"
-                    return
-                
-                # For successful responses, just yield the response text
-                # If it's a streaming response, it will be in the correct format
-                # If it's a regular JSON response, we'll wrap it in the SSE format
-                response_text = response.text
-                
-                # Check if this is already SSE format
-                if response_text.startswith("data:"):
-                    # It's already in SSE format, pass it through
-                    yield response_text
-                else:
-                    # Try to parse as JSON and wrap in SSE format
-                    try:
-                        result = json.loads(response_text)
-                        yield f"data: {json.dumps(result)}\n\n"
-                    except:
-                        # Just wrap the raw text
-                        yield f"data: {response_text}\n\n"
-                
+                    # Direct streaming without parsing - preserves tool_calls structure
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
         except Exception as e:
             logger.error(f"Error in streaming: {e}")
             logger.exception(e)  # Log full stack trace
             yield f"data: {{\"error\": {{\"message\": \"Error in streaming: {str(e)}\", \"type\": \"StreamingError\"}}}}\n\n"
     
-    return StreamingResponse(
-        stream_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive"
-        }
-    ) 
+    # Return appropriate response based on accept header
+    if "text/event-stream" in accept_header:
+        return StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive"
+            }
+        )
+    else:
+        # For application/json, we need to collect the entire response
+        async def json_response_generator():
+            response_chunks = []
+            async for chunk in stream_generator():
+                response_chunks.append(chunk)
+            return b''.join(response_chunks)
+        
+        # Get the complete response
+        complete_response = await json_response_generator()
+        
+        # Try to parse the SSE format into JSON
+        try:
+            json_response = {}
+            for line in complete_response.decode('utf-8').split('\n'):
+                if line.startswith("data: ") and line[6:] != "[DONE]":
+                    chunk_data = json.loads(line[6:])
+                    # For the first chunk, initialize the response
+                    if not json_response:
+                        json_response = chunk_data
+                    # For subsequent chunks, merge the choices
+                    elif "choices" in chunk_data and "choices" in json_response:
+                        for i, choice in enumerate(chunk_data["choices"]):
+                            if i < len(json_response["choices"]):
+                                # Merge content if it exists
+                                if "delta" in choice and "content" in choice["delta"]:
+                                    if "content" not in json_response["choices"][i]:
+                                        json_response["choices"][i]["content"] = ""
+                                    json_response["choices"][i]["content"] += choice["delta"]["content"]
+                                # Update finish_reason if it's provided
+                                if "finish_reason" in choice and choice["finish_reason"]:
+                                    json_response["choices"][i]["finish_reason"] = choice["finish_reason"]
+            
+            return JSONResponse(content=json_response)
+        except Exception as e:
+            logger.error(f"Error converting SSE to JSON: {e}")
+            # Return the raw response if we can't parse it
+            return PlainTextResponse(content=complete_response.decode('utf-8'), media_type="text/plain") 
