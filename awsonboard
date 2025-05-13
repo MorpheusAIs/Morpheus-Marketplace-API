@@ -444,12 +444,12 @@ async def verify_migrations():
         print(f'Current revision: {current_revision}')
         
         # Check users table
-        result = await session.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'users')"))
+        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'users')\"))
         users_exists = result.scalar()
         print(f'Users table exists: {users_exists}')
 
         # Check sessions table
-        result = await session.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sessions')"))
+        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sessions')\"))
         sessions_exists = result.scalar()
         print(f'Sessions table exists: {sessions_exists}')
         
@@ -576,8 +576,8 @@ async def verify_migrations():
             print('Run: ./manage_migrations.sh upgrade')
             return False
             
-        # Check users table
-        result = await session.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'users')"))
+        # Check users table (escape inner quotes)
+        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'users')\"))
         users_exists = result.scalar()
         
         if not users_exists:
@@ -585,13 +585,22 @@ async def verify_migrations():
             print('Run: ./manage_migrations.sh fix')
             return False
 
-        # Check sessions table
-        result = await session.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sessions')"))
+        # Check sessions table (escape inner quotes)
+        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sessions')\"))
         sessions_exists = result.scalar()
         
         if not sessions_exists:
             print('ERROR: Sessions table does not exist despite migrations being up to date!')
             print('Run: ./manage_migrations.sh fix')
+            return False
+
+        # Check delegations table (escape inner quotes)
+        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'delegations')\"))
+        delegations_exists = result.scalar()
+
+        if not delegations_exists:
+            print(\\'ERROR: Delegations table does not exist despite migrations being up to date!\\')
+            print(\\'Run: ./manage_migrations.sh fix\\')
             return False
             
         print('Database schema is up to date!')
