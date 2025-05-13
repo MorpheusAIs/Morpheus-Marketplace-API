@@ -56,7 +56,7 @@ setup_fresh_instance() {
     cd $PROJECT_DIR
     
     # Use HTTPS for public repository
-    sudo -u $SERVICE_USER git clone --depth 1 -b feat-toolcalling https://github.com/bowtiedbluefin/morpheus-API.git temp_repo
+    sudo -u $SERVICE_USER git clone --depth 1 -b main https://github.com/bowtiedbluefin/morpheus-API.git temp_repo
     
     # Check if clone was successful
     if [ ! -d "temp_repo" ]; then
