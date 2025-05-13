@@ -141,6 +141,15 @@ async def verify_migrations():
             print('Run: ./manage_migrations.sh fix')
             return False
             
+        # Check if updated_at exists in users table
+        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'updated_at')\"))
+        updated_at_exists = result.scalar()
+        
+        if not updated_at_exists:
+            print('ERROR: users.updated_at column does not exist!')
+            print('Run: ./manage_migrations.sh upgrade')
+            return False
+            
         print('Database schema is up to date!')
         return True
 

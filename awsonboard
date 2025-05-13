@@ -24,7 +24,7 @@ setup_fresh_instance() {
     # System Updates and Dependencies
     echo "Installing system dependencies..."
     sudo yum update -y
-    sudo yum install git gcc make openssl-devel bzip2-devel libffi-devel zlib-devel postgresql-devel postgresql-libs python3.11 python3.11-pip python3.11-devel docker -y
+    sudo yum install git gcc make openssl-devel bzip2-devel libffi-devel zlib-devel postgresql-devel postgresql-libs python3.11 python3.11-pip python3.11-devel docker postgresql15 -y
 
     # Setup Docker
     echo "Setting up Docker..."
@@ -51,10 +51,21 @@ setup_fresh_instance() {
     # Clean virtual environment if it exists
     sudo rm -rf $VENV_DIR
 
-    # Clone Repository (assumes SSH key is already configured)
+    # Clone Repository
     echo "Cloning repository..."
     cd $PROJECT_DIR
-    sudo -u $SERVICE_USER git clone --depth 1 -b main git@github.com:bowtiedbluefin/morpheus-API.git temp_repo
+    
+    # Use HTTPS for public repository
+    sudo -u $SERVICE_USER git clone --depth 1 -b main https://github.com/bowtiedbluefin/morpheus-API.git temp_repo
+    
+    # Check if clone was successful
+    if [ ! -d "temp_repo" ]; then
+        echo "ERROR: Failed to clone repository."
+        echo "Try cloning manually with: git clone https://github.com/bowtiedbluefin/morpheus-API.git"
+        echo "Then run this script with the 'restart' option"
+        exit 1
+    fi
+    
     sudo -u $SERVICE_USER cp -r temp_repo/. .
     sudo -u $SERVICE_USER rm -rf temp_repo
 
@@ -90,7 +101,7 @@ setup_fresh_instance() {
         sudo sed -i 's/^POSTGRES_USER=.*/POSTGRES_USER=morpheus_user/' .env
         sudo sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=morpheus_password/' .env
         sudo sed -i 's/^POSTGRES_DB=.*/POSTGRES_DB=morpheus_db/' .env
-        sudo sed -i 's|^DATABASE_URL=.*|DATABASE_URL=postgresql+asyncpg://morpheus_user:morpheus_password@localhost:5433/morpheus_db|' .env
+        sudo sed -i 's|^DATABASE_URL=.*|DATABASE_URL=postgresql+asyncpg://morpheus_user:morpheus_password@localhost:5432/morpheus_db|' .env
         sudo sed -i 's/^REDIS_PASSWORD=.*/REDIS_PASSWORD=your_redis_password/' .env
         sudo sed -i 's|^REDIS_URL=.*|REDIS_URL=redis://:your_redis_password@localhost:6379/0|' .env
         sudo sed -i 's|^PROXY_ROUTER_URL=.*|PROXY_ROUTER_URL=http://localhost:8082|' .env
@@ -117,11 +128,80 @@ setup_fresh_instance() {
 
     # Start Database and Redis
     echo "Starting PostgreSQL and Redis containers..."
-    sudo sed -i 's/networks:/network_mode: "host"/' docker-compose.yml
-    sudo sed -i '/morpheus_net:/,+2d' docker-compose.yml
-    sudo docker-compose up -d db redis
-    sleep 10 # Wait for containers to initialize
+    
+    # Handle docker-compose.yml more carefully
+    if [ -f "docker-compose.yml" ]; then
+        echo "Updating docker-compose.yml configuration..."
+        # Create a backup of the original file
+        cp docker-compose.yml docker-compose.yml.bak
+        
+        # Add network_mode: "host" to the db service if it doesn't exist
+        if ! grep -q "network_mode: \"host\"" docker-compose.yml; then
+            # Add network_mode to the db service
+            awk '/services:/,/db:/{if($0 ~ /db:/){print; print "    network_mode: \"host\""; next}} 1' docker-compose.yml > docker-compose.temp
+            mv docker-compose.temp docker-compose.yml
+            
+            # Also add to redis service
+            awk '/services:/,/redis:/,/^[^ ]/{if($0 ~ /redis:/){print; print "    network_mode: \"host\""; next}} 1' docker-compose.yml > docker-compose.temp
+            mv docker-compose.temp docker-compose.yml
+        fi
+    else
+        echo "Creating docker-compose.yml file..."
+        cat > docker-compose.yml << 'EOL'
+version: '3'
 
+services:
+  db:
+    image: postgres:15-alpine
+    network_mode: "host"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-morpheus_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-morpheus_password}
+      POSTGRES_DB: ${POSTGRES_DB:-morpheus_db}
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    network_mode: "host"
+    command: redis-server --requirepass ${REDIS_PASSWORD:-your_redis_password}
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres_data:
+EOL
+    fi
+    
+    # Stop any existing containers first
+    echo "Starting containers..."
+    sudo docker-compose down || true
+    sleep 2
+    
+    # Start the containers
+    sudo docker-compose up -d db redis
+    sleep 5
+    
+    # Verify containers are running
+    echo "Verifying containers are running..."
+    sudo docker ps
+    
+    # Wait for the database to be ready
+    echo "Waiting for database to start (this may take up to 30 seconds)..."
+    for i in {1..6}; do
+        echo "Attempt $i: Checking if database is ready..."
+        if sudo docker exec $(sudo docker ps -qf "name=morpheus-api_db") pg_isready -h localhost -p 5432 2>/dev/null; then
+            echo "Database is ready!"
+            break
+        elif [ $i -eq 6 ]; then
+            echo "WARNING: Database check timed out. Continuing anyway..."
+        else
+            sleep 5
+        fi
+    done
+    
     # Run Alembic migrations
     echo "Running database migrations..."
     source $VENV_DIR/bin/activate
@@ -183,6 +263,14 @@ EOL
         # If still failing, try direct table creation as fallback
         if [ $? -ne 0 ]; then
             echo "WARNING: Migration still failing, creating tables directly..."
+            # Create direct table creation script
+            
+            # Ensure PostgreSQL client is installed for direct table creation
+            if ! command -v psql &> /dev/null; then
+                echo "Installing PostgreSQL client..."
+                sudo yum install -y postgresql15
+            fi
+
             # Create direct table creation script
             cat > create_tables.py << 'EOL'
 #!/usr/bin/env python3
@@ -491,7 +579,12 @@ EOL
             # If it's the delegation table migration that failed, try to create user_automation_settings directly
             if [ "$migration" = "d00825f2a89a" ]; then
                 echo "Creating user_automation_settings table directly..."
-                psql -U morpheus_user -d morpheus_db -p 5433 -h localhost << EOF
+                # Install PostgreSQL client if not available
+                if ! command -v psql &> /dev/null; then
+                    echo "Installing PostgreSQL client..."
+                    sudo yum install -y postgresql15
+                fi
+                PGPASSWORD=morpheus_password psql -U morpheus_user -d morpheus_db -p 5432 -h localhost << EOF
 CREATE TABLE IF NOT EXISTS user_automation_settings (
     id SERIAL PRIMARY KEY,
     user_id INTEGER UNIQUE REFERENCES users(id),
@@ -502,10 +595,6 @@ CREATE TABLE IF NOT EXISTS user_automation_settings (
 );
 CREATE INDEX IF NOT EXISTS ix_user_automation_settings_id ON user_automation_settings (id);
 EOF
-                if [ $? -ne 0 ]; then
-                    echo "ERROR: Failed to create user_automation_settings table. Please check the logs."
-                    exit 1
-                fi
             fi
         fi
     done
@@ -730,48 +819,121 @@ recovery_procedure() {
         alembic upgrade head
         # If still failing, create tables directly
         if [ $? -ne 0 ]; then
-            echo "Migration failed, attempting direct table creation..."
-            python3 create_tables.py
-        fi
-    else
-        # Create the repair tools if they don't exist
-        echo "Creating database repair tools..."
-        # Create fix_alembic.py script
-        cat > fix_alembic.py << 'EOL'
+            echo "WARNING: Migration still failing, creating tables directly..."
+            # Create direct table creation script
+            
+            # Ensure PostgreSQL client is installed for direct table creation
+            if ! command -v psql &> /dev/null; then
+                echo "Installing PostgreSQL client..."
+                sudo yum install -y postgresql15
+            fi
+
+            # Create direct table creation script
+            cat > create_tables.py << 'EOL'
 #!/usr/bin/env python3
 import asyncio, os, sys
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 
-# Import settings
 sys.path.insert(0, os.path.abspath('.'))
 from src.core.config import settings
 
-# The correct revision ID from the latest migration
-CORRECT_REVISION = '881e615d25ac'  # Update this if needed
-
-async def fix_alembic_version():
+async def create_tables():
     db_url = os.getenv("DATABASE_URL", str(settings.DATABASE_URL))
     engine = create_async_engine(db_url)
     async with AsyncSession(engine) as session:
         try:
-            result = await session.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'alembic_version')"))
-            if result.scalar():
-                await session.execute(text(f"UPDATE alembic_version SET version_num = '{CORRECT_REVISION}'"))
-            else:
-                await session.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)"))
-                await session.execute(text(f"INSERT INTO alembic_version VALUES ('{CORRECT_REVISION}')"))
+            # Check if sessions table exists
+            result = await session.execute(text(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sessions')"
+            ))
+            sessions_exists = result.scalar()
+            
+            if not sessions_exists:
+                print("Creating sessions table...")
+                await session.execute(text("""
+                CREATE TABLE sessions (
+                    id VARCHAR NOT NULL, 
+                    user_id INTEGER, 
+                    api_key_id INTEGER, 
+                    model VARCHAR NOT NULL, 
+                    type VARCHAR NOT NULL, 
+                    created_at TIMESTAMP WITHOUT TIME ZONE, 
+                    expires_at TIMESTAMP WITHOUT TIME ZONE NOT NULL, 
+                    is_active BOOLEAN, 
+                    PRIMARY KEY (id), 
+                    FOREIGN KEY(api_key_id) REFERENCES api_keys (id), 
+                    FOREIGN KEY(user_id) REFERENCES users (id)
+                )
+                """))
+                
+                await session.execute(text(
+                    "CREATE INDEX ix_sessions_api_key_id ON sessions (api_key_id)"
+                ))
+                
+                await session.execute(text(
+                    "CREATE INDEX ix_sessions_is_active ON sessions (is_active)"
+                ))
+                
+                await session.execute(text("""
+                CREATE UNIQUE INDEX sessions_active_api_key_unique 
+                ON sessions (api_key_id, is_active)
+                WHERE is_active IS true
+                """))
+                
+                print("Sessions table created successfully")
+            
+            # Check if delegations table exists
+            result = await session.execute(text(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'delegations')"
+            ))
+            delegations_exists = result.scalar()
+            
+            if not delegations_exists:
+                print("Creating delegations table...")
+                await session.execute(text("""
+                CREATE TABLE delegations (
+                    id SERIAL NOT NULL, 
+                    user_id INTEGER NOT NULL, 
+                    delegate_address VARCHAR NOT NULL, 
+                    signed_delegation_data TEXT NOT NULL, 
+                    expiry TIMESTAMP WITHOUT TIME ZONE, 
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(), 
+                    is_active BOOLEAN, 
+                    PRIMARY KEY (id), 
+                    FOREIGN KEY(user_id) REFERENCES users (id)
+                )
+                """))
+                
+                await session.execute(text(
+                    "CREATE INDEX ix_delegations_delegate_address ON delegations (delegate_address)"
+                ))
+                
+                await session.execute(text(
+                    "CREATE INDEX ix_delegations_id ON delegations (id)"
+                ))
+                
+                await session.execute(text(
+                    "CREATE INDEX ix_delegations_is_active ON delegations (is_active)"
+                ))
+                
+                await session.execute(text(
+                    "CREATE INDEX ix_delegations_user_id ON delegations (user_id)"
+                ))
+                
+                print("Delegations table created successfully")
+            
             await session.commit()
-            print("Alembic version fixed!")
+            print("Tables verified or created successfully")
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"ERROR: {e}")
             await session.rollback()
 
-if __name__ == "__main__": asyncio.run(fix_alembic_version())
+if __name__ == "__main__": asyncio.run(create_tables())
 EOL
-        chmod +x fix_alembic.py
-        python3 fix_alembic.py
-        alembic upgrade head
+            chmod +x create_tables.py
+            python3 create_tables.py
+        fi
     fi
 
     echo "5. Checking for orphaned sessions in the database..."
