@@ -36,12 +36,6 @@ def upgrade() -> None:
     op.create_index(op.f('ix_delegations_is_active'), 'delegations', ['is_active'], unique=False)
     op.create_index(op.f('ix_delegations_user_id'), 'delegations', ['user_id'], unique=False)
     
-    # Try to drop the existing index if it exists
-    try:
-        op.drop_index('unique_active_api_key_session', table_name='user_sessions')
-    except:
-        pass
-    
     op.create_table('sessions',
     sa.Column('id', sa.String(), nullable=False),
     sa.Column('user_id', sa.Integer(), nullable=True),
