@@ -55,14 +55,100 @@ app = FastAPI(
         "defaultModelsExpandDepth": -1,
         "displayRequestDuration": True,
         "deepLinking": True,
+        "docExpansion": "list",
+        "filter": True,
         "tryItOutEnabled": True,
-        "docExpansion": "list"
+        "syntaxHighlight.theme": "monokai",
+        "dom_id": "#swagger-ui",
+        "layout": "BaseLayout",
+        "onComplete": """
+            function() {
+                // Add custom CSS for animations
+                const style = document.createElement('style');
+                style.textContent = `
+                    @keyframes pulse {
+                        0% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7); }
+                        70% { box-shadow: 0 0 0 10px rgba(220, 53, 69, 0); }
+                        100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0); }
+                    }
+                    .authorize.pulse {
+                        animation: pulse 2s infinite;
+                    }
+                `;
+                document.head.appendChild(style);
+                
+                // Add helpful instruction panel
+                const instructionDiv = document.createElement('div');
+                instructionDiv.innerHTML = `
+                    <div style="background-color: #f8d7da; padding: 15px; margin-bottom: 20px; border-radius: 5px; border-left: 5px solid #dc3545;">
+                        <h3 style="margin-top: 0; color: #721c24;">Authentication Required</h3>
+                        <p><strong>⚠️ Two authentication methods available!</strong></p>
+                        <p><strong>1. JWT Authentication (BearerAuth):</strong> For most endpoints except /session</p>
+                        <p>- Register or Login using the /auth/register or /auth/login endpoints</p>
+                        <p>- Copy the access_token from the response</p>
+                        <p>- Click "Authorize" and paste the token in the BearerAuth field (without "Bearer" prefix)</p>
+                        <p><strong>2. API Key Authentication (APIKeyAuth):</strong> For /session endpoints</p>
+                        <p>- Create an API key via /auth/keys endpoint (requires JWT auth)</p>
+                        <p>- Copy the API key from the response</p>
+                        <p>- Click "Authorize" and paste the API key in the APIKeyAuth field</p>
+                        <p>- The API key can be entered as either "Bearer sk-xxxxxx" or just "sk-xxxxxx"</p>
+                    </div>
+                `;
+                
+                // Add it to the top of the Swagger UI for better visibility
+                const swaggerUI = document.querySelector('.swagger-ui');
+                const infoContainer = swaggerUI.querySelector('.information-container');
+                infoContainer.after(instructionDiv);
+                
+                // Fix session endpoints to use API key auth when the page loads
+                setTimeout(function() {
+                    const authButton = document.querySelector('.authorize');
+                    if (!localStorage.getItem('auth_reminded')) {
+                        authButton.classList.add('pulse');
+                        localStorage.setItem('auth_reminded', 'true');
+                    }
+                    
+                    // Check if we're on a session endpoint and select the right auth
+                    const pathElements = document.querySelectorAll('.opblock-summary-path');
+                    pathElements.forEach(function(elem) {
+                        const path = elem.innerText;
+                        if (path && path.includes('/session/')) {
+                            const opblock = elem.closest('.opblock');
+                            if (opblock) {
+                                const authEl = opblock.querySelector('.authorization__btn');
+                                if (authEl) {
+                                    // Add a visual indicator for API Key auth
+                                    const indicator = document.createElement('span');
+                                    indicator.className = 'api-key-indicator';
+                                    indicator.innerText = 'API Key';
+                                    indicator.style.backgroundColor = '#28a745';
+                                    indicator.style.color = 'white';
+                                    indicator.style.padding = '2px 8px';
+                                    indicator.style.borderRadius = '4px';
+                                    indicator.style.fontSize = '10px';
+                                    indicator.style.marginLeft = '8px';
+                                    authEl.appendChild(indicator);
+                                }
+                            }
+                        }
+                    });
+                }, 1000);
+            }
+        """
     },
     servers=[
         {
             "url": "http://api.mor.org",
             "description": "Production"
-        } 
+        },
+        {
+            "url": "http://api.dev.mor.org",
+            "description": "Testing"
+        },
+        {
+            "url": "http://localhost:8000",
+            "description": "Development"
+        }
     ]
 )
 
@@ -458,8 +544,10 @@ def custom_openapi():
         version=app.version,
         description=app.description,
         routes=app.routes,
-        servers=app.servers,
     )
+    
+    # Ensure servers are included in the schema
+    openapi_schema["servers"] = app.servers
 
     # Add custom info about authentication
     if "components" not in openapi_schema:

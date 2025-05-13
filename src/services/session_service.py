@@ -37,23 +37,34 @@ async def create_automated_session(
     Returns:
         Session: The created session object
     """
-    logger.info(f"Creating automated session for API key {api_key_id}, model: {requested_model}")
+    logger.info(f"[SESSION_DEBUG] Creating automated session for API key {api_key_id}, model: {requested_model}")
+    logger.info(f"[SESSION_DEBUG] Proxy router URL: {settings.PROXY_ROUTER_URL}")
+    logger.info(f"[SESSION_DEBUG] Using session duration: {session_duration}s")
     
     try:
         # Get the target model using the model router
+        logger.info(f"[SESSION_DEBUG] About to resolve target model from: {requested_model}")
         target_model = model_router.get_target_model(requested_model)
-        logger.info(f"Resolved target model: {target_model}")
+        logger.info(f"[SESSION_DEBUG] Resolved target model: {target_model}")
         
         # If api_key_id provided and db is available, deactivate any existing sessions
         if api_key_id and db:
+            logger.info(f"[SESSION_DEBUG] Deactivating existing sessions for API key: {api_key_id}")
             await session_crud.deactivate_existing_sessions(db, api_key_id)
+            logger.info("[SESSION_DEBUG] Existing sessions deactivated successfully")
+        else:
+            logger.warning(f"[SESSION_DEBUG] Cannot deactivate existing sessions - api_key_id: {'present' if api_key_id else 'missing'}, db: {'present' if db else 'missing'}")
         
         # Get user's private key
         if db and user_id:
+            logger.info(f"[SESSION_DEBUG] Getting private key for user {user_id}")
             private_key, using_fallback = await private_key_crud.get_private_key_with_fallback(db, user_id)
             
             if not private_key:
+                logger.error("[SESSION_DEBUG] No private key found and no fallback key configured")
                 raise ValueError("No private key found and no fallback key configured")
+            
+            logger.info(f"[SESSION_DEBUG] Found private key (using fallback: {using_fallback})")
             
             # Prepare session data
             session_data = {
@@ -61,14 +72,17 @@ async def create_automated_session(
                 "failover": False,
                 "directPayment": False
             }
+            logger.info(f"[SESSION_DEBUG] Session data: {json.dumps(session_data)}")
             
             # Add private key to headers
             headers = {
                 "X-Private-Key": private_key
             }
+            logger.info(f"[SESSION_DEBUG] Request headers prepared: {json.dumps({k: v for k, v in headers.items() if k != 'X-Private-Key'})}")
             
             try:
                 # Create session with proxy router using the model session endpoint
+                logger.info(f"[SESSION_DEBUG] Calling proxy router at: blockchain/models/{target_model}/session")
                 response = await execute_proxy_router_operation(
                     "POST",
                     f"blockchain/models/{target_model}/session",
@@ -76,6 +90,8 @@ async def create_automated_session(
                     json=session_data,
                     max_retries=3
                 )
+                
+                logger.info(f"[SESSION_DEBUG] Proxy router response: {json.dumps(response) if response else 'None'}")
                 
                 # Extract session ID from response
                 blockchain_session_id = None
@@ -86,12 +102,17 @@ async def create_automated_session(
                                          response.get("id"))
                 
                 if not blockchain_session_id:
+                    logger.error(f"[SESSION_DEBUG] No session ID found in proxy router response: {json.dumps(response)}")
                     raise ValueError("No session ID found in proxy router response")
+                
+                logger.info(f"[SESSION_DEBUG] Extracted blockchain session ID: {blockchain_session_id}")
                 
                 # Store session in database
                 expiry_time_with_tz = datetime.now(timezone.utc) + timedelta(seconds=session_duration)
                 # Convert to naive datetime for DB compatibility
                 expiry_time = expiry_time_with_tz.replace(tzinfo=None)
+                logger.info(f"[SESSION_DEBUG] Storing session in database with expiry: {expiry_time}")
+                
                 session = await session_crud.create_session(
                     db=db,
                     session_id=blockchain_session_id,
@@ -102,16 +123,61 @@ async def create_automated_session(
                     expires_at=expiry_time
                 )
                 
-                logger.info(f"Successfully created automated session {blockchain_session_id}")
+                logger.info(f"[SESSION_DEBUG] Successfully created automated session {blockchain_session_id} with DB ID {session.id if session else 'None'}")
                 return session
                 
             except Exception as e:
-                logger.error(f"Error creating session with proxy router: {e}")
+                logger.error(f"[SESSION_DEBUG] Error creating session with proxy router: {e}")
+                logger.exception(e)  # Log full stack trace
+                
+                # Try to diagnose proxy router connectivity
+                try:
+                    logger.info("[SESSION_DEBUG] Attempting direct connection to proxy router")
+                    
+                    # Define auth headers for raw request
+                    auth_str = f"{settings.PROXY_ROUTER_USERNAME}:{settings.PROXY_ROUTER_PASSWORD}"
+                    auth_b64 = base64.b64encode(auth_str.encode('ascii')).decode('ascii')
+                    
+                    raw_headers = {
+                        "Authorization": f"Basic {auth_b64}",
+                        "Content-Type": "application/json"
+                    }
+                    
+                    # Make a direct health check request to diagnose connection issues
+                    async with httpx.AsyncClient() as client:
+                        try:
+                            health_url = f"{settings.PROXY_ROUTER_URL}/health"
+                            logger.info(f"[SESSION_DEBUG] Testing direct connection to proxy health endpoint: {health_url}")
+                            health_response = await client.get(health_url, headers=raw_headers, timeout=5.0)
+                            logger.info(f"[SESSION_DEBUG] Health check response: Status {health_response.status_code}, Body: {health_response.text[:200]}")
+                        except Exception as health_err:
+                            logger.error(f"[SESSION_DEBUG] Health check failed: {health_err}")
+                        
+                        # Try to get available models
+                        try:
+                            models_url = f"{settings.PROXY_ROUTER_URL}/v1/models"
+                            logger.info(f"[SESSION_DEBUG] Testing available models: {models_url}")
+                            models_response = await client.get(models_url, headers=raw_headers, timeout=5.0)
+                            logger.info(f"[SESSION_DEBUG] Models API response: Status {models_response.status_code}, Body: {models_response.text[:200]}")
+                        except Exception as models_err:
+                            logger.error(f"[SESSION_DEBUG] Models check failed: {models_err}")
+                except Exception as diag_err:
+                    logger.error(f"[SESSION_DEBUG] Diagnostic connection test failed: {diag_err}")
+                
                 raise
         else:
-            raise ValueError("Database session and user ID are required to create an automated session")
+            missing_items = []
+            if not db:
+                missing_items.append("db")
+            if not user_id:
+                missing_items.append("user_id")
+            
+            error_msg = f"Database session and user ID are required to create an automated session. Missing: {', '.join(missing_items)}"
+            logger.error(f"[SESSION_DEBUG] {error_msg}")
+            raise ValueError(error_msg)
     except Exception as e:
-        logger.error(f"Error creating automated session: {e}")
+        logger.error(f"[SESSION_DEBUG] Fatal error creating automated session: {e}")
+        logger.exception(e)  # Log full stack trace
         raise
 
 async def close_session(
@@ -135,20 +201,14 @@ async def close_session(
             logger.warning(f"Session {session_id} not found in database")
             return False
             
-        # Call proxy router to close session
-        auth_header = base64.b64encode(b"user:pass").decode("utf-8")
-        headers = {
-            "Authorization": f"Basic {auth_header}",
-            "Content-Type": "application/json"
-        }
-        
         proxy_success = False
         try:
+            # Use the correct POST endpoint for closing sessions
+            # No need to manually set auth headers, execute_proxy_router_operation handles it
             response = await execute_proxy_router_operation(
-                "DELETE",
-                f"/v1/sessions/{session_id}",
-                headers=headers,
-                max_retries=3  # Increased retries
+                "POST",
+                f"blockchain/sessions/{session_id}/close",
+                max_retries=3
             )
             logger.info(f"Successfully closed session {session_id} at proxy level")
             proxy_success = True
