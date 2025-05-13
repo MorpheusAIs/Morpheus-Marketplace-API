@@ -56,7 +56,7 @@ setup_fresh_instance() {
     cd $PROJECT_DIR
     
     # Use HTTPS for public repository
-    sudo -u $SERVICE_USER git clone --depth 1 -b main https://github.com/bowtiedbluefin/morpheus-API.git temp_repo
+    sudo -u $SERVICE_USER git clone --depth 1 -b feat-toolcalling https://github.com/bowtiedbluefin/morpheus-API.git temp_repo
     
     # Check if clone was successful
     if [ ! -d "temp_repo" ]; then
@@ -129,74 +129,68 @@ setup_fresh_instance() {
     # Start Database and Redis
     echo "Starting PostgreSQL and Redis containers..."
     
-    # Handle docker-compose.yml more carefully
-    if [ -f "docker-compose.yml" ]; then
-        echo "Updating docker-compose.yml configuration..."
-        # Create a backup of the original file
-        cp docker-compose.yml docker-compose.yml.bak
-        
-        # Add network_mode: "host" to the db service if it doesn't exist
-        if ! grep -q "network_mode: \"host\"" docker-compose.yml; then
-            # Add network_mode to the db service
-            awk '/services:/,/db:/{if($0 ~ /db:/){print; print "    network_mode: \"host\""; next}} 1' docker-compose.yml > docker-compose.temp
-            mv docker-compose.temp docker-compose.yml
-            
-            # Also add to redis service
-            awk '/services:/,/redis:/,/^[^ ]/{if($0 ~ /redis:/){print; print "    network_mode: \"host\""; next}} 1' docker-compose.yml > docker-compose.temp
-            mv docker-compose.temp docker-compose.yml
-        fi
-    else
-        echo "Creating docker-compose.yml file..."
-        cat > docker-compose.yml << 'EOL'
-version: '3'
+    # Always create/overwrite docker-compose.yml with the correct settings
+    echo "Creating docker-compose.yml file with host networking..."
+    cat > docker-compose.yml << 'EOL'
+version: '3.8' # Use a more recent version
 
 services:
   db:
     image: postgres:15-alpine
-    network_mode: "host"
+    network_mode: "host" # Use host network for direct localhost access
     volumes:
       - postgres_data:/var/lib/postgresql/data/
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-morpheus_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-morpheus_password}
       POSTGRES_DB: ${POSTGRES_DB:-morpheus_db}
+    # Ports section is not needed with network_mode: host, but doesn't hurt
     ports:
       - "5432:5432"
+    restart: always
 
   redis:
     image: redis:7-alpine
-    network_mode: "host"
+    network_mode: "host" # Use host network for direct localhost access
     command: redis-server --requirepass ${REDIS_PASSWORD:-your_redis_password}
+    # Ports section is not needed with network_mode: host, but doesn't hurt
     ports:
       - "6379:6379"
+    restart: always
 
 volumes:
   postgres_data:
 EOL
-    fi
+    sudo chown $SERVICE_USER:$SERVICE_USER docker-compose.yml
     
     # Stop any existing containers first
-    echo "Starting containers..."
-    sudo docker-compose down || true
+    echo "Stopping existing containers (if any)..."
+    sudo docker-compose down --remove-orphans || true
     sleep 2
     
     # Start the containers
+    echo "Starting containers..."
     sudo docker-compose up -d db redis
     sleep 5
     
     # Verify containers are running
     echo "Verifying containers are running..."
-    sudo docker ps
+    sudo docker-compose ps
     
     # Wait for the database to be ready
     echo "Waiting for database to start (this may take up to 30 seconds)..."
     for i in {1..6}; do
-        echo "Attempt $i: Checking if database is ready..."
-        if sudo docker exec $(sudo docker ps -qf "name=morpheus-api_db") pg_isready -h localhost -p 5432 2>/dev/null; then
+        echo "Attempt $i: Checking if database is ready on port 5432..."
+        # Use docker-compose exec and correct port 5432
+        if sudo docker-compose exec db pg_isready -h localhost -p 5432 -U ${POSTGRES_USER:-morpheus_user} -d ${POSTGRES_DB:-morpheus_db} > /dev/null 2>&1; then
             echo "Database is ready!"
             break
         elif [ $i -eq 6 ]; then
             echo "WARNING: Database check timed out. Continuing anyway..."
+            echo "Troubleshooting tips:"
+            echo "  - Check Docker logs: sudo docker-compose logs db"
+            echo "  - Ensure port 5432 is free on the host."
+            echo "  - Verify .env variables POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB match docker-compose.yml"
         else
             sleep 5
         fi
@@ -759,7 +753,7 @@ If you need to set up components manually or troubleshoot:
 6. Environment Variables:
    cp .env.example .env
    # Edit .env with your settings, ensuring to use localhost for services:
-   # DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5433/db
+   # DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/db <-- Use port 5432
    # REDIS_URL=redis://:pass@localhost:6379/0
    # PROXY_ROUTER_URL=http://localhost:8082
    nano .env

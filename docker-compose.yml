@@ -1,24 +1,25 @@
 services:
   db:
     image: postgres:15-alpine
+    network_mode: "host"
     volumes:
       - postgres_data:/var/lib/postgresql/data/
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-morpheus_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-morpheus_password}
       POSTGRES_DB: ${POSTGRES_DB:-morpheus_db}
+      PGPORT: 5433
     ports:
       - "5433:5432" # Changed from 5432:5432 to avoid conflicts with local PostgreSQL
     healthcheck:
-        test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+        test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -p 5433"]
         interval: 5s
         timeout: 5s
         retries: 5
-    networks:
-      - morpheus_net
 
   redis:
     image: redis:7-alpine
+    network_mode: "host"
     command: redis-server --requirepass ${REDIS_PASSWORD:-supersecretredis}
     volumes:
       - redis_data:/data
@@ -29,8 +30,6 @@ services:
         interval: 5s
         timeout: 5s
         retries: 5
-    networks:
-      - morpheus_net
 
   api:
     build:
@@ -60,8 +59,4 @@ services:
 
 volumes:
   postgres_data:
-  redis_data:
-
-networks:
-  morpheus_net:
-    driver: bridge 
+  redis_data: 
