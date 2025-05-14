@@ -76,7 +76,8 @@ async def create_automated_session(
             
             # Add private key to headers
             headers = {
-                "X-Private-Key": private_key
+                "X-Private-Key": private_key,
+                "Content-Type": "application/json"
             }
             logger.info(f"[SESSION_DEBUG] Request headers prepared: {json.dumps({k: v for k, v in headers.items() if k != 'X-Private-Key'})}")
             
@@ -87,7 +88,7 @@ async def create_automated_session(
                     "POST",
                     f"blockchain/models/{target_model}/session",
                     headers=headers,
-                    json=session_data,
+                    json_data=session_data,
                     max_retries=3
                 )
                 
@@ -146,7 +147,7 @@ async def create_automated_session(
                     # Make a direct health check request to diagnose connection issues
                     async with httpx.AsyncClient() as client:
                         try:
-                            health_url = f"{settings.PROXY_ROUTER_URL}/health"
+                            health_url = f"{settings.PROXY_ROUTER_URL}/healthcheck"
                             logger.info(f"[SESSION_DEBUG] Testing direct connection to proxy health endpoint: {health_url}")
                             health_response = await client.get(health_url, headers=raw_headers, timeout=5.0)
                             logger.info(f"[SESSION_DEBUG] Health check response: Status {health_response.status_code}, Body: {health_response.text[:200]}")
@@ -391,8 +392,28 @@ async def switch_model(
     # Get current active session
     current_session = await session_crud.get_active_session_by_api_key(db, api_key_id)
     
-    # Close current session if it exists
+    # Convert the new model to its ID form for comparison
+    try:
+        new_model_id = model_router.get_target_model(new_model)
+        logger.info(f"Resolved new model '{new_model}' to ID: {new_model_id}")
+    except Exception as e:
+        logger.error(f"Error resolving new model '{new_model}' to ID: {e}")
+        logger.exception(e)
+        # If we can't resolve the model ID, just use the original string
+        new_model_id = new_model
+    
+    # Check if we actually need to switch models
     if current_session:
+        current_model_id = current_session.model
+        logger.info(f"Current session model ID: {current_model_id}")
+        
+        # If models are the same, just return the current session
+        if current_model_id == new_model_id:
+            logger.info(f"Current model ID ({current_model_id}) matches requested model ID ({new_model_id}), no switch needed")
+            return current_session
+        
+        # Models are different, close current session
+        logger.info(f"Models are different. Current: {current_model_id}, Requested: {new_model_id}")
         logger.info(f"Found existing session {current_session.id}, closing before switching models")
         # Try closing up to 3 times
         for attempt in range(3):
@@ -409,6 +430,8 @@ async def switch_model(
             logger.error(f"Failed to close session {current_session.id} in proxy after multiple attempts")
             # Force mark as inactive in DB to prevent orphaned sessions
             await session_crud.mark_session_inactive(db, current_session.id)
+    else:
+        logger.info(f"No active session found for API key {api_key_id}")
     
     # Create new session
     return await create_automated_session(

@@ -92,7 +92,7 @@ async def execute_proxy_router_operation(
                 response = await client.request(
                     method,
                     url,
-                    headers=request_headers_actual,  # Use actual headers with real private key
+                    headers=request_headers,
                     json=json_data,
                     params=params,
                     auth=auth,
