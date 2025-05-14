@@ -1,0 +1,592 @@
+#!/bin/bash
+# Morpheus API Gateway - AWS EC2 Setup and Management Script
+# This script provides four functionalities:
+# 1. Initial EC2 Setup: Complete setup from a fresh EC2 instance
+# 2. Service Restart: For code updates without full reinstall
+# 3. Manual Gunicorn Start: Direct start without systemd
+# 4. Manual Setup Instructions: For reference/troubleshooting
+
+#-----------------------------------------------------
+# SECTION 0: Github Auth (Fresh Instance)
+#-----------------------------------------------------
+# ssh-keygen -t rsa -b 4096 -C "your_email@example.com"
+# cat ~/.ssh/id_rsa.pub
+# paste the public key into github settings (https://github.com/<username>/<repo>/settings/keys)
+
+#-----------------------------------------------------
+# SECTION 1: INITIAL EC2 SETUP (Fresh Instance)
+#-----------------------------------------------------
+setup_fresh_instance() {
+    echo "======================================================"
+    echo "Starting Fresh EC2 Instance Setup"
+    echo "======================================================"
+
+    # System Updates and Dependencies
+    echo "Installing system dependencies..."
+    sudo yum update -y
+    sudo yum install git gcc make openssl-devel bzip2-devel libffi-devel zlib-devel postgresql-devel postgresql-libs python3.11 python3.11-pip python3.11-devel docker postgresql15 -y
+
+    # Setup Docker
+    echo "Setting up Docker..."
+    sudo systemctl enable docker
+    sudo systemctl start docker
+    sudo usermod -a -G docker moradmin
+    sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    sudo chmod +x /usr/local/bin/docker-compose
+
+    # Variables
+    PROJECT_DIR="/home/moradmin/morpheus-API"
+    VENV_DIR="/home/moradmin/venv-morpheus"
+    SERVICE_USER="moradmin"
+
+    # Create project directory if it doesn't exist
+    echo "Creating project directory at $PROJECT_DIR..."
+    sudo mkdir -p $PROJECT_DIR
+    if [ ! -d "$PROJECT_DIR" ]; then
+        echo "ERROR: Failed to create $PROJECT_DIR directory"
+        exit 1
+    fi
+    sudo chown $SERVICE_USER:$SERVICE_USER $PROJECT_DIR
+
+    # Clean virtual environment if it exists
+    sudo rm -rf $VENV_DIR
+
+    # Clone Repository
+    echo "Cloning repository..."
+    cd $PROJECT_DIR
+
+    # Use HTTPS for public repository
+    sudo -u $SERVICE_USER git clone --depth 1 -b main https://github.com/bowtiedbluefin/morpheus-API.git temp_repo
+
+    # Check if clone was successful
+    if [ ! -d "temp_repo" ]; then
+        echo "ERROR: Failed to clone repository."
+        echo "Try cloning manually with: git clone https://github.com/bowtiedbluefin/morpheus-API.git"
+        echo "Then run this script with the 'restart' option"
+        exit 1
+    fi
+
+    sudo -u $SERVICE_USER cp -r temp_repo/. .
+    sudo -u $SERVICE_USER rm -rf temp_repo
+
+    # Setup Python Environment
+    echo "Setting up Python virtual environment..."
+    sudo -u $SERVICE_USER python3.11 -m venv $VENV_DIR
+    source $VENV_DIR/bin/activate
+    pip install --upgrade pip
+
+    # Install Dependencies
+    echo "Installing Python dependencies..."
+    if [ -f "pyproject.toml" ] || [ -f "poetry.lock" ]; then
+        pip install poetry
+        poetry install --no-root --no-interaction
+    elif [ -f "requirements.txt" ]; then
+        pip install -r requirements.txt
+    else
+        echo "No dependency file found. Cannot proceed."
+        exit 1
+    fi
+    pip install gunicorn
+
+    # Configure Environment
+    echo "Setting up environment variables..."
+    if [ -f .env.example ]; then
+        sudo -u $SERVICE_USER cp .env.example .env
+
+        # Generate secure keys
+        JWT_SECRET=$(openssl rand -hex 32)
+        ENCRYPTION_KEY=$(openssl rand -hex 32)
+
+        # Update .env file
+        sudo sed -i 's/^POSTGRES_USER=.*/POSTGRES_USER=morpheus_user/' .env
+        sudo sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=morpheus_password/' .env
+        sudo sed -i 's/^POSTGRES_DB=.*/POSTGRES_DB=morpheus_db/' .env
+        sudo sed -i 's|^DATABASE_URL=.*|DATABASE_URL=postgresql+asyncpg://morpheus_user:morpheus_password@localhost:5432/morpheus_db|' .env
+        sudo sed -i 's/^REDIS_PASSWORD=.*/REDIS_PASSWORD=your_redis_password/' .env
+        sudo sed -i 's|^REDIS_URL=.*|REDIS_URL=redis://:your_redis_password@localhost:6379/0|' .env
+        sudo sed -i 's|^PROXY_ROUTER_URL=.*|PROXY_ROUTER_URL=http://localhost:8082|' .env
+        sudo sed -i "s/^JWT_SECRET_KEY=.*/JWT_SECRET_KEY=$JWT_SECRET/" .env
+        sudo sed -i "s/^MASTER_ENCRYPTION_KEY=.*/MASTER_ENCRYPTION_KEY=$ENCRYPTION_KEY/" .env
+        sudo sed -i 's/^ACCESS_TOKEN_EXPIRE_MINUTES=.*/ACCESS_TOKEN_EXPIRE_MINUTES=30/' .env
+        sudo sed -i 's/^REFRESH_TOKEN_EXPIRE_DAYS=.*/REFRESH_TOKEN_EXPIRE_DAYS=7/' .env
+        sudo sed -i 's/^AUTOMATION_FEATURE_ENABLED=.*/AUTOMATION_FEATURE_ENABLED=true/' .env
+
+        # Contract Settings (TESTNET)
+        sudo sed -i 's/^DIAMOND_CONTRACT_ADDRESS=.*/DIAMOND_CONTRACT_ADDRESS=0xb8C55cD613af947E73E262F0d3C54b7211Af16CF/' .env
+        sudo sed -i 's/^CONTRACT_ADDRESS=.*/CONTRACT_ADDRESS=0x34a285a1b1c166420df5b6630132542923b5b27e/' .env
+        sudo sed -i 's|^BLOCKSCOUT_API_URL=.*|BLOCKSCOUT_API_URL="https://arbitrum-sepolia.blockscout.com/api/v2"|' .env
+        sudo sed -i 's/^CHAIN_ID=.*/CHAIN_ID=421614/' .env
+        sudo sed -i 's/^ENVIRONMENT=.*/ENVIRONMENT=development/' .env
+
+        # Placeholder for FALLBACK_PRIVATE_KEY
+        sudo sed -i 's/^FALLBACK_PRIVATE_KEY=.*/FALLBACK_PRIVATE_KEY=xxxx_REPLACE_THIS_MANUALLY_xxxx/' .env
+        echo "WARNING: Update FALLBACK_PRIVATE_KEY in .env manually!"
+
+        sudo chown $SERVICE_USER:$SERVICE_USER .env
+        sudo chmod 600 .env
+    fi
+
+    # Start Database and Redis
+    echo "Starting PostgreSQL and Redis containers..."
+
+    # Always create/overwrite docker-compose.yml with the correct settings
+    echo "Creating docker-compose.yml file with host networking..."
+    cat > docker-compose.yml << 'EOL'
+version: '3.8' # Use a more recent version
+
+services:
+  db:
+    image: postgres:15-alpine
+    network_mode: "host" # Use host network for direct localhost access
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-morpheus_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-morpheus_password}
+      POSTGRES_DB: ${POSTGRES_DB:-morpheus_db}
+    # Ports section is not needed with network_mode: host, but doesn't hurt
+    ports:
+      - "5432:5432"
+    restart: always
+
+  redis:
+    image: redis:7-alpine
+    network_mode: "host" # Use host network for direct localhost access
+    command: redis-server --requirepass ${REDIS_PASSWORD:-your_redis_password}
+    # Ports section is not needed with network_mode: host, but doesn't hurt
+    ports:
+      - "6379:6379"
+    restart: always
+
+volumes:
+  postgres_data:
+EOL
+    sudo chown $SERVICE_USER:$SERVICE_USER docker-compose.yml
+
+    # Stop any existing containers first
+    echo "Stopping existing containers (if any)..."
+    sudo docker-compose down --remove-orphans || true
+    sleep 2
+
+    # Start the containers
+    echo "Starting containers..."
+    sudo docker-compose up -d db redis
+    sleep 5
+
+    # Verify containers are running
+    echo "Verifying containers are running..."
+    sudo docker-compose ps
+
+    # Wait for the database to be ready
+    echo "Waiting for database to start (this may take up to 30 seconds)..."
+    for i in {1..6}; do
+        echo "Attempt $i: Checking if database is ready on port 5432..."
+        # Use docker-compose exec and correct port 5432
+        if sudo docker-compose exec db pg_isready -h localhost -p 5432 -U ${POSTGRES_USER:-morpheus_user} -d ${POSTGRES_DB:-morpheus_db} > /dev/null 2>&1; then
+            echo "Database is ready!"
+            break
+        elif [ $i -eq 6 ]; then
+            echo "WARNING: Database check timed out. Continuing anyway..."
+            echo "Troubleshooting tips:"
+            echo "  - Check Docker logs: sudo docker-compose logs db"
+            echo "  - Ensure port 5432 is free on the host."
+            echo "  - Verify .env variables POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB match docker-compose.yml"
+        else
+            sleep 5
+        fi
+    done
+
+    # Run Alembic migrations
+    echo "Running database migrations..."
+    source $VENV_DIR/bin/activate
+    export PYTHONPATH=$PROJECT_DIR
+
+    # Check alembic.ini file_template format and fix if needed
+    echo "Checking alembic.ini file_template format..."
+    if grep -q "file_template.*hour.*minute" alembic.ini; then
+        echo "Fixing alembic.ini file_template to avoid revision tracking issues..."
+        sed -i 's/file_template = %%(year)d_%%(month).2d_%%(day).2d_%%(hour).2d%%(minute).2d_%%(rev)s_%%(slug)s/file_template = %%(year)d_%%(month).2d_%%(day).2d_%%(rev)s_%%(slug)s/' alembic.ini
+    fi
+
+    # Try to run standard migrations first
+    echo "Running alembic migrations..."
+    alembic upgrade head
+    # If migration fails, the script should ideally fail. Add error handling.
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Database migration failed during initial setup."
+        echo "Please check the Alembic logs and database connection."
+        echo "The setup cannot continue with an inconsistent database state."
+        exit 1
+    fi
+
+    # Verify final state
+    echo "Verifying final database state..."
+    python3 -c "
+import asyncio, os, sys
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from alembic.script import ScriptDirectory
+from alembic.config import Config
+
+sys.path.insert(0, os.path.abspath('.'))
+from src.core.config import settings
+
+async def verify_migrations():
+    db_url = os.getenv('DATABASE_URL', str(settings.DATABASE_URL))
+    engine = create_async_engine(db_url)
+
+    # Get expected revision
+    config = Config('alembic.ini')
+    script = ScriptDirectory.from_config(config)
+    head_revision = script.get_current_head()
+    print(f'Expected revision: {head_revision}')
+
+    async with AsyncSession(engine) as session:
+        # Check current revision
+        result = await session.execute(text(\"SELECT version_num FROM alembic_version\"))
+        current_revision = result.scalar_one_or_none()
+        print(f'Current revision: {current_revision}')
+
+        # Check users table
+        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'users')\"))
+        users_exists = result.scalar()
+        print(f'Users table exists: {users_exists}')
+
+        # Check sessions table
+        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sessions')\"))
+        sessions_exists = result.scalar()
+        print(f'Sessions table exists: {sessions_exists}')
+
+        # Check delegations table
+        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'delegations')\"))
+        delegations_exists = result.scalar()
+        print(f'Delegations table exists: {delegations_exists}')
+
+asyncio.run(verify_migrations())
+"
+
+    # Setup systemd service
+    echo "Setting up systemd service..."
+    setup_systemd_service
+
+    echo "======================================================"
+    echo "Initial Setup Complete!"
+    echo "IMPORTANT: Update FALLBACK_PRIVATE_KEY in $PROJECT_DIR/.env"
+    echo "Check status: sudo systemctl status morpheus-api"
+    echo "Check logs: sudo journalctl -u morpheus-api -f"
+    echo "======================================================"
+}
+
+#-----------------------------------------------------
+# SECTION 2: SERVICE RESTART (For Code Updates)
+#-----------------------------------------------------
+restart_service() {
+    echo "======================================================"
+    echo "Restarting Morpheus API Service"
+    echo "======================================================"
+
+    PROJECT_DIR="/home/moradmin/morpheus-API"
+    VENV_DIR="/home/moradmin/venv-morpheus"
+    cd $PROJECT_DIR
+
+    echo "Pulling latest changes..."
+    git pull
+
+    echo "Running database migrations..."
+    source $VENV_DIR/bin/activate
+    export PYTHONPATH=$PROJECT_DIR
+
+    echo "Applying database migrations (if any)..."
+    alembic upgrade head
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Database migration failed during restart. Please check the logs."
+        echo "The service will be restarted, but the database might not be up-to-date."
+        # Consider adding a notification or stricter error handling here for production
+    fi
+
+    echo "Restarting services..."
+    sudo docker-compose restart db redis
+    sleep 5 # Wait for containers to restart
+
+    echo "Restarting API service..."
+    sudo systemctl restart morpheus-api
+
+    echo "Service restart complete. Checking status..."
+    sudo systemctl status morpheus-api --no-pager
+    echo "Check logs with: sudo journalctl -u morpheus-api -f"
+}
+
+#-----------------------------------------------------
+# SECTION 3: MANUAL GUNICORN START
+#-----------------------------------------------------
+manual_start() {
+    echo "======================================================"
+    echo "Starting Morpheus API Manually with Gunicorn"
+    echo "======================================================"
+
+    PROJECT_DIR="/home/moradmin/morpheus-API"
+    VENV_DIR="/home/moradmin/venv-morpheus"
+
+    # Find main application file
+    if [ -f "$PROJECT_DIR/src/main.py" ]; then
+        UVICORN_MODULE_PATH="src.main"
+    elif [ -f "$PROJECT_DIR/app/main.py" ]; then
+        UVICORN_MODULE_PATH="app.main"
+    elif [ -f "$PROJECT_DIR/main.py" ]; then
+        UVICORN_MODULE_PATH="main"
+    else
+        echo "ERROR: Could not find main.py"
+        exit 1
+    fi
+
+    cd $PROJECT_DIR
+    source $VENV_DIR/bin/activate
+
+    echo "Starting Gunicorn..."
+    echo "Logs will appear below. Press Ctrl+C to stop."
+    echo "To run in background, use: nohup ./awsonboard manual-start &"
+
+    # Run Gunicorn in the foreground
+    PYTHONPATH=$PROJECT_DIR gunicorn $UVICORN_MODULE_PATH:app \
+        --workers 4 \
+        --worker-class uvicorn.workers.UvicornWorker \
+        --bind 0.0.0.0:8000 \
+        --access-logfile - \
+        --error-logfile -
+}
+
+#-----------------------------------------------------
+# SECTION 4: MANUAL SETUP INSTRUCTIONS
+#-----------------------------------------------------
+show_manual_instructions() {
+    cat << 'EOL'
+====================================================
+MANUAL SETUP INSTRUCTIONS
+====================================================
+
+If you need to set up components manually or troubleshoot:
+
+1. System Dependencies:
+   sudo yum update -y
+   sudo yum install git gcc make openssl-devel bzip2-devel libffi-devel zlib-devel postgresql-devel postgresql-libs python3.11 python3.11-pip python3.11-devel docker -y
+
+2. Docker Setup:
+   sudo systemctl enable docker
+   sudo systemctl start docker
+   sudo usermod -a -G docker moradmin
+   # Install Docker Compose
+   sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+   sudo chmod +x /usr/local/bin/docker-compose
+
+3. Python Environment:
+   python3.11 -m venv ~/venv-morpheus
+   source ~/venv-morpheus/bin/activate
+   pip install --upgrade pip
+   pip install poetry
+   poetry install
+   # Or: pip install -r requirements.txt
+
+4. Database/Redis (Docker):
+   cd ~/morpheus-API
+   # Update docker-compose.yml for host networking
+   sed -i 's/networks:/network_mode: "host"/' docker-compose.yml
+   sed -i '/morpheus_net:/,+2d' docker-compose.yml
+   docker-compose up -d db redis
+
+5. Database Migrations:
+   source ~/venv-morpheus/bin/activate
+   export PYTHONPATH=~/morpheus-API
+   cd ~/morpheus-API
+   alembic upgrade head
+   # If migration fails:
+   # alembic stamp head
+   # alembic upgrade head
+
+6. Environment Variables:
+   cp .env.example .env
+   # Edit .env with your settings, ensuring to use localhost for services:
+   # DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/db <-- Use port 5432
+   # REDIS_URL=redis://:pass@localhost:6379/0
+   # PROXY_ROUTER_URL=http://localhost:8082
+   nano .env
+
+7. Run Application:
+   # Direct with uvicorn:
+   uvicorn src.main:app --host 0.0.0.0 --port 8000
+   # Or with gunicorn:
+   gunicorn -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:8000 src.main:app
+
+8. Systemd Service:
+   sudo nano /etc/systemd/system/morpheus-api.service
+   sudo systemctl daemon-reload
+   sudo systemctl enable morpheus-api
+   sudo systemctl start morpheus-api
+
+Common Commands:
+- Check service status: sudo systemctl status morpheus-api
+- View logs: sudo journalctl -u morpheus-api -f
+- Restart service: sudo systemctl restart morpheus-api
+- Check Docker containers: docker-compose ps
+- View Docker logs: docker-compose logs db redis
+====================================================
+EOL
+}
+
+#-----------------------------------------------------
+# SECTION 5: ERROR RECOVERY
+#-----------------------------------------------------
+recovery_procedure() {
+    echo "======================================================"
+    echo "Running Recovery Procedure"
+    echo "======================================================"
+
+    PROJECT_DIR="/home/moradmin/morpheus-API"
+    VENV_DIR="/home/moradmin/venv-morpheus"
+    cd $PROJECT_DIR
+    source $VENV_DIR/bin/activate
+    export PYTHONPATH=$PROJECT_DIR
+
+    echo "1. Stopping all services..."
+    sudo systemctl stop morpheus-api
+    sudo docker-compose down
+
+    echo "2. Waiting for all processes to terminate..."
+    sleep 5
+
+    echo "3. Starting database and Redis..."
+    sudo docker-compose up -d db redis
+    sleep 10  # Give DB time to start
+
+    echo "4. Checking and repairing database schema..."
+    # Attempt to run Alembic migrations first
+    echo "Attempting Alembic upgrade head..."
+    alembic upgrade head
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Alembic upgrade head failed during recovery."
+        echo "The database schema might be inconsistent and requires manual investigation."
+        exit 1 # Exit if recovery cannot ensure DB consistency
+    else
+        echo "Alembic upgrade head successful during recovery."
+    fi
+
+    echo "5. Checking for orphaned sessions in the database..."
+    python3 -c "
+import asyncio, os, sys
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+
+sys.path.insert(0, os.path.abspath('.'))
+from src.core.config import settings
+
+async def cleanup_orphaned_sessions():
+    db_url = os.getenv('DATABASE_URL', str(settings.DATABASE_URL))
+    engine = create_async_engine(db_url)
+
+    async with AsyncSession(engine) as session:
+        # Check if sessions table exists
+        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sessions')\"))
+        if not result.scalar():
+            print('Sessions table does not exist, skipping cleanup')
+            return
+
+        # Deactivate all sessions (mark as inactive)
+        try:
+            print('Marking all sessions as inactive...')
+            result = await session.execute(text(\"UPDATE sessions SET is_active = false\"))
+            await session.commit()
+            print(f'Successfully deactivated all sessions')
+        except Exception as e:
+            print(f'Error deactivating sessions: {e}')
+            await session.rollback()
+
+asyncio.run(cleanup_orphaned_sessions())
+"
+
+    echo "6. Starting up the application..."
+    sudo systemctl start morpheus-api
+    sleep 5
+
+    echo "7. Checking application status..."
+    sudo systemctl status morpheus-api --no-pager
+
+    echo "Recovery procedure complete."
+    echo "If problems persist, please check the application logs:"
+    echo "  sudo journalctl -u morpheus-api -f"
+}
+
+#-----------------------------------------------------
+# Helper Functions
+#-----------------------------------------------------
+setup_systemd_service() {
+    # Find main application file
+    if [ -f "$PROJECT_DIR/src/main.py" ]; then
+        UVICORN_MODULE_PATH="src.main"
+    elif [ -f "$PROJECT_DIR/app/main.py" ]; then
+        UVICORN_MODULE_PATH="app.main"
+    elif [ -f "$PROJECT_DIR/main.py" ]; then
+        UVICORN_MODULE_PATH="main"
+    else
+        echo "ERROR: Could not find main.py"
+        exit 1
+    fi
+
+    # Create systemd service file
+    sudo bash -c "cat > /etc/systemd/system/morpheus-api.service" << EOL
+[Unit]
+Description=Morpheus API Gateway (Gunicorn)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+User=$SERVICE_USER
+Group=$(id -gn $SERVICE_USER)
+WorkingDirectory=$PROJECT_DIR
+Environment="PATH=$VENV_DIR/bin"
+Environment="PYTHONPATH=$PROJECT_DIR"
+ExecStart=$VENV_DIR/bin/gunicorn $UVICORN_MODULE_PATH:app \\
+    --workers 4 \\
+    --worker-class uvicorn.workers.UvicornWorker \\
+    --bind 0.0.0.0:8000
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/morpheus-api.log
+StandardError=append:/var/log/morpheus-api.log
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+    # Enable and start service
+    sudo systemctl daemon-reload
+    sudo systemctl enable morpheus-api
+}
+
+#-----------------------------------------------------
+# Main Script Logic
+#-----------------------------------------------------
+case "$1" in
+    "setup")
+        setup_fresh_instance
+        ;;
+    "restart")
+        restart_service
+        ;;
+    "manual-start")
+        manual_start
+        ;;
+    "manual")
+        show_manual_instructions
+        ;;
+    "recovery")
+        recovery_procedure
+        ;;
+    *)
+        echo "Usage: $0 {setup|restart|manual-start|manual|recovery}"
+        echo "  setup        - Set up a fresh EC2 instance"
+        echo "  restart      - Restart services after code update"
+        echo "  manual-start - Start the API manually with Gunicorn"
+        echo "  manual       - Show manual setup instructions"
+        echo "  recovery     - Run the recovery procedure"
+        exit 1
+        ;;
+esac
