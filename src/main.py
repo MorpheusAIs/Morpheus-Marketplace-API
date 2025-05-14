@@ -142,7 +142,7 @@ app = FastAPI(
             "description": "Production"
         },
         {
-            "url": "http://api.dev.mor.org",
+            "url": "https://api.dev.mor.org",
             "description": "Testing"
         },
         {
