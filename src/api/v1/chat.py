@@ -1,4 +1,13 @@
 # Chat routes 
+"""
+This module handles chat completion endpoints for the API gateway.
+
+Key behaviors:
+- Respects client's 'stream' parameter in requests (true/false)
+- Returns streaming responses only when requested (stream=true)
+- Returns regular JSON responses when streaming is not requested (stream=false)
+- Warning: Tool calling may require streaming with some models
+"""
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Body
 from fastapi.responses import StreamingResponse, JSONResponse, PlainTextResponse
@@ -55,7 +64,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
-    stream: Optional[bool] = True
+    stream: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
     max_tokens: Optional[int] = None
     presence_penalty: Optional[float] = 0.0
@@ -176,32 +185,24 @@ async def create_chat_completion(
     json_body = request_data.model_dump(exclude_none=True)
     has_tools = "tools" in json_body and json_body["tools"]
 
-    # Simplified logic for determining proxy request parameters
-    # `request_data.stream` can be True (default/explicit), False (explicit), or None (explicit "stream": null)
-
-    # Determine the 'stream' boolean parameter for the json_body sent to the proxy
-    if has_tools:
-        json_body_stream_for_proxy = True
+    # Use the client's stream parameter directly
+    # If stream is None (not specified), default to False for consistency
+    should_stream = request_data.stream if request_data.stream is not None else False
+    
+    # Check for tool requests with streaming disabled
+    if has_tools and not should_stream:
+        logger.warning(f"[REQ-{request_id}] Tool calling requested with stream=false - this may cause issues with some models")
+        # We'll respect the client's choice, but log a warning
+    
+    json_body["stream"] = should_stream
+    
+    # Set accept header based on streaming preference
+    if should_stream:
+        accept_header = "text/event-stream"
     else:
-        if request_data.stream is False:  # Client explicitly sent "stream": false
-            json_body_stream_for_proxy = False
-        elif request_data.stream is None: # Client explicitly sent "stream": null
-            json_body_stream_for_proxy = False # Interpret null as non-streaming for the proxy request
-        else:  # request_data.stream is True (client sent "stream": true or omitted it)
-            json_body_stream_for_proxy = True
+        accept_header = original_client_accept_header
     
-    json_body["stream"] = json_body_stream_for_proxy
-
-    # Determine the 'accept_header' for the proxy request
-    if json_body["stream"]: # If the request body to the proxy specifies "stream": true
-        accept_header_for_proxy = "text/event-stream"
-    else: # Request body to proxy has "stream": false
-        accept_header_for_proxy = original_client_accept_header
-    
-    # This 'accept_header' variable is used by the httpx client when making the request to the proxy
-    accept_header = accept_header_for_proxy
-
-    logger.info(f"[REQ-{request_id}] Original client Accept: '{original_client_accept_header}', client request_data.stream: {request_data.stream}, has_tools: {has_tools}")
+    logger.info(f"[REQ-{request_id}] Original client Accept: '{original_client_accept_header}', client requested stream: {should_stream}, has_tools: {has_tools}")
     logger.info(f"[REQ-{request_id}] Configured PROXY request: stream={json_body['stream']}, proxy_accept_header='{accept_header}'")
 
     # Extract necessary fields that were not part of the core OpenAI payload manipulated above
@@ -255,8 +256,31 @@ async def create_chat_completion(
                         requested_model_id = model_router.get_target_model(requested_model)
                         logger.info(f"Requested model '{requested_model}' resolved to ID: {requested_model_id}")
                         
-                        # Compare model IDs (hash to hash)
-                        if session.model != requested_model_id:
+                        # First check if the session is expired before comparing models
+                        if session.is_expired:
+                            logger.warning(f"Session {session.id} is expired, creating new session regardless of model match")
+                            try:
+                                new_session = await session_service.create_automated_session(
+                                    db=db,
+                                    api_key_id=db_api_key.id,
+                                    user_id=user.id,
+                                    requested_model=requested_model
+                                )
+                                session_id = new_session.id
+                                logger.info(f"Created new session to replace expired session: {session_id}")
+                                
+                                # Add a small delay to ensure the session is fully registered
+                                logger.info("Adding a brief delay to ensure session is fully registered")
+                                await asyncio.sleep(1.0)  # 1 second delay
+                            except Exception as e:
+                                logger.error(f"Error creating new session to replace expired session: {e}")
+                                logger.exception(e)
+                                # Create mock session ID as last resort
+                                mock_session_id = f"mock-{uuid.uuid4()}"
+                                logger.warning(f"Using mock session ID due to session creation failure: {mock_session_id}")
+                                session_id = mock_session_id
+                        # Compare model IDs (hash to hash) only for non-expired sessions
+                        elif session.model != requested_model_id:
                             logger.info(f"Model change detected. Current: {session.model}, Requested: {requested_model_id}")
                             logger.info(f"Switching models by closing current session and creating new one")
                             
@@ -277,9 +301,24 @@ async def create_chat_completion(
                             except Exception as e:
                                 logger.error(f"Error switching models: {e}")
                                 logger.exception(e)
-                                # Fall through to use existing session as fallback
-                                session_id = session.id
-                                logger.warning(f"Using existing session as fallback: {session_id}")
+                                # Create a new session instead of falling back to the expired one
+                                try:
+                                    logger.info(f"Creating new session after switch_model failure")
+                                    new_session = await session_service.create_automated_session(
+                                        db=db,
+                                        api_key_id=db_api_key.id,
+                                        user_id=user.id,
+                                        requested_model=requested_model
+                                    )
+                                    session_id = new_session.id
+                                    logger.info(f"Created new replacement session: {session_id}")
+                                    await asyncio.sleep(1.0)  # Small delay to ensure registration
+                                except Exception as new_err:
+                                    logger.error(f"Failed to create new session after switch failure: {new_err}")
+                                    # At this point, we need a fallback that won't cause an error
+                                    mock_session_id = f"mock-{uuid.uuid4()}"
+                                    logger.warning(f"Using generated mock session as last resort: {mock_session_id}")
+                                    session_id = mock_session_id
                         else:
                             # Models match, use existing session
                             session_id = session.id
@@ -488,7 +527,13 @@ async def create_chat_completion(
             except Exception as parse_err:
                 logger.error(f"[STREAM-{stream_trace_id}] Failed to parse request body: {parse_err}")
             
+            # First attempt with existing session
             logger.info(f"[STREAM-{stream_trace_id}] Making request to proxy router: {endpoint}")
+            
+            # Track if we need to retry due to expired session
+            retry_with_new_session = False
+            new_session_id = None
+            
             async with httpx.AsyncClient() as client:
                 async with client.stream("POST", endpoint, content=body, headers=headers, timeout=60.0) as response:
                     # Log proxy status
@@ -503,123 +548,197 @@ async def create_chat_completion(
                             error_text = error_body.decode('utf-8', errors='replace')
                             logger.error(f"[STREAM-{stream_trace_id}] Error body: {error_text}")
                             
-                            # Return a formatted error message to the client
-                            error_msg = {
-                                "error": {
-                                    "message": f"Proxy router error: {error_text}",
-                                    "type": "proxy_error",
-                                    "status": response.status_code
+                            # Check if this is a session expired error
+                            if 'session expired' in error_text.lower():
+                                logger.warning(f"[STREAM-{stream_trace_id}] Detected session expired error, will create new session and retry")
+                                retry_with_new_session = True
+                                
+                                if db_api_key and user:
+                                    try:
+                                        logger.info(f"[STREAM-{stream_trace_id}] Creating new session to replace expired session")
+                                        new_session = await session_service.create_automated_session(
+                                            db=db,
+                                            api_key_id=db_api_key.id,
+                                            user_id=user.id,
+                                            requested_model=requested_model
+                                        )
+                                        new_session_id = new_session.id
+                                        logger.info(f"[STREAM-{stream_trace_id}] Created new session: {new_session_id}")
+                                        
+                                        # Add a small delay to ensure the session is fully registered
+                                        logger.info(f"[STREAM-{stream_trace_id}] Adding brief delay to ensure session is registered")
+                                        await asyncio.sleep(1.0)
+                                    except Exception as e:
+                                        logger.error(f"[STREAM-{stream_trace_id}] Failed to create new session: {e}")
+                                        retry_with_new_session = False
+                            
+                            # If not retrying, return error to client
+                            if not retry_with_new_session:
+                                # Return a formatted error message to the client
+                                error_msg = {
+                                    "error": {
+                                        "message": f"Proxy router error: {error_text}",
+                                        "type": "proxy_error",
+                                        "status": response.status_code
+                                    }
                                 }
-                            }
-                            yield f"data: {json.dumps(error_msg)}\n\n".encode('utf-8')
-                            return
+                                yield f"data: {json.dumps(error_msg)}\n\n".encode('utf-8')
+                                return
                         except Exception as read_err:
                             logger.error(f"[STREAM-{stream_trace_id}] Error reading error response: {read_err}")
+                            retry_with_new_session = False
                     
-                    # Check for empty response (Content-Length: 0)
-                    content_length = response.headers.get('content-length')
-                    if content_length and int(content_length) == 0:
-                        logger.warning(f"[STREAM-{stream_trace_id}] Received response with Content-Length: 0")
-                        
-                        # Log request details for debugging  
-                        if req_body_json:
-                            msg_count = len(req_body_json.get("messages", []))
-                            has_tool_msg = any(msg.get("role") == "tool" for msg in req_body_json.get("messages", []) if isinstance(msg, dict))
-                            has_tool_calls = any("tool_calls" in msg for msg in req_body_json.get("messages", []) if isinstance(msg, dict))
+                    # If not retrying, process the response normally
+                    if not retry_with_new_session:
+                        # Check for empty response (Content-Length: 0)
+                        content_length = response.headers.get('content-length')
+                        if content_length and int(content_length) == 0:
+                            logger.warning(f"[STREAM-{stream_trace_id}] Received response with Content-Length: 0")
                             
-                            logger.warning(f"[STREAM-{stream_trace_id}] Request details: message count: {msg_count}, has tool messages: {has_tool_msg}, has tool calls: {has_tool_calls}")
-                            
-                            # Return a better error message based on the request type
-                            if has_tool_msg:
-                                # This is a tool follow-up response that failed
-                                logger.warning(f"[STREAM-{stream_trace_id}] TOOL FOLLOW-UP FAILED: Empty response received for tool result processing")
-                                error_type = "tool_processing_error" 
-                                error_message = "The model returned an empty response when processing your tool results. This may indicate an issue with the tool call format or the session state."
+                            # Log request details for debugging  
+                            if req_body_json:
+                                msg_count = len(req_body_json.get("messages", []))
+                                has_tool_msg = any(msg.get("role") == "tool" for msg in req_body_json.get("messages", []) if isinstance(msg, dict))
+                                has_tool_calls = any("tool_calls" in msg for msg in req_body_json.get("messages", []) if isinstance(msg, dict))
                                 
-                                # Try direct proxy request with different tool formatting as a diagnostic
-                                try:
-                                    logger.info(f"[STREAM-{stream_trace_id}] Attempting diagnostic request without API gateway")
+                                logger.warning(f"[STREAM-{stream_trace_id}] Request details: message count: {msg_count}, has tool messages: {has_tool_msg}, has tool calls: {has_tool_calls}")
+                                
+                                # Return a better error message based on the request type
+                                if has_tool_msg:
+                                    # This is a tool follow-up response that failed
+                                    logger.warning(f"[STREAM-{stream_trace_id}] TOOL FOLLOW-UP FAILED: Empty response received for tool result processing")
+                                    error_type = "tool_processing_error" 
+                                    error_message = "The model returned an empty response when processing your tool results. This may indicate an issue with the tool call format or the session state."
                                     
-                                    # Build a simplified version of the messages just for testing
-                                    test_messages = req_body_json.get("messages", [])
-                                    # Remove any special fields that might be causing issues
-                                    for msg in test_messages:
-                                        if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("content") == "":
-                                            msg["content"] = None
+                                    # Try direct proxy request with different tool formatting as a diagnostic
+                                    try:
+                                        logger.info(f"[STREAM-{stream_trace_id}] Attempting diagnostic request without API gateway")
+                                        
+                                        # Build a simplified version of the messages just for testing
+                                        test_messages = req_body_json.get("messages", [])
+                                        # Remove any special fields that might be causing issues
+                                        for msg in test_messages:
+                                            if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("content") == "":
+                                                msg["content"] = None
+                                        
+                                        test_body = {
+                                            "messages": test_messages,
+                                            "stream": True
+                                        }
+                                        if "tools" in req_body_json:
+                                            test_body["tools"] = req_body_json["tools"]
+                                        
+                                        logger.info(f"[STREAM-{stream_trace_id}] Diagnostic request: {json.dumps(test_body)}")
+                                        
+                                        # Log this diagnostic attempt
+                                        logger.warning(f"[STREAM-{stream_trace_id}] Attempted direct diagnostic, check logs for details")
+                                        error_message += " A diagnostic attempt was logged for further analysis."
+                                    except Exception as diag_err:
+                                        logger.error(f"[STREAM-{stream_trace_id}] Error in diagnostic: {diag_err}")
+                                else:
+                                    error_type = "empty_response_error"
+                                    error_message = "The model returned an empty response. This may indicate an issue with the session or model."
                                     
-                                    test_body = {
-                                        "messages": test_messages,
-                                        "stream": True
+                                # Include session info in error
+                                error_msg = {
+                                    "error": {
+                                        "message": error_message,
+                                        "type": error_type,
+                                        "session_id": session_id
                                     }
-                                    if "tools" in req_body_json:
-                                        test_body["tools"] = req_body_json["tools"]
-                                    
-                                    logger.info(f"[STREAM-{stream_trace_id}] Diagnostic request: {json.dumps(test_body)}")
-                                    
-                                    # Log this diagnostic attempt
-                                    logger.warning(f"[STREAM-{stream_trace_id}] Attempted direct diagnostic, check logs for details")
-                                    error_message += " A diagnostic attempt was logged for further analysis."
-                                except Exception as diag_err:
-                                    logger.error(f"[STREAM-{stream_trace_id}] Error in diagnostic: {diag_err}")
-                            else:
-                                error_type = "empty_response_error"
-                                error_message = "The model returned an empty response. This may indicate an issue with the session or model."
-                                
-                            # Include session info in error
+                                }
+                                yield f"data: {json.dumps(error_msg)}\n\n".encode('utf-8')
+                                return
+                            
+                        # Track if we've received any chunks
+                        has_received_chunks = False
+                        
+                        # Simple byte streaming
+                        async for chunk_bytes in response.aiter_bytes():
+                            has_received_chunks = True
+                            chunk_count += 1
+                            # For debugging, log first few chunks 
+                            if chunk_count <= 2:
+                                try:
+                                    preview = chunk_bytes[:150].decode('utf-8', errors='replace')
+                                    logger.info(f"[STREAM-{stream_trace_id}] Chunk {chunk_count} preview: {preview}")
+                                except:
+                                    logger.info(f"[STREAM-{stream_trace_id}] Chunk {chunk_count} received (binary data)")
+                            yield chunk_bytes
+                        
+                        # If we got a 200 OK but no chunks despite Content-Length not being 0,
+                        # this is an unusual situation
+                        if not has_received_chunks and (not content_length or int(content_length) > 0):
+                            logger.warning(f"[STREAM-{stream_trace_id}] Received 200 OK but no chunks despite Content-Length not 0")
+                            
+                            # For tool call follow-ups, add specific messaging
                             error_msg = {
                                 "error": {
-                                    "message": error_message,
-                                    "type": error_type,
+                                    "message": "Expected content but received empty response from model. This usually indicates an issue with the request format or session state.",
+                                    "type": "unexpected_empty_response",
                                     "session_id": session_id
                                 }
                             }
+                            
+                            # If this was a tool call response that failed, add helpful diagnostic info
+                            if req_body_json and any(msg.get("role") == "tool" for msg in req_body_json.get("messages", []) if isinstance(msg, dict)):
+                                error_msg["error"]["message"] = "Tool call processing failed. The model acknowledged the request but returned no content. Try restructuring your tool response format."
+                                error_msg["error"]["type"] = "tool_call_processing_failure"
+                                
+                                # Log more details about the tool response format
+                                tool_messages = [msg for msg in req_body_json.get("messages", []) if isinstance(msg, dict) and msg.get("role") == "tool"]
+                                if tool_messages:
+                                    for tm in tool_messages:
+                                        logger.warning(f"[STREAM-{stream_trace_id}] Tool message format: {json.dumps(tm)}")
+                            
+                            yield f"data: {json.dumps(error_msg)}\n\n".encode('utf-8')
+                        
+                        logger.info(f"[STREAM-{stream_trace_id}] Stream finished from proxy after {chunk_count} chunks.")
+
+            # If we need to retry with a new session, do that now
+            if retry_with_new_session and new_session_id:
+                logger.info(f"[STREAM-{stream_trace_id}] Retrying request with new session ID: {new_session_id}")
+                
+                # Create new endpoint with new session ID
+                retry_endpoint = f"{settings.PROXY_ROUTER_URL}/v1/chat/completions?session_id={new_session_id}"
+                
+                # Update headers with new session ID
+                retry_headers = headers.copy()
+                retry_headers["session_id"] = new_session_id
+                retry_headers["X-Session-ID"] = new_session_id
+                
+                # Make the retry request
+                async with httpx.AsyncClient() as retry_client:
+                    async with retry_client.stream("POST", retry_endpoint, content=body, headers=retry_headers, timeout=60.0) as retry_response:
+                        logger.info(f"[STREAM-{stream_trace_id}] Retry request returned status: {retry_response.status_code}")
+                        
+                        if retry_response.status_code != 200:
+                            logger.error(f"[STREAM-{stream_trace_id}] Retry request failed: {retry_response.status_code}")
+                            error_body = await retry_response.aread()
+                            error_text = error_body.decode('utf-8', errors='replace')
+                            error_msg = {
+                                "error": {
+                                    "message": f"Retry after session refresh failed: {error_text}",
+                                    "type": "retry_failed",
+                                    "status": retry_response.status_code
+                                }
+                            }
                             yield f"data: {json.dumps(error_msg)}\n\n".encode('utf-8')
                             return
                         
-                    # Track if we've received any chunks
-                    has_received_chunks = False
-                    
-                    # Simple byte streaming
-                    async for chunk_bytes in response.aiter_bytes():
-                        has_received_chunks = True
-                        chunk_count += 1
-                        # For debugging, log first few chunks 
-                        if chunk_count <= 2:
-                            try:
-                                preview = chunk_bytes[:150].decode('utf-8', errors='replace')
-                                logger.info(f"[STREAM-{stream_trace_id}] Chunk {chunk_count} preview: {preview}")
-                            except:
-                                logger.info(f"[STREAM-{stream_trace_id}] Chunk {chunk_count} received (binary data)")
-                        yield chunk_bytes
-                    
-                    # If we got a 200 OK but no chunks despite Content-Length not being 0,
-                    # this is an unusual situation
-                    if not has_received_chunks and (not content_length or int(content_length) > 0):
-                        logger.warning(f"[STREAM-{stream_trace_id}] Received 200 OK but no chunks despite Content-Length not 0")
+                        # Stream the retry response
+                        retry_chunk_count = 0
+                        async for chunk_bytes in retry_response.aiter_bytes():
+                            retry_chunk_count += 1
+                            if retry_chunk_count <= 2:
+                                try:
+                                    preview = chunk_bytes[:150].decode('utf-8', errors='replace')
+                                    logger.info(f"[STREAM-{stream_trace_id}] Retry chunk {retry_chunk_count} preview: {preview}")
+                                except:
+                                    logger.info(f"[STREAM-{stream_trace_id}] Retry chunk {retry_chunk_count} received (binary data)")
+                            yield chunk_bytes
                         
-                        # For tool call follow-ups, add specific messaging
-                        error_msg = {
-                            "error": {
-                                "message": "Expected content but received empty response from model. This usually indicates an issue with the request format or session state.",
-                                "type": "unexpected_empty_response",
-                                "session_id": session_id
-                            }
-                        }
-                        
-                        # If this was a tool call response that failed, add helpful diagnostic info
-                        if req_body_json and any(msg.get("role") == "tool" for msg in req_body_json.get("messages", []) if isinstance(msg, dict)):
-                            error_msg["error"]["message"] = "Tool call processing failed. The model acknowledged the request but returned no content. Try restructuring your tool response format."
-                            error_msg["error"]["type"] = "tool_call_processing_failure"
-                            
-                            # Log more details about the tool response format
-                            tool_messages = [msg for msg in req_body_json.get("messages", []) if isinstance(msg, dict) and msg.get("role") == "tool"]
-                            if tool_messages:
-                                for tm in tool_messages:
-                                    logger.warning(f"[STREAM-{stream_trace_id}] Tool message format: {json.dumps(tm)}")
-                        
-                        yield f"data: {json.dumps(error_msg)}\n\n".encode('utf-8')
-                    
-                    logger.info(f"[STREAM-{stream_trace_id}] Stream finished from proxy after {chunk_count} chunks.")
+                        logger.info(f"[STREAM-{stream_trace_id}] Retry stream finished after {retry_chunk_count} chunks")
 
         except Exception as e:
             logger.error(f"[STREAM-{stream_trace_id}] Error in stream_generator: {e}")
@@ -628,20 +747,154 @@ async def create_chat_completion(
             error_message = f"data: {{\"error\": {{\"message\": \"Error in API gateway streaming: {str(e)}\", \"type\": \"gateway_error\", \"session_id\": \"{session_id}\"}}}}\n\n"
             yield error_message.encode('utf-8')
     
-    # Determine media type for the StreamingResponse to the client
-    # The variable 'json_body_stream_for_proxy' was set earlier and indicates if the proxy was asked to stream.
-    if json_body_stream_for_proxy:
-        client_response_media_type = "text/event-stream"
-        logger.info(f"[REQ-{request_id}] Proxy was asked to stream. Client response media_type set to text/event-stream.")
+    # Handle request based on streaming preference
+    if should_stream:
+        # Use streaming response for streaming requests
+        return StreamingResponse(
+            stream_generator(), 
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive"
+            }
+        )
     else:
-        client_response_media_type = original_client_accept_header
-        logger.info(f"[REQ-{request_id}] Proxy was NOT asked to stream. Client response media_type set to original client Accept: '{original_client_accept_header}'.")
-
-    return StreamingResponse(
-        stream_generator(), 
-        media_type=client_response_media_type,
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive"
-        }
-    ) 
+        # For non-streaming requests, make a regular request and return JSON response
+        try:
+            # First attempt with original session
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    endpoint, 
+                    content=body, 
+                    headers=headers, 
+                    timeout=60.0
+                )
+                
+                # Check if this is a session expired error
+                retry_with_new_session = False
+                new_session_id = None
+                
+                # Check response status
+                if response.status_code != 200:
+                    logger.error(f"[REQ-{request_id}] Proxy router error response: {response.status_code}")
+                    try:
+                        error_content = response.text
+                        
+                        # Check if this is a session expired error
+                        if 'session expired' in error_content.lower():
+                            logger.warning(f"[REQ-{request_id}] Detected session expired error, will create new session and retry")
+                            retry_with_new_session = True
+                            
+                            if db_api_key and user:
+                                try:
+                                    logger.info(f"[REQ-{request_id}] Creating new session to replace expired session")
+                                    new_session = await session_service.create_automated_session(
+                                        db=db,
+                                        api_key_id=db_api_key.id,
+                                        user_id=user.id,
+                                        requested_model=requested_model
+                                    )
+                                    new_session_id = new_session.id
+                                    logger.info(f"[REQ-{request_id}] Created new session: {new_session_id}")
+                                    
+                                    # Add a small delay to ensure the session is fully registered
+                                    logger.info(f"[REQ-{request_id}] Adding brief delay to ensure session is registered")
+                                    await asyncio.sleep(1.0)
+                                except Exception as e:
+                                    logger.error(f"[REQ-{request_id}] Failed to create new session: {e}")
+                                    retry_with_new_session = False
+                        
+                        # If not retrying, return error to client
+                        if not retry_with_new_session:
+                            try:
+                                error_json = json.loads(error_content)
+                                return JSONResponse(
+                                    status_code=response.status_code,
+                                    content=error_json
+                                )
+                            except:
+                                return JSONResponse(
+                                    status_code=response.status_code,
+                                    content={
+                                        "error": {
+                                            "message": f"Proxy router error: {error_content}",
+                                            "type": "proxy_error",
+                                            "status": response.status_code
+                                        }
+                                    }
+                                )
+                    except Exception as e:
+                        logger.error(f"[REQ-{request_id}] Error parsing error response: {e}")
+                        retry_with_new_session = False
+                        return JSONResponse(
+                            status_code=response.status_code,
+                            content={
+                                "error": {
+                                    "message": f"Proxy router error: {response.text}",
+                                    "type": "proxy_error",
+                                    "status": response.status_code
+                                }
+                            }
+                        )
+                
+                # If not retrying, return the original response
+                if not retry_with_new_session:
+                    # Return successful response as JSON
+                    return JSONResponse(
+                        content=response.json(),
+                        status_code=200
+                    )
+            
+            # If we need to retry with a new session, do that now
+            if retry_with_new_session and new_session_id:
+                logger.info(f"[REQ-{request_id}] Retrying request with new session ID: {new_session_id}")
+                
+                # Create new endpoint with new session ID
+                retry_endpoint = f"{settings.PROXY_ROUTER_URL}/v1/chat/completions?session_id={new_session_id}"
+                
+                # Update headers with new session ID
+                retry_headers = headers.copy()
+                retry_headers["session_id"] = new_session_id
+                retry_headers["X-Session-ID"] = new_session_id
+                
+                # Make the retry request
+                async with httpx.AsyncClient() as retry_client:
+                    retry_response = await retry_client.post(
+                        retry_endpoint,
+                        content=body,
+                        headers=retry_headers,
+                        timeout=60.0
+                    )
+                    
+                    if retry_response.status_code != 200:
+                        logger.error(f"[REQ-{request_id}] Retry request failed: {retry_response.status_code}")
+                        return JSONResponse(
+                            status_code=retry_response.status_code,
+                            content={
+                                "error": {
+                                    "message": f"Retry after session refresh failed: {retry_response.text}",
+                                    "type": "retry_failed",
+                                    "status": retry_response.status_code
+                                }
+                            }
+                        )
+                    
+                    # Return successful response
+                    return JSONResponse(
+                        content=retry_response.json(),
+                        status_code=200
+                    )
+                
+        except Exception as e:
+            logger.error(f"[REQ-{request_id}] Error in non-streaming request: {e}")
+            logger.exception(e)
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={
+                    "error": {
+                        "message": f"Error in API gateway: {str(e)}",
+                        "type": "gateway_error",
+                        "session_id": session_id
+                    }
+                }
+            ) 

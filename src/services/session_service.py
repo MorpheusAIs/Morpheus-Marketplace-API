@@ -299,7 +299,7 @@ async def check_proxy_session_status(session_id: str) -> Dict[str, Any]:
     try:
         response = await execute_proxy_router_operation(
             "GET",
-            f"/v1/sessions/{session_id}",
+            f"blockchain/sessions/{session_id}",
             max_retries=2
         )
         
