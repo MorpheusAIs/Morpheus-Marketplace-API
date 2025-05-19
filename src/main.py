@@ -138,7 +138,7 @@ app = FastAPI(
     },
     servers=[
         {
-            "url": "http://api.mor.org",
+            "url": "https://api.mor.org",
             "description": "Production"
         },
         {
