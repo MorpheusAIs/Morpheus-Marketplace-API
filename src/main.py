@@ -206,7 +206,7 @@ async def add_process_time_header(request: Request, call_next):
 async def enforce_https(request: Request, call_next):
     """
     Enforce HTTPS in production environments.
-    Redirects HTTP requests to HTTPS, except for localhost/development.
+    Proxy-aware: Checks X-Forwarded-Proto to determine original protocol.
     """
     # Allow HTTP for localhost/development
     if (request.url.hostname in ["localhost", "127.0.0.1"] or 
@@ -215,8 +215,21 @@ async def enforce_https(request: Request, call_next):
         request.url.hostname.startswith("172.")):
         return await call_next(request)
     
-    # Enforce HTTPS for production domains
-    if request.url.scheme == "http":
+    # Check for proxy headers to determine original protocol
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").lower()
+    forwarded_scheme = request.headers.get("X-Forwarded-Scheme", "").lower()
+    cf_visitor = request.headers.get("CF-Visitor", "")
+    
+    # Determine if the original request was HTTPS
+    original_was_https = (
+        forwarded_proto == "https" or
+        forwarded_scheme == "https" or
+        '"scheme":"https"' in cf_visitor or  # CloudFlare format
+        request.url.scheme == "https"
+    )
+    
+    # Only enforce HTTPS if the original request was HTTP (not HTTPS)
+    if not original_was_https and request.url.scheme == "http":
         https_url = request.url.replace(scheme="https")
         return JSONResponse(
             status_code=426,
