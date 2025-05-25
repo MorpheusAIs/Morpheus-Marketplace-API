@@ -49,6 +49,7 @@ app = FastAPI(
     title="Morpheus API Gateway",
     description="API Gateway connecting Web2 clients to the Morpheus-Lumerin AI Marketplace",
     version="0.1.0",
+    redirect_slashes=False,  # Disable automatic redirects to prevent HTTPS→HTTP downgrade attacks
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     swagger_ui_parameters={
         "persistAuthorization": True,
@@ -199,6 +200,34 @@ async def add_process_time_header(request: Request, call_next):
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = str(process_time)
     return response
+
+# HTTPS enforcement middleware
+@app.middleware("http")
+async def enforce_https(request: Request, call_next):
+    """
+    Enforce HTTPS in production environments.
+    Redirects HTTP requests to HTTPS, except for localhost/development.
+    """
+    # Allow HTTP for localhost/development
+    if (request.url.hostname in ["localhost", "127.0.0.1"] or 
+        request.url.hostname.startswith("192.168.") or
+        request.url.hostname.startswith("10.") or
+        request.url.hostname.startswith("172.")):
+        return await call_next(request)
+    
+    # Enforce HTTPS for production domains
+    if request.url.scheme == "http":
+        https_url = request.url.replace(scheme="https")
+        return JSONResponse(
+            status_code=426,
+            content={
+                "error": "HTTPS Required",
+                "message": "This API requires HTTPS. Please use the secure endpoint.",
+                "https_url": str(https_url)
+            }
+        )
+    
+    return await call_next(request)
 
 # Custom docs endpoint
 @app.get("/docs", include_in_schema=False)
@@ -477,7 +506,7 @@ update_router_route_class(automation)
 
 # Include routers
 app.include_router(auth, prefix=f"{settings.API_V1_STR}/auth")
-app.include_router(models, prefix=f"{settings.API_V1_STR}/models")
+app.include_router(models, prefix=f"{settings.API_V1_STR}")  # Mount at /api/v1 and let models handle /models
 app.include_router(chat, prefix=f"{settings.API_V1_STR}/chat")
 app.include_router(session, prefix=f"{settings.API_V1_STR}/session")
 app.include_router(automation, prefix=f"{settings.API_V1_STR}/automation")

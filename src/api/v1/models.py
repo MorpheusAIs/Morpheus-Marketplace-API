@@ -15,7 +15,8 @@ router = APIRouter(tags=["Models"])
 # Authentication credentials
 AUTH = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
 
-@router.get("/", response_model=None)
+@router.get("/models", response_model=None)  # Handle /api/v1/models (without trailing slash)
+@router.get("/models/", response_model=None)  # Handle /api/v1/models/ (with trailing slash) - backward compatibility
 async def list_models():
     """
     Get a list of active models.
@@ -89,7 +90,7 @@ async def list_models():
             detail=f"Error fetching active models: {str(e)}"
         )
 
-@router.get("/allmodels", response_model=None)
+@router.get("/models/allmodels", response_model=None)
 async def list_all_models():
     """
     Get a list of all available models.
@@ -167,7 +168,7 @@ async def list_all_models():
             detail=f"Error fetching all models: {str(e)}"
         )
 
-@router.get("/ratedbids")
+@router.get("/models/ratedbids")
 async def get_rated_bids(
     model_id: str = Query(..., description="The blockchain ID (hex) of the model to get rated bids for, e.g. 0x1234...")
 ):
