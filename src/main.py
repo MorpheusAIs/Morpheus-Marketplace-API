@@ -29,6 +29,9 @@ from src.db.database import engine
 # Import what we need for proper SQL execution
 from sqlalchemy import text
 
+# Import the model sync service
+from src.core.model_sync import model_sync_service
+
 # Define log directory
 log_dir = 'logs'
 os.makedirs(log_dir, exist_ok=True) # Create log directory if it doesn't exist
@@ -429,6 +432,27 @@ async def startup_event():
     # Verify database migrations are up to date
     await verify_database_migrations()
     
+    # Sync models on startup if enabled
+    if settings.MODEL_SYNC_ON_STARTUP and settings.MODEL_SYNC_ENABLED:
+        logger.info("Starting model synchronization...")
+        try:
+            sync_success = await model_sync_service.perform_sync()
+            if sync_success:
+                logger.info("✅ Model sync completed successfully during startup")
+            else:
+                logger.warning("⚠️ Model sync failed during startup, but continuing with existing models")
+        except Exception as e:
+            logger.error(f"❌ Model sync failed during startup: {e}")
+            logger.warning("Continuing startup with existing models.json file")
+    else:
+        logger.info("Model sync on startup is disabled")
+    
+    # Start background model sync task if enabled
+    if settings.MODEL_SYNC_ENABLED:
+        await model_sync_service.start_background_sync()
+    else:
+        logger.info("Background model sync is disabled")
+    
     # Make sure all routers use our fixed route class
     for router in [auth, models, chat, session, automation]:
         update_router_route_class(router, FixedDependencyAPIRoute)
@@ -438,6 +462,18 @@ async def startup_event():
     # Start the background tasks
     asyncio.create_task(cleanup_expired_sessions())
     logger.info("Started background task for expired session cleanup")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """
+    Perform cleanup during application shutdown.
+    """
+    logger.info("Application shutdown initiated...")
+    
+    # Stop the background model sync task
+    await model_sync_service.stop_background_sync()
+    
+    logger.info("Application shutdown complete")
 
 async def verify_database_migrations():
     """

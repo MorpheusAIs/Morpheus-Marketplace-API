@@ -111,6 +111,12 @@ setup_fresh_instance() {
         sudo sed -i 's/^REFRESH_TOKEN_EXPIRE_DAYS=.*/REFRESH_TOKEN_EXPIRE_DAYS=7/' .env
         sudo sed -i 's/^AUTOMATION_FEATURE_ENABLED=.*/AUTOMATION_FEATURE_ENABLED=true/' .env
 
+        # Model Sync Settings
+        sudo sed -i 's/^MODEL_SYNC_ENABLED=.*/MODEL_SYNC_ENABLED=true/' .env
+        sudo sed -i 's/^MODEL_SYNC_ON_STARTUP=.*/MODEL_SYNC_ON_STARTUP=true/' .env
+        sudo sed -i 's/^MODEL_SYNC_INTERVAL_HOURS=.*/MODEL_SYNC_INTERVAL_HOURS=12/' .env
+        sudo sed -i 's|^ACTIVE_MODELS_URL=.*|ACTIVE_MODELS_URL=https://active.mor.org/active_models.json|' .env
+
         # Contract Settings (TESTNET)
         sudo sed -i 's/^DIAMOND_CONTRACT_ADDRESS=.*/DIAMOND_CONTRACT_ADDRESS=0xb8C55cD613af947E73E262F0d3C54b7211Af16CF/' .env
         sudo sed -i 's/^CONTRACT_ADDRESS=.*/CONTRACT_ADDRESS=0x34a285a1b1c166420df5b6630132542923b5b27e/' .env
@@ -265,6 +271,30 @@ async def verify_migrations():
 asyncio.run(verify_migrations())
 "
     
+    # Verify model sync functionality
+    echo "Verifying model sync functionality..."
+    python3 -c "
+import sys, os
+sys.path.insert(0, os.path.abspath('.'))
+from src.core.config import settings
+
+print('Model Sync Configuration:')
+print(f'  MODEL_SYNC_ENABLED: {settings.MODEL_SYNC_ENABLED}')
+print(f'  MODEL_SYNC_ON_STARTUP: {settings.MODEL_SYNC_ON_STARTUP}')
+print(f'  MODEL_SYNC_INTERVAL_HOURS: {settings.MODEL_SYNC_INTERVAL_HOURS}')
+print(f'  ACTIVE_MODELS_URL: {settings.ACTIVE_MODELS_URL}')
+
+# Check if models.json exists and has content
+if os.path.exists('models.json'):
+    import json
+    with open('models.json', 'r') as f:
+        models_data = json.load(f)
+    model_count = len(models_data.get('models', []))
+    print(f'Local models.json contains {model_count} models')
+else:
+    print('WARNING: models.json file not found')
+"
+    
     # Setup systemd service
     echo "Setting up systemd service..."
     setup_systemd_service
@@ -272,6 +302,12 @@ asyncio.run(verify_migrations())
     echo "======================================================"
     echo "Initial Setup Complete!"
     echo "IMPORTANT: Update FALLBACK_PRIVATE_KEY in $PROJECT_DIR/.env"
+    echo ""
+    echo "✅ Automatic Model Sync is ENABLED:"
+    echo "   - Models will sync on startup"
+    echo "   - Background sync every 12 hours"
+    echo "   - Check logs for sync status"
+    echo ""
     echo "Check status: sudo systemctl status morpheus-api"
     echo "Check logs: sudo journalctl -u morpheus-api -f"
     echo "======================================================"
@@ -314,6 +350,9 @@ restart_service() {
     echo "Service restart complete. Checking status..."
     sudo systemctl status morpheus-api --no-pager
     echo "Check logs with: sudo journalctl -u morpheus-api -f"
+    echo ""
+    echo "ℹ️  Note: Model sync will run automatically on startup"
+    echo "   Check logs for model sync status and any updates"
 }
 
 #-----------------------------------------------------
@@ -408,6 +447,10 @@ If you need to set up components manually or troubleshoot:
    # DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/db <-- Use port 5432
    # REDIS_URL=redis://:pass@localhost:6379/0
    # PROXY_ROUTER_URL=http://localhost:8082
+   # MODEL_SYNC_ENABLED=True
+   # MODEL_SYNC_ON_STARTUP=True
+   # MODEL_SYNC_INTERVAL_HOURS=12
+   # ACTIVE_MODELS_URL=https://active.mor.org/active_models.json
    nano .env
 
 7. Run Application:

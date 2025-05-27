@@ -106,21 +106,6 @@
       "IsDeleted": false
     },
     {
-      "Id": "0x8e5c0229ab1dac1753b24e6614ae7c4a4896463ca4929d7601b2b241384d3bbd",
-      "IpfsCID": "0xd8e8628a4d31d78948f09dc01a586001163b914de85dfaa184e6f34c3a4fbe7c",
-      "Fee": 1,
-      "Stake": 200000000000000000,
-      "Owner": "0x23d25ead101cb9bfdd7970176597e72da344557e",
-      "Name": "default",
-      "Tags": [
-        "Mistral",
-        "Default",
-        "Alias"
-      ],
-      "CreatedAt": 1745330395,
-      "IsDeleted": false
-    },
-    {
       "Id": "0x92a06b7be237807198ff7af9e7ca36f64daf4db07b765bcfdca056e654c1c167",
       "IpfsCID": "0xefc2bcf422eb1113a646829568fb7da1c3a51aaacd52497864719d91ca9b1645",
       "Fee": 300000000000,

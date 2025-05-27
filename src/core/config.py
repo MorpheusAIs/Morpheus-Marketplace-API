@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     # Delegation
     GATEWAY_DELEGATE_ADDRESS: str = "0xGatewayDelegateAccountAddressPlaceholder" # Placeholder
     
+    # Model Sync Settings
+    MODEL_SYNC_ON_STARTUP: bool = Field(default=os.getenv("MODEL_SYNC_ON_STARTUP", "True").lower() == "true")
+    MODEL_SYNC_INTERVAL_HOURS: int = Field(default=int(os.getenv("MODEL_SYNC_INTERVAL_HOURS", "1")))
+    MODEL_SYNC_ENABLED: bool = Field(default=os.getenv("MODEL_SYNC_ENABLED", "True").lower() == "true")
+    ACTIVE_MODELS_URL: str = Field(default=os.getenv("ACTIVE_MODELS_URL", "https://active.mor.org/active_models.json"))
+    
     class Config:
         env_file = ".env"
         env_file_encoding = 'utf-8'

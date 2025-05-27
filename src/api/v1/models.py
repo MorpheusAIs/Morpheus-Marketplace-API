@@ -16,7 +16,7 @@ router = APIRouter(tags=["Models"])
 AUTH = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
 
 @router.get("/models", response_model=None)  # Handle /api/v1/models (without trailing slash)
-@router.get("/models/", response_model=None)  # Handle /api/v1/models/ (with trailing slash) - backward compatibility
+@router.get("/models/", response_model=None, include_in_schema=False)  # Handle /api/v1/models/ (with trailing slash) - backward compatibility, hidden from docs
 async def list_models():
     """
     Get a list of active models.
