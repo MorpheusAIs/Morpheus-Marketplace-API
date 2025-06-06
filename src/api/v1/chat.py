@@ -275,10 +275,10 @@ async def create_chat_completion(
                             except Exception as e:
                                 logger.error(f"Error creating new session to replace expired session: {e}")
                                 logger.exception(e)
-                                # Create mock session ID as last resort
-                                mock_session_id = f"mock-{uuid.uuid4()}"
-                                logger.warning(f"Using mock session ID due to session creation failure: {mock_session_id}")
-                                session_id = mock_session_id
+                                raise HTTPException(
+                                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                    detail=f"Failed to create new session to replace expired one: {e}"
+                                )
                         # Compare model IDs (hash to hash) only for non-expired sessions
                         elif session.model != requested_model_id:
                             logger.info(f"Model change detected. Current: {session.model}, Requested: {requested_model_id}")
@@ -315,10 +315,10 @@ async def create_chat_completion(
                                     await asyncio.sleep(1.0)  # Small delay to ensure registration
                                 except Exception as new_err:
                                     logger.error(f"Failed to create new session after switch failure: {new_err}")
-                                    # At this point, we need a fallback that won't cause an error
-                                    mock_session_id = f"mock-{uuid.uuid4()}"
-                                    logger.warning(f"Using generated mock session as last resort: {mock_session_id}")
-                                    session_id = mock_session_id
+                                    raise HTTPException(
+                                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                        detail=f"Failed to create new session after model switch failure: {new_err}"
+                                    )
                         else:
                             # Models match, use existing session
                             session_id = session.id
@@ -401,18 +401,21 @@ async def create_chat_completion(
                         except Exception as model_err:
                             logger.error(f"Error checking models API: {str(model_err)}")
                         
-                        # Session creation failed - use mock session for testing
-                        mock_session_id = f"mock-{uuid.uuid4()}"
-                        logger.warning(f"Automated session creation failed, using mock session ID: {mock_session_id}")
-                        session_id = mock_session_id
+                        # Session creation failed
+                        logger.error("Automated session creation failed.")
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Automated session creation failed. The model provider may be unavailable."
+                        )
                     logger.info("=========== SESSION DEBUG END ===========")
                 except Exception as e:
-                    # Error in session creation - use mock session for testing
-                    mock_session_id = f"mock-{uuid.uuid4()}"
+                    # Error in session creation
                     logger.error(f"Automated session creation error: {str(e)}")
                     logger.exception(e)  # Log full stack trace
-                    logger.warning(f"Using mock session ID for testing: {mock_session_id}")
-                    session_id = mock_session_id
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"An unexpected error occurred during session creation: {e}"
+                    )
         except HTTPException as http_exc:
             # Re-raise HTTP exceptions with logging
             logger.error(f"HTTP exception during session handling: {http_exc.detail}")

@@ -1,6 +1,91 @@
 {
   "models": [
     {
+      "Id": "0xcae588d59d8d0037ae96d2e830badd7209a0f94a208e6f19051ba15f5d2c04cb",
+      "IpfsCID": "0x5ee4f9ca78e16f58ef7f9dc6dbccb28d027fba218d98b7a3a28eba9e7f0c941f",
+      "Fee": 1,
+      "Stake": 100000000000000000,
+      "Owner": "0x23d25ead101cb9bfdd7970176597e72da344557e",
+      "Name": "mistral-31-24b-web",
+      "Tags": [
+        "Mistral",
+        "web-search-enabled"
+      ],
+      "CreatedAt": 1749184855,
+      "IsDeleted": false
+    },
+    {
+      "Id": "0x729fd536e90580eaf5c617bc578567114530c64afe211d7100853a68521c13ca",
+      "IpfsCID": "0x397fef620ad2e217adf44dc42fde3e68ddfcfe36c550f29acab08761bb22d4ad",
+      "Fee": 1,
+      "Stake": 100000000000000000,
+      "Owner": "0x23d25ead101cb9bfdd7970176597e72da344557e",
+      "Name": "llama-3.3-70b-web",
+      "Tags": [
+        "llama-3.3-70b",
+        "web-search-enabled"
+      ],
+      "CreatedAt": 1749184806,
+      "IsDeleted": false
+    },
+    {
+      "Id": "0x4e86c9c1d2597c2f6d27b7084d7485a422c0a010a9d0cc00be289575926b786a",
+      "IpfsCID": "0xe57ec22ec027c2e7eb1d7322059d514194230a79e7a5f3d91a31fc069098f064",
+      "Fee": 1,
+      "Stake": 100000000000000000,
+      "Owner": "0x23d25ead101cb9bfdd7970176597e72da344557e",
+      "Name": "qwen3-235b-web",
+      "Tags": [
+        "qwen3-235b",
+        "web-search-enabled"
+      ],
+      "CreatedAt": 1749184745,
+      "IsDeleted": false
+    },
+    {
+      "Id": "0xeef595c7863a8d80b5da617f6c613a49b64441f4b88b3e1b6981a5d2319e6b77",
+      "IpfsCID": "0xb94da7c51be2e19ac278868515f77f742db78c044be09cde576b6acfc4bffc0e",
+      "Fee": 1,
+      "Stake": 100000000000000000,
+      "Owner": "0x23d25ead101cb9bfdd7970176597e72da344557e",
+      "Name": "qwen3-235b",
+      "Tags": [
+        "qwen3-235b"
+      ],
+      "CreatedAt": 1749184678,
+      "IsDeleted": false
+    },
+    {
+      "Id": "0xdaaa5ac9873ca96687cd87276b32c7a0a20de28f216ae0b75db4852d3aa19dcd",
+      "IpfsCID": "0xe7dd5a7453efda2437c833760eb23e233f6ed19a8a36b5d39bbf83e0cae4bc63",
+      "Fee": 1,
+      "Stake": 100000000000000000,
+      "Owner": "0x23d25ead101cb9bfdd7970176597e72da344557e",
+      "Name": "venice-uncensored-web",
+      "Tags": [
+        "venice-uncensored",
+        "web-search-enabled"
+      ],
+      "CreatedAt": 1749181264,
+      "IsDeleted": false
+    },
+    {
+      "Id": "0xcb7f0bcc6a8997d0163e3fcac4eca181ba0a4037caa1eb89bf437c66858c9826",
+      "IpfsCID": "0xae964b4f39a73dd85a9c5bec6331c18b2cb32fbca4cc1d7e2751f2d445f585ec",
+      "Fee": 300000000000,
+      "Stake": 100000000000000000,
+      "Owner": "0x99dfe1a2f99058b99fdc74177dbf53a93ebe3f48",
+      "Name": "Whisper-1",
+      "Tags": [
+        "btbf",
+        "transcribe",
+        "s2t",
+        "speech"
+      ],
+      "CreatedAt": 1748544095,
+      "IsDeleted": false
+    },
+    {
       "Id": "0xb603e5c973fae19c86079a068abdc5c119c276e6117fb418a2248f6efd95612d",
       "IpfsCID": "0xb687c7bba959d2d83a9f5c1f24b46e612a1c3ca42fa14a96ecf4f8caa98f8224",
       "Fee": 1,
@@ -101,21 +186,6 @@
       "Tags": [
         "Mistral",
         "Default"
-      ],
-      "CreatedAt": 1745330395,
-      "IsDeleted": false
-    },
-    {
-      "Id": "0x8e5c0229ab1dac1753b24e6614ae7c4a4896463ca4929d7601b2b241384d3bbd",
-      "IpfsCID": "0xd8e8628a4d31d78948f09dc01a586001163b914de85dfaa184e6f34c3a4fbe7c",
-      "Fee": 1,
-      "Stake": 200000000000000000,
-      "Owner": "0x23d25ead101cb9bfdd7970176597e72da344557e",
-      "Name": "default",
-      "Tags": [
-        "Mistral",
-        "Default",
-        "Alias"
       ],
       "CreatedAt": 1745330395,
       "IsDeleted": false
