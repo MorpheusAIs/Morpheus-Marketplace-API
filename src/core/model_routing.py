@@ -104,23 +104,16 @@ class ModelRouter:
         # Look up the model name in our mapping
         target_model = self._model_mapping.get(requested_model)
         
-        # If not found, try reloading models.json
-        if not target_model:
-            logger.warning(f"[MODEL_DEBUG] Model '{requested_model}' not found in current mapping. Attempting to reload models.json.")
-            self._load_models_from_json()
-            # Try again with fresh mapping
-            target_model = self._model_mapping.get(requested_model)
-        
-        # If still not found, use default model
-        if not target_model:
-            logger.warning(f"[MODEL_DEBUG] Unknown model name: '{requested_model}', not in known models: {sorted(list(self._model_mapping.keys()))}")
+        if target_model:
+            logger.info(f"[MODEL_DEBUG] Found mapping: {requested_model} -> {target_model}")
+            return target_model
+        else:
+            logger.warning(f"[MODEL_DEBUG] Model '{requested_model}' not found in mapping")
+            logger.warning(f"[MODEL_DEBUG] Available models: {sorted(list(self._model_mapping.keys()))}")
             logger.warning(f"[MODEL_DEBUG] Using default model: {DEFAULT_MODEL}")
             default_id = self._get_default_model_id()
             logger.info(f"[MODEL_DEBUG] Resolved to default model ID: {default_id}")
             return default_id
-        
-        logger.info(f"[MODEL_DEBUG] Model '{requested_model}' successfully resolved to ID: {target_model}")
-        return target_model
     
     def _get_default_model_id(self) -> str:
         """Get the blockchain ID for the default model"""

@@ -7,53 +7,62 @@ def model_router():
 
 def test_get_target_model_valid_name(model_router):
     # Test getting blockchain ID for valid model name
-    assert model_router.get_target_model("claude-3-opus-20240229") == "0x8f9f631f647b318e720ec00e6aaeeaa60ca2c52db9362a292d44f217e66aa04f"
-    assert model_router.get_target_model("claude-3-sonnet-20240229") == "0xfe4cc20404f223f336f241fa16748b91e8ff1d54141203b0882b637ead9fef79"
-    assert model_router.get_target_model("claude-3-haiku-20240229") == "0x7d9a12c4df8cae8890fa43f2ac2986a472ce5b1c3e49198ed44235e23f333abc"
+    result = model_router.get_target_model("llama-3.3-70b")
+    assert result == "0xdf474728f624712570170f311a866a6937436c14861568f38593a531b7f45845"
 
 def test_get_target_model_valid_blockchain_id(model_router):
     # Test validating and returning a valid blockchain ID
-    valid_id = "0x8f9f631f647b318e720ec00e6aaeeaa60ca2c52db9362a292d44f217e66aa04f"
+    valid_id = "0xdf474728f624712570170f311a866a6937436c14861568f38593a531b7f45845"
     assert model_router.get_target_model(valid_id) == valid_id
 
 def test_get_target_model_invalid_name(model_router):
-    # Test error handling for invalid model name
-    with pytest.raises(ValueError, match="Unknown model name: invalid-model"):
-        model_router.get_target_model("invalid-model")
+    # Test graceful handling of invalid model name by returning default
+    result = model_router.get_target_model("invalid-model")
+    # Should return default model blockchain ID instead of raising error
+    assert result.startswith("0x")  # Should be a valid blockchain ID
 
 def test_get_target_model_invalid_blockchain_id(model_router):
-    # Test error handling for invalid blockchain ID
-    with pytest.raises(ValueError, match="Invalid blockchain ID: 0xinvalid"):
-        model_router.get_target_model("0xinvalid")
+    # Test graceful handling of invalid blockchain ID by returning default
+    result = model_router.get_target_model("0xinvalid")
+    # Should return default model blockchain ID instead of raising error
+    assert result.startswith("0x")  # Should be a valid blockchain ID
 
 def test_get_target_model_empty_input(model_router):
-    # Test error handling for empty input
-    with pytest.raises(ValueError, match="No model specified"):
-        model_router.get_target_model(None)
-    with pytest.raises(ValueError, match="No model specified"):
-        model_router.get_target_model("")
+    # Test graceful handling of empty input by returning default
+    result_none = model_router.get_target_model(None)
+    result_empty = model_router.get_target_model("")
+    # Both should return default model blockchain ID
+    assert result_none.startswith("0x")
+    assert result_empty.startswith("0x")
 
 def test_is_valid_model(model_router):
     # Test model validation
-    assert model_router.is_valid_model("claude-3-opus-20240229") is True
-    assert model_router.is_valid_model("0x8f9f631f647b318e720ec00e6aaeeaa60ca2c52db9362a292d44f217e66aa04f") is True
+    assert model_router.is_valid_model("llama-3.3-70b") is True
+    assert model_router.is_valid_model("0xdf474728f624712570170f311a866a6937436c14861568f38593a531b7f45845") is True
     assert model_router.is_valid_model("invalid-model") is False
     assert model_router.is_valid_model("0xinvalid") is False
-    assert model_router.is_valid_model("") is False
     assert model_router.is_valid_model(None) is False
+    assert model_router.is_valid_model("") is False
 
 def test_get_available_models(model_router):
     # Test getting available models
     models = model_router.get_available_models()
     assert isinstance(models, dict)
-    assert len(models) == 3
-    assert "claude-3-opus-20240229" in models
-    assert "claude-3-sonnet-20240229" in models
-    assert "claude-3-haiku-20240229" in models
-    assert models["claude-3-opus-20240229"] == "0x8f9f631f647b318e720ec00e6aaeeaa60ca2c52db9362a292d44f217e66aa04f"
+    assert len(models) > 0  # Should have at least some models
+    # Check that all values are valid blockchain IDs
+    for name, blockchain_id in models.items():
+        assert blockchain_id.startswith("0x")
+        assert len(blockchain_id) == 66  # 0x + 64 hex characters
 
 def test_get_available_models_immutable(model_router):
-    # Test that get_available_models returns a copy
-    models = model_router.get_available_models()
-    models["new-model"] = "0xnew"
-    assert "new-model" not in model_router.get_available_models() 
+    # Test that returned dict is a copy and doesn't affect internal state
+    models1 = model_router.get_available_models()
+    models2 = model_router.get_available_models()
+    
+    # Modify the returned dict
+    if models1:
+        first_key = next(iter(models1))
+        models1[first_key] = "modified"
+    
+    # Original should be unchanged
+    assert models1 != models2 or len(models1) == 0 

@@ -84,6 +84,16 @@ async def create_automated_session(
             try:
                 # Create session with proxy router using the model session endpoint
                 logger.info(f"[SESSION_DEBUG] Calling proxy router at: blockchain/models/{target_model}/session")
+                
+                # CRITICAL FIX: Ensure we're using the blockchain ID, not the model name
+                # The proxy router expects hex blockchain IDs, not model names
+                if not target_model.startswith("0x"):
+                    logger.error(f"[SESSION_DEBUG] CRITICAL ERROR: target_model is not a blockchain ID: {target_model}")
+                    logger.error(f"[SESSION_DEBUG] This will cause hex decoding errors in the proxy router")
+                    raise ValueError(f"Invalid blockchain ID format: {target_model}. Expected hex string starting with '0x'")
+                
+                logger.info(f"[SESSION_DEBUG] Using blockchain ID: {target_model}")
+                
                 response = await execute_proxy_router_operation(
                     "POST",
                     f"blockchain/models/{target_model}/session",
