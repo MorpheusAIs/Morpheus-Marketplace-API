@@ -104,7 +104,9 @@ setup_fresh_instance() {
         sudo sed -i 's|^DATABASE_URL=.*|DATABASE_URL=postgresql+asyncpg://morpheus_user:morpheus_password@localhost:5432/morpheus_db|' .env
         sudo sed -i 's/^REDIS_PASSWORD=.*/REDIS_PASSWORD=your_redis_password/' .env
         sudo sed -i 's|^REDIS_URL=.*|REDIS_URL=redis://:your_redis_password@localhost:6379/0|' .env
-        sudo sed -i 's|^PROXY_ROUTER_URL=.*|PROXY_ROUTER_URL=http://localhost:8082|' .env
+        sudo sed -i 's|^PROXY_ROUTER_URL=.*|PROXY_ROUTER_URL=http://morpheus-router.mor.org:8082|' .env
+        sudo sed -i 's|^PROXY_ROUTER_USERNAME=.*|PROXY_ROUTER_USERNAME=admin|' .env
+        sudo sed -i 's|^PROXY_ROUTER_PASSWORD=.*|PROXY_ROUTER_PASSWORD=Mor123456|' .env
         sudo sed -i "s/^JWT_SECRET_KEY=.*/JWT_SECRET_KEY=$JWT_SECRET/" .env
         sudo sed -i "s/^MASTER_ENCRYPTION_KEY=.*/MASTER_ENCRYPTION_KEY=$ENCRYPTION_KEY/" .env
         sudo sed -i 's/^ACCESS_TOKEN_EXPIRE_MINUTES=.*/ACCESS_TOKEN_EXPIRE_MINUTES=30/' .env
@@ -443,10 +445,12 @@ If you need to set up components manually or troubleshoot:
 
 6. Environment Variables:
    cp .env.example .env
-   # Edit .env with your settings, ensuring to use localhost for services:
+   # Edit .env with your settings:
    # DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/db <-- Use port 5432
    # REDIS_URL=redis://:pass@localhost:6379/0
-   # PROXY_ROUTER_URL=http://localhost:8082
+   # PROXY_ROUTER_URL=http://morpheus-router.mor.org:8082
+   # PROXY_ROUTER_USERNAME=admin
+   # PROXY_ROUTER_PASSWORD=Mor123456
    # MODEL_SYNC_ENABLED=True
    # MODEL_SYNC_ON_STARTUP=True
    # MODEL_SYNC_INTERVAL_HOURS=12
@@ -586,6 +590,7 @@ Group=$(id -gn $SERVICE_USER)
 WorkingDirectory=$PROJECT_DIR
 Environment="PATH=$VENV_DIR/bin"
 Environment="PYTHONPATH=$PROJECT_DIR"
+EnvironmentFile=$PROJECT_DIR/.env
 ExecStart=$VENV_DIR/bin/gunicorn $UVICORN_MODULE_PATH:app \\
     --workers 4 \\
     --worker-class uvicorn.workers.UvicornWorker \\
