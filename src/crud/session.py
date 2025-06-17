@@ -178,4 +178,30 @@ async def get_session_by_api_key_id(
         select(Session)
         .where(Session.api_key_id == api_key_id, Session.is_active == True)
     )
-    return result.scalars().first() 
+    return result.scalars().first()
+
+async def delete_all_user_sessions(db: AsyncSession, user_id: int) -> int:
+    """
+    Delete all sessions for a user and return count of deleted sessions.
+    
+    Args:
+        db: Database session
+        user_id: User ID
+        
+    Returns:
+        Count of deleted sessions
+    """
+    # Get count of sessions to delete
+    count_result = await db.execute(
+        select(Session).where(Session.user_id == user_id)
+    )
+    sessions = count_result.scalars().all()
+    count = len(sessions)
+    
+    # Delete all sessions for the user
+    await db.execute(
+        delete(Session).where(Session.user_id == user_id)
+    )
+    await db.commit()
+    
+    return count 

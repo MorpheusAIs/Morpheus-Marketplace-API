@@ -10,6 +10,7 @@ from src.crud import user as user_crud
 from src.crud import api_key as api_key_crud
 from src.crud import private_key as private_key_crud
 from src.crud import delegation as delegation_crud
+from src.crud import session as session_crud
 from src.db.database import get_db
 from src.schemas.user import UserCreate, UserResponse, UserLogin, UserDeletionResponse
 from src.schemas.token import Token, TokenRefresh, TokenPayload
@@ -337,23 +338,25 @@ async def delete_user_account(
     Delete the current user's account and all associated data.
     
     This action is irreversible and will:
-    1. Delete all API keys
-    2. Delete private key data (via cascade)
-    3. Delete automation settings (via cascade)
-    4. Delete delegation data (via cascade)
-    5. Delete the user account
-    
-    Sessions are left to expire naturally.
+    1. Delete all sessions
+    2. Delete all API keys
+    3. Delete private key data (via cascade)
+    4. Delete automation settings (via cascade)
+    5. Delete delegation data (via cascade)
+    6. Delete the user account
     
     Requires JWT Bearer authentication.
     """
     user_id = current_user.id
     
     try:
-        # 1. Delete all API keys manually (no cascade relationship)
+        # 1. Delete all sessions first (to avoid foreign key constraint violations)
+        sessions_deleted = await session_crud.delete_all_user_sessions(db, user_id)
+        
+        # 2. Delete all API keys manually (no cascade relationship)
         api_keys_deleted = await api_key_crud.delete_all_user_api_keys(db, user_id)
         
-        # 2. Delete the user (this will cascade delete private keys, automation settings, and delegations)
+        # 3. Delete the user (this will cascade delete private keys, automation settings, and delegations)
         deleted_user = await user_crud.delete_user(db, user_id)
         
         if not deleted_user:
@@ -364,6 +367,7 @@ async def delete_user_account(
         
         # Prepare response data
         deleted_data = {
+            "sessions": sessions_deleted,
             "api_keys": api_keys_deleted,
             "private_key": True,  # Will be deleted via cascade if it exists
             "automation_settings": True,  # Will be deleted via cascade if it exists
