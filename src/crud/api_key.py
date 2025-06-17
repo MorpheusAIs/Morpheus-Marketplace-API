@@ -2,7 +2,7 @@ import datetime
 from typing import Optional, List
 from datetime import timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -154,4 +154,30 @@ async def update_last_used(db: AsyncSession, api_key: APIKey) -> APIKey:
     api_key.last_used_at = naive_datetime
     await db.commit()
     
-    return api_key 
+    return api_key
+
+async def delete_all_user_api_keys(db: AsyncSession, user_id: int) -> int:
+    """
+    Delete all API keys for a user and return count of deleted keys.
+    
+    Args:
+        db: Database session
+        user_id: User ID
+        
+    Returns:
+        Count of deleted API keys
+    """
+    # Get count of API keys to delete
+    count_result = await db.execute(
+        select(APIKey).where(APIKey.user_id == user_id)
+    )
+    api_keys = count_result.scalars().all()
+    count = len(api_keys)
+    
+    # Delete all API keys for the user
+    await db.execute(
+        delete(APIKey).where(APIKey.user_id == user_id)
+    )
+    await db.commit()
+    
+    return count 

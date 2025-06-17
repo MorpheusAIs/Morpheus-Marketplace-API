@@ -1,5 +1,6 @@
 # Authentication routes 
 from typing import List, Any, Optional
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, status, Depends, Body, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +11,7 @@ from src.crud import api_key as api_key_crud
 from src.crud import private_key as private_key_crud
 from src.crud import delegation as delegation_crud
 from src.db.database import get_db
-from src.schemas.user import UserCreate, UserResponse, UserLogin
+from src.schemas.user import UserCreate, UserResponse, UserLogin, UserDeletionResponse
 from src.schemas.token import Token, TokenRefresh, TokenPayload
 from src.schemas.api_key import APIKeyCreate, APIKeyResponse, APIKeyDB
 from src.schemas import private_key as private_key_schemas
@@ -326,6 +327,70 @@ async def delete_delegation(
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 # --- End Delegation Endpoints ---
+
+@router.delete("/register", response_model=UserDeletionResponse, status_code=status.HTTP_200_OK)
+async def delete_user_account(
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Delete the current user's account and all associated data.
+    
+    This action is irreversible and will:
+    1. Delete all API keys
+    2. Delete private key data (via cascade)
+    3. Delete automation settings (via cascade)
+    4. Delete delegation data (via cascade)
+    5. Delete the user account
+    
+    Sessions are left to expire naturally.
+    
+    Requires JWT Bearer authentication.
+    """
+    user_id = current_user.id
+    
+    try:
+        # 1. Delete all API keys manually (no cascade relationship)
+        api_keys_deleted = await api_key_crud.delete_all_user_api_keys(db, user_id)
+        
+        # 2. Delete the user (this will cascade delete private keys, automation settings, and delegations)
+        deleted_user = await user_crud.delete_user(db, user_id)
+        
+        if not deleted_user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Prepare response data
+        deleted_data = {
+            "api_keys": api_keys_deleted,
+            "private_key": True,  # Will be deleted via cascade if it exists
+            "automation_settings": True,  # Will be deleted via cascade if it exists
+            "delegations": True  # Will be deleted via cascade if any exist
+        }
+        
+        # Use timezone-aware datetime and convert to naive for consistency
+        deleted_at_with_tz = datetime.now(timezone.utc)
+        deleted_at = deleted_at_with_tz.replace(tzinfo=None)
+        
+        return UserDeletionResponse(
+            message="User account successfully deleted",
+            deleted_data=deleted_data,
+            user_id=user_id,
+            deleted_at=deleted_at
+        )
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        # Log the error (in production, use proper logging)
+        print(f"Error deleting user account {user_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete user account"
+        )
 
 # Export router
 auth_router = router 
