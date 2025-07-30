@@ -43,6 +43,7 @@ class UserDeletionResponse(BaseModel):
     """Schema for user deletion response"""
     message: str
     deleted_data: dict
+    cognito_deletion: dict  # Status of Cognito user deletion
     user_id: int
     deleted_at: datetime
     
@@ -51,10 +52,16 @@ class UserDeletionResponse(BaseModel):
             "example": {
                 "message": "User account successfully deleted",
                 "deleted_data": {
+                    "sessions": 2,
                     "api_keys": 3,
                     "private_key": True,
                     "automation_settings": True,
                     "delegations": 0
+                },
+                "cognito_deletion": {
+                    "success": True,
+                    "cognito_user_id": "abc123-def456-ghi789",
+                    "message": "User successfully deleted from Cognito"
                 },
                 "user_id": 123,
                 "deleted_at": "2024-01-01T12:00:00Z"

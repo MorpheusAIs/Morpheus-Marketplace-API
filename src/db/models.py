@@ -11,9 +11,9 @@ class User(Base):
     __tablename__ = "users"
     
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String)
-    email = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
+    cognito_user_id = Column(String, unique=True, index=True, nullable=False)  # Cognito 'sub' claim
+    email = Column(String, unique=True, index=True, nullable=False)  # From Cognito token
+    name = Column(String, nullable=True)  # From Cognito token (given_name/family_name)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

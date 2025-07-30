@@ -136,19 +136,7 @@ async def _handle_automated_session_creation(
         # Return None to fall back to manual session handling
         return None
 
-@router.post("/completions", response_model=None, responses={
-    200: {
-        "description": "Chat completion response",
-        "content": {
-            "text/event-stream": {
-                "schema": {"type": "string"}
-            },
-            "application/json": {
-                "schema": openai_schemas.ChatCompletionResponse.schema()
-            }
-        }
-    }
-})
+@router.post("/completions")
 async def create_chat_completion(
     request_data: ChatCompletionRequest,
     request: Request,

@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-morpheus_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-morpheus_password}
-      POSTGRES_DB: ${POSTGRES_DB:-morpheus_db}
+      POSTGRES_DB: ${POSTGRES_DB:-morpheusapi}
       PGPORT: 5433
     ports:
       - "5433:5432" # Changed from 5432:5432 to avoid conflicts with local PostgreSQL
@@ -47,7 +47,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-morpheus_user}:${POSTGRES_PASSWORD:-morpheus_password}@localhost:5433/${POSTGRES_DB:-morpheus_db}
       REDIS_URL: redis://:${REDIS_PASSWORD:-supersecretredis}@localhost:6379/0
-      PROXY_ROUTER_URL: http://morpheus-router.mor.org:8082
+      PROXY_ROUTER_URL: http://router.dev.mor.org:8082
       # Other env vars like JWT_SECRET_KEY, KMS settings etc. will be loaded from .env
     volumes:
       - ./src:/app/src # Mount src for development hot-reloading (optional)

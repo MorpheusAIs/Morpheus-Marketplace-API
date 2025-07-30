@@ -1,0 +1,13 @@
+.vscode
+.cursorignore
+.gitignore
+.git
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.terraform.lock.hcl
+.terragrunt-cache
+.tfapply.out
+.tfplan.out
