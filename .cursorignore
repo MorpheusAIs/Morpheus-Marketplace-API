@@ -1,6 +1,4 @@
 .vscode
-.cursorignore
-.gitignore
 .git
 .env.local
 .env.development.local
