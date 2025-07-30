@@ -550,6 +550,11 @@ async def swagger_ui_oauth2_redirect(request: Request):
                 document.getElementById('spinner').style.display = 'none';
                 
                 // Try to handle as popup first
+                console.log('🔍 Popup detection:', {{
+                    hasOpener: !!window.opener,
+                    hasSwaggerCallback: !!(window.opener && window.opener.swaggerUIRedirectOauth2)
+                }});
+                
                 if (window.opener && window.opener.swaggerUIRedirectOauth2) {{
                     console.log('🔄 Handling as popup window');
                     try {{
@@ -576,34 +581,49 @@ async def swagger_ui_oauth2_redirect(request: Request):
                             }});
                         }}
                         
-                        document.getElementById('status').innerHTML = '✅ Authentication complete! Closing window...';
-                        setTimeout(() => window.close(), 1000);
+                        document.getElementById('status').innerHTML = `
+                            <div>
+                                <h2 style="color: #28a745;">✅ Authentication Complete!</h2>
+                                <p>Token has been applied to the main window.</p>
+                                <button onclick="window.close()" style="background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 6px; font-size: 16px; cursor: pointer; margin-top: 15px;">
+                                    Close Window
+                                </button>
+                                <p style="color: #6c757d; margin-top: 10px; font-size: 14px;">Window will close automatically in 3 seconds...</p>
+                            </div>
+                        `;
+                        setTimeout(() => window.close(), 3000);
                         return;
                     }} catch (e) {{
                         console.error('❌ Popup callback error:', e);
                     }}
                 }}
                 
-                // Handle as new tab
-                console.log('🔄 Handling as new tab scenario');
+                // Handle as new tab OR popup - simplified approach
+                console.log('🔄 Handling authentication completion');
                 
                 if (accessToken) {{
-                    // Store token in localStorage and redirect back to docs
-                    console.log('✅ Storing token in localStorage and redirecting...');
+                    // Store token in localStorage 
+                    console.log('✅ Storing token in localStorage...');
                     localStorage.setItem('swagger_oauth_token', accessToken);
                     localStorage.setItem('swagger_oauth_token_timestamp', Date.now().toString());
                     
+                    // Always show close button - no redirect, no detection needed
+                    console.log('🔄 Showing close button');
                     document.getElementById('status').innerHTML = `
                         <div>
-                            <h2 style="color: #28a745;">✅ Authentication Successful!</h2>
-                            <p>🔄 Redirecting you back to API documentation...</p>
+                            <h2 style="color: #28a745;">✅ Authentication Complete!</h2>
+                            <p>Token has been applied to the main window.</p>
+                            <button onclick="window.close()" style="background: #6c757d; color: white; padding: 12px 24px; border: none; border-radius: 6px; font-size: 16px; cursor: pointer; margin-top: 15px;">
+                                Close Window
+                            </button>
+                            <p style="color: #6c757d; margin-top: 10px; font-size: 14px;">Window will close automatically in 3 seconds...</p>
                         </div>
                     `;
                     
-                    // Redirect back to docs page after a short delay
+                    // Auto-close after 3 seconds using the same code as the button
                     setTimeout(() => {{
-                        window.location.href = '/docs';
-                    }}, 1500);
+                        window.close();
+                    }}, 3000);
                 }} else {{
                     // No token - show error
                     document.getElementById('status').innerHTML = `
@@ -677,6 +697,200 @@ def custom_swagger_ui_html():
             
             // Debug: Log OAuth2 configuration
             console.log('🔍 OAuth2 redirect configured');
+            
+            // Override OAuth2 authorization to use popup instead of new tab
+            setTimeout(() => {{
+                console.log('🔍 Setting up OAuth2 popup override...');
+                
+                // Override the window.open function specifically for OAuth2 URLs
+                const originalWindowOpen = window.open;
+                window.open = function(url, target, features) {{
+                    if (url && url.includes('/oauth2/authorize')) {{
+                        console.log('🔍 OAuth2 authorization detected, opening popup instead of tab');
+                        
+                        // Set up Swagger UI OAuth2 redirect callback for popup detection
+                        window.swaggerUIRedirectOauth2 = {{
+                            auth: 'OAuth2',
+                            redirectUrl: window.location.origin + '/docs/oauth2-redirect',
+                            callback: function(data) {{
+                                console.log('✅ OAuth2 popup callback received:', data);
+                                if (data.token && data.token.access_token) {{
+                                    console.log('✅ Applying token from popup callback...');
+                                    try {{
+                                        window.ui.preauthorizeApiKey('BearerAuth', data.token.access_token);
+                                        console.log('✅ Bearer token applied successfully from popup!');
+                                    }} catch (e) {{
+                                        console.log('⚠️ Error applying token from popup:', e);
+                                    }}
+                                }}
+                            }}
+                        }};
+                        
+                        // Open popup with specific features
+                        const popup = originalWindowOpen.call(
+                            this, 
+                            url, 
+                            'oauth2_auth_popup',
+                            'width=600,height=700,scrollbars=yes,resizable=yes,status=yes,location=yes,toolbar=no,menubar=no,left=' + 
+                            Math.round((screen.width - 600) / 2) + ',top=' + Math.round((screen.height - 700) / 2)
+                        );
+                        
+                        // Store popup reference globally for direct access
+                        window.oauth2Popup = popup;
+                        
+                        // Monitor popup closure and token retrieval
+                        const checkPopup = setInterval(() => {{
+                            try {{
+                                if (popup.closed) {{
+                                    clearInterval(checkPopup);
+                                    console.log('🔍 OAuth2 popup closed, checking for tokens...');
+                                    
+                                    // Check for token in localStorage with extended monitoring for new user flows
+                                    setTimeout(() => {{
+                                        const token = localStorage.getItem('swagger_oauth_token');
+                                        if (token) {{
+                                            console.log('✅ Token found from popup, applying to Bearer Auth...');
+                                            try {{
+                                                window.ui.preauthorizeApiKey('BearerAuth', token);
+                                                console.log('✅ Bearer token applied successfully!');
+                                            }} catch (e) {{
+                                                console.log('⚠️ Error applying token:', e);
+                                            }}
+                                            localStorage.removeItem('swagger_oauth_token');
+                                            localStorage.removeItem('swagger_oauth_token_timestamp');
+                                        }} else {{
+                                            // Extended monitoring for new user registration flows
+                                            console.log('🔍 No token found immediately - starting extended monitoring for new user flows...');
+                                            let extendedChecks = 0;
+                                            const maxExtendedChecks = 10; // Check for 10 more seconds
+                                            
+                                            const extendedMonitor = setInterval(() => {{
+                                                extendedChecks++;
+                                                const delayedToken = localStorage.getItem('swagger_oauth_token');
+                                                
+                                                if (delayedToken) {{
+                                                    console.log('✅ Token found during extended monitoring!');
+                                                    clearInterval(extendedMonitor);
+                                                    
+                                                    // Use the same multi-method approach as page load
+                                                    try {{
+                                                        console.log('🔍 Attempting to authorize with delayed token...');
+                                                        
+                                                        if (window.ui) {{
+                                                            // Method 1: Use preauthorizeApiKey for BearerAuth
+                                                            try {{
+                                                                window.ui.preauthorizeApiKey('BearerAuth', delayedToken);
+                                                                console.log('✅ BearerAuth preauthorized from extended monitoring!');
+                                                            }} catch (e) {{
+                                                                console.log('⚠️ preauthorizeApiKey failed:', e);
+                                                            }}
+                                                            
+                                                            // Method 2: Try the direct authActions approach
+                                                            if (window.ui.authActions) {{
+                                                                try {{
+                                                                    window.ui.authActions.authorize({{
+                                                                        'BearerAuth': delayedToken
+                                                                    }});
+                                                                    console.log('✅ BearerAuth via authActions from extended monitoring!');
+                                                                }} catch (e) {{
+                                                                    console.log('⚠️ authActions.authorize failed:', e);
+                                                                }}
+                                                            }}
+                                                            
+                                                            // Method 3: Safari-specific handling
+                                                            if (navigator.userAgent.includes('Safari') && !navigator.userAgent.includes('Chrome')) {{
+                                                                setTimeout(() => {{
+                                                                    try {{
+                                                                        window.ui.authActions.authorize({{
+                                                                            'BearerAuth': {{
+                                                                                value: delayedToken
+                                                                            }}
+                                                                        }});
+                                                                        console.log('✅ Safari-specific auth from extended monitoring!');
+                                                                    }} catch (e) {{
+                                                                        console.log('⚠️ Safari auth failed:', e);
+                                                                    }}
+                                                                }}, 500);
+                                                            }}
+                                                        }}
+                                                    }} catch (error) {{
+                                                        console.error('❌ Error applying delayed token:', error);
+                                                    }}
+                                                    
+                                                    localStorage.removeItem('swagger_oauth_token');
+                                                    localStorage.removeItem('swagger_oauth_token_timestamp');
+                                                }} else if (extendedChecks >= maxExtendedChecks) {{
+                                                    console.log('⚠️ Extended monitoring timeout - no token found');
+                                                    clearInterval(extendedMonitor);
+                                                }}
+                                            }}, 1000);
+                                        }}
+                                    }}, 500);
+                                    return;
+                                }}
+                                
+                                // Check for successful token every second
+                                const token = localStorage.getItem('swagger_oauth_token');
+                                if (token) {{
+                                    console.log('✅ Token detected! Closing popup and applying token...');
+                                    clearInterval(checkPopup);
+                                    
+                                    // Store token for Safari handling before cleanup
+                                    const tokenForSafari = token;
+                                    
+                                    // Apply token immediately
+                                    try {{
+                                        window.ui.preauthorizeApiKey('BearerAuth', token);
+                                        console.log('✅ Bearer token applied successfully!');
+                                    }} catch (e) {{
+                                        console.log('⚠️ Error applying token:', e);
+                                    }}
+                                    
+                                    // Close popup explicitly
+                                    if (!popup.closed) {{
+                                        popup.close();
+                                        console.log('✅ Popup closed successfully');
+                                    }}
+                                    
+                                    // Clean up
+                                    localStorage.removeItem('swagger_oauth_token');
+                                    localStorage.removeItem('swagger_oauth_token_timestamp');
+                                    delete window.oauth2Popup;
+                                    
+                                    // Safari-specific: Force a UI refresh to ensure token visibility
+                                    if (navigator.userAgent.includes('Safari') && !navigator.userAgent.includes('Chrome')) {{
+                                        console.log('🍎 Safari detected - forcing UI refresh...');
+                                        setTimeout(() => {{
+                                            try {{
+                                                // Try multiple Safari-friendly approaches
+                                                if (window.ui && window.ui.authActions) {{
+                                                    window.ui.authActions.authorize({{
+                                                        'BearerAuth': {{
+                                                            value: tokenForSafari
+                                                        }}
+                                                    }});
+                                                    console.log('✅ Safari UI refresh attempted');
+                                                }}
+                                            }} catch (e) {{
+                                                console.log('⚠️ Safari refresh attempt failed:', e);
+                                            }}
+                                        }}, 500);
+                                    }}
+                                }}
+                            }} catch (e) {{
+                                // Cross-origin error - popup still open, continue monitoring
+                            }}
+                        }}, 1000);
+                        
+                        return popup;
+                    }}
+                    
+                    // For all other URLs, use original window.open
+                    return originalWindowOpen.call(this, url, target, features);
+                }};
+                
+                console.log('✅ OAuth2 popup override installed');
+            }}, 2000); // Wait for Swagger UI to fully initialize
             
             // Check for OAuth token in localStorage (from new tab flow)
             setTimeout(() => {{
