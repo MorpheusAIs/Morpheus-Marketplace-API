@@ -43,13 +43,15 @@ app = FastAPI(
     version=f"0.2.0-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
     redirect_slashes=False,  # Disable automatic redirects to prevent HTTPS→HTTP downgrade attacks
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    docs_url=None,  # Disable automatic /docs endpoint so our custom one works
-    redoc_url=None,  # Also disable /redoc to avoid confusion
+    docs_url=None,  # Disable default docs so we can customize it
+    redoc_url="/redoc",  # Re-enable ReDoc for alternative documentation
     swagger_ui_oauth2_redirect_url="/docs/oauth2-redirect"
 )
 
 # Set our fixed dependency route class for all APIRouters
 app.router.route_class = FixedDependencyAPIRoute
+
+# Note: Custom OpenAPI function is defined later in the file
 
 # Set up CORS
 if hasattr(settings, 'BACKEND_CORS_ORIGINS'):
@@ -422,8 +424,14 @@ async def health_check():
 # Custom docs endpoints using standard APIRoute
 @app.get("/docs/oauth2-redirect", include_in_schema=False)
 async def swagger_ui_oauth2_redirect(request: Request):
-    # Get authorization code from query parameters
+    """
+    OAuth2 redirect endpoint that automatically exchanges code for token and integrates with Swagger UI.
+    """
+    import httpx
+    
+    # Extract the authorization code and state
     code = request.query_params.get("code")
+    state = request.query_params.get("state")
     error = request.query_params.get("error")
     
     if error:
@@ -433,448 +441,192 @@ async def swagger_ui_oauth2_redirect(request: Request):
         <head><title>OAuth2 Error</title></head>
         <body>
             <h1>OAuth2 Authentication Error</h1>
-            <p>Error: {error}</p>
-            <p>Description: {request.query_params.get("error_description", "Unknown error")}</p>
+            <p><strong>Error:</strong> {error}</p>
+            <p><strong>Description:</strong> {request.query_params.get("error_description", "Unknown error")}</p>
             <p><a href="/docs">Return to API Documentation</a></p>
         </body>
         </html>
         """)
     
-    if not code:
-        return HTMLResponse(content="""
-        <!DOCTYPE html>
-        <html>
-        <head><title>OAuth2 Processing</title></head>
-        <body>
-            <h1>OAuth2 Processing</h1>
-            <p>Processing OAuth2 callback...</p>
-            <script>
-                // Extract token if present in URL fragment (implicit flow)
-                const fragment = window.location.hash.substring(1);
-                const params = new URLSearchParams(fragment);
-                const accessToken = params.get('access_token');
+    # If we have a code, exchange it for an access token
+    access_token = None
+    token_error = None
+    if code:
+        try:
+            # Exchange the authorization code for tokens
+            token_url = f"https://{settings.COGNITO_DOMAIN}/oauth2/token"
+            
+            data = {
+                "grant_type": "authorization_code",
+                "client_id": settings.COGNITO_CLIENT_ID,
+                "code": code,
+                "redirect_uri": f"{settings.BASE_URL}/docs/oauth2-redirect"
+            }
+            
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(token_url, data=data, headers=headers)
                 
-                if (accessToken) {
-                    // Store token and redirect to docs
-                    sessionStorage.setItem('oauth_access_token', accessToken);
-                    window.location.href = '/docs?oauth_success=true';
-                } else {
-                    // No code or token found
-                    document.body.innerHTML = '<h1>Error</h1><p>No authorization code or token received.</p><p><a href="/docs">Return to API Documentation</a></p>';
-                }
-            </script>
-        </body>
-        </html>
-        """)
+            if response.status_code == 200:
+                tokens = response.json()
+                access_token = tokens.get("access_token")
+                logger.info("Token exchange successful")
+            else:
+                error_body = response.text
+                logger.warning(f"Token exchange failed - Status: {response.status_code}")
+                logger.warning("Token exchange error response received")
+                token_error = f"HTTP {response.status_code}: {error_body}"
+                
+        except Exception as e:
+            logger.error(f"Token exchange exception: {str(e)}")
+            token_error = str(e)
     
-    # We have an authorization code - exchange it for tokens
-    return HTMLResponse(content=f"""
+    # Build the HTML with proper JavaScript variable interpolation
+    js_access_token = f'"{access_token}"' if access_token else '""'
+    js_auth_code = f'"{code}"' if code else '""'
+    js_state = f'"{state}"' if state else '""'
+    
+    html_content = f"""
     <!DOCTYPE html>
-    <html>
+    <html lang="en-US">
     <head>
-        <title>Completing OAuth2 Login...</title>
+        <title>OAuth2 Redirect</title>
         <style>
-            body {{ font-family: Arial, sans-serif; padding: 40px; text-align: center; }}
-            .spinner {{ border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 40px; height: 40px; animation: spin 2s linear infinite; margin: 20px auto; }}
-            @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
+            body {{ 
+                font-family: Arial, sans-serif; 
+                padding: 40px; 
+                text-align: center;
+                background: #f8f9fa;
+            }}
+            .success {{ color: #28a745; }}
+            .spinner {{ 
+                border: 4px solid #f3f3f3; 
+                border-top: 4px solid #28a745; 
+                border-radius: 50%; 
+                width: 40px; 
+                height: 40px; 
+                animation: spin 1s linear infinite; 
+                margin: 20px auto; 
+            }}
+            @keyframes spin {{ 
+                0% {{ transform: rotate(0deg); }} 
+                100% {{ transform: rotate(360deg); }} 
+            }}
+            .token-display {{
+                background: #f8f9fa;
+                border: 2px solid #28a745;
+                border-radius: 8px;
+                padding: 15px;
+                margin: 20px auto;
+                max-width: 600px;
+                word-break: break-all;
+                font-family: monospace;
+                font-size: 12px;
+            }}
         </style>
     </head>
     <body>
-        <h1>🔄 Completing OAuth2 Login...</h1>
-        <div class="spinner"></div>
-        <p>Exchanging authorization code for access token...</p>
+        <h1 class="success">✅ Authentication Successful!</h1>
+        <div class="spinner" id="spinner"></div>
+        <p id="status">Processing OAuth2 authentication...</p>
         
         <script>
-            async function exchangeCodeForToken() {{
-                try {{
-                    const code = '{code}';
-                    const clientId = '{settings.COGNITO_CLIENT_ID}';
-                    // Use the same redirect_uri that was used in the authorization request
-                    const redirectUri = 'https://' + window.location.host + '/docs/oauth2-redirect';
-                    
-                    console.log('🔄 Exchanging code for token...', {{ code: code.substring(0, 10) + '...' }});
-                    
-                    // Get the code_verifier from the cookie that was set during oauth-login
-                    function getCookie(name) {{
-                        const value = `; ${{document.cookie}}`;
-                        const parts = value.split(`; ${{name}}=`);
-                        if (parts.length === 2) return parts.pop().split(';').shift();
-                        return null;
+            'use strict';
+            
+            const accessToken = {js_access_token};
+            const authCode = {js_auth_code};
+            const authState = {js_state};
+            
+            function run() {{
+                console.log('🔍 OAuth2 redirect processing...');
+                console.log('🔑 Access token available:', accessToken ? 'Yes' : 'No');
+                console.log('🔍 Authorization code:', authCode ? 'Present' : 'Missing');
+                console.log('🪟 Window opener:', window.opener ? 'Present' : 'Null');
+                
+                // Hide spinner
+                document.getElementById('spinner').style.display = 'none';
+                
+                // Try to handle as popup first
+                if (window.opener && window.opener.swaggerUIRedirectOauth2) {{
+                    console.log('🔄 Handling as popup window');
+                    try {{
+                        const oauth2 = window.opener.swaggerUIRedirectOauth2;
+                        
+                        // If we have an access token, pass it directly
+                        if (accessToken) {{
+                            console.log('✅ Passing access token to Swagger UI');
+                            oauth2.callback({{
+                                auth: oauth2.auth,
+                                token: {{
+                                    access_token: accessToken,
+                                    token_type: 'Bearer'
+                                }},
+                                redirectUrl: oauth2.redirectUrl
+                            }});
+                        }} else {{
+                            // Fall back to code-based flow
+                            oauth2.callback({{
+                                auth: oauth2.auth,
+                                code: authCode,
+                                state: authState,
+                                redirectUrl: oauth2.redirectUrl
+                            }});
+                        }}
+                        
+                        document.getElementById('status').innerHTML = '✅ Authentication complete! Closing window...';
+                        setTimeout(() => window.close(), 1000);
+                        return;
+                    }} catch (e) {{
+                        console.error('❌ Popup callback error:', e);
                     }}
+                }}
+                
+                // Handle as new tab
+                console.log('🔄 Handling as new tab scenario');
+                
+                if (accessToken) {{
+                    // Store token in localStorage and redirect back to docs
+                    console.log('✅ Storing token in localStorage and redirecting...');
+                    localStorage.setItem('swagger_oauth_token', accessToken);
+                    localStorage.setItem('swagger_oauth_token_timestamp', Date.now().toString());
                     
-                    const codeVerifier = getCookie('oauth_code_verifier');
-                    console.log('🔑 Code verifier found:', codeVerifier ? 'Yes' : 'No');
+                    document.getElementById('status').innerHTML = `
+                        <div>
+                            <h2 style="color: #28a745;">✅ Authentication Successful!</h2>
+                            <p>🔄 Redirecting you back to API documentation...</p>
+                        </div>
+                    `;
                     
-                    // Validate state parameter for CSRF protection
-                    const urlParams = new URLSearchParams(window.location.search);
-                    const receivedState = urlParams.get('state');
-                    const expectedState = getCookie('oauth_state');
-                    
-                    console.log('🛡️ State validation:', {{ 
-                        received: receivedState ? receivedState.substring(0, 10) + '...' : 'none',
-                        expected: expectedState ? expectedState.substring(0, 10) + '...' : 'none',
-                        valid: receivedState === expectedState
-                    }});
-                    
-                    if (!expectedState || receivedState !== expectedState) {{
-                        throw new Error('State validation failed - possible CSRF attack');
-                    }}
-                    
-                    // Prepare token exchange parameters
-                    const tokenParams = {{
-                        grant_type: 'authorization_code',
-                        client_id: clientId,
-                        code: code,
-                        redirect_uri: redirectUri
-                    }};
-                    
-                    // Add PKCE code_verifier if available
-                    if (codeVerifier) {{
-                        tokenParams.code_verifier = codeVerifier;
-                    }}
-                    
-                    console.log('📤 Token exchange params:', {{ ...tokenParams, code: code.substring(0, 10) + '...', code_verifier: codeVerifier ? codeVerifier.substring(0, 10) + '...' : 'none' }});
-                    
-                    // Exchange authorization code for access token
-                    const tokenResponse = await fetch('https://{settings.COGNITO_DOMAIN}/oauth2/token', {{
-                        method: 'POST',
-                        headers: {{
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                        }},
-                        body: new URLSearchParams(tokenParams)
-                    }});
-                    
-                    console.log('📥 Token response status:', tokenResponse.status);
-                    
-                    if (!tokenResponse.ok) {{
-                        const errorText = await tokenResponse.text();
-                        console.error('❌ Token exchange error:', errorText);
-                        throw new Error(`Token exchange failed: ${{tokenResponse.status}} ${{tokenResponse.statusText}} - ${{errorText}}`);
-                    }}
-                    
-                    const tokenData = await tokenResponse.json();
-                    console.log('✅ Token exchange successful!');
-                    
-                    // Store the access token
-                    sessionStorage.setItem('oauth_access_token', tokenData.access_token);
-                    sessionStorage.setItem('oauth_token_type', tokenData.token_type || 'Bearer');
-                    if (tokenData.refresh_token) {{
-                        sessionStorage.setItem('oauth_refresh_token', tokenData.refresh_token);
-                    }}
-                    
-                    // Redirect back to docs with success flag
-                    window.location.href = '/docs?oauth_success=true';
-                    
-                }} catch (error) {{
-                    console.error('❌ OAuth2 token exchange failed:', error);
-                    document.body.innerHTML = `
-                        <h1>❌ Authentication Failed</h1>
-                        <p>Failed to complete OAuth2 login: ${{error.message}}</p>
-                        <p><a href="/docs">Return to API Documentation</a></p>
+                    // Redirect back to docs page after a short delay
+                    setTimeout(() => {{
+                        window.location.href = '/docs';
+                    }}, 1500);
+                }} else {{
+                    // No token - show error
+                    document.getElementById('status').innerHTML = `
+                        <div>
+                            <h2 style="color: #dc3545;">❌ Token Exchange Failed</h2>
+                            <p>Authentication succeeded but automatic token exchange failed.</p>
+                            <p>Authorization code: <code>${{authCode || "None"}}</code></p>
+                            <p>Please try the manual process or contact support.</p>
+                            <p style="margin-top: 30px;">
+                                <a href="/docs" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px;">Return to API Docs</a>
+                            </p>
+                        </div>
                     `;
                 }}
             }}
             
-            // Start the token exchange
-            exchangeCodeForToken();
-        </script>
-    </body>
-    </html>
-    """)
-
-# OAuth2 login endpoint  
-@app.get("/oauth-login", include_in_schema=False)
-async def oauth_login(request: Request):
-    """Direct OAuth2 login endpoint"""
-    # Generate PKCE parameters
-    import secrets
-    import base64
-    import hashlib
-    
-    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8').rstrip('=')
-    code_challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode('utf-8')).digest()
-    ).decode('utf-8').rstrip('=')
-    
-    state = secrets.token_urlsafe(32)
-    
-    # Store PKCE parameters in the redirect URL (they'll be handled by the OAuth2 redirect endpoint)
-    # Force HTTPS for redirect_uri since load balancer terminates SSL
-    redirect_uri = f"https://{request.url.netloc}/docs/oauth2-redirect"
-    
-    auth_url = (
-        f"https://{settings.COGNITO_DOMAIN}/oauth2/authorize?"
-        f"response_type=code&"
-        f"client_id={settings.COGNITO_CLIENT_ID}&"
-        f"redirect_uri={quote(redirect_uri)}&"
-        f"scope=openid+email+profile&"
-        f"state={state}&"
-        f"code_challenge={code_challenge}&"
-        f"code_challenge_method=S256"
-    )
-    
-    # Store code_verifier in session/cookie for the callback
-    response = RedirectResponse(auth_url)
-    response.set_cookie("oauth_code_verifier", code_verifier, httponly=False, max_age=600, secure=True, samesite="Lax")
-    response.set_cookie("oauth_state", state, httponly=False, max_age=600, secure=True, samesite="Lax")
-    
-    return response
-
-
-@app.get("/docs", include_in_schema=False)
-async def custom_swagger_ui_html():
-    """Custom Swagger UI with OAuth2 login button"""
-    
-    # Get the current build version
-    build_version = f"0.1.0-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    
-    # Create custom HTML with embedded OAuth panel
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Morpheus API Gateway - API Documentation</title>
-        <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@4/swagger-ui.css">
-        <link rel="shortcut icon" href="https://fastapi.tiangolo.com/img/favicon.png">
-        <style>
-            .oauth-panel {{
-                background: linear-gradient(135deg, #d1ecf1 0%, #bee5eb 100%);
-                padding: 20px;
-                margin: 20px 0;
-                border-radius: 8px;
-                position: relative;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            if (document.readyState !== 'loading') {{
+                run();
+            }} else {{
+                document.addEventListener('DOMContentLoaded', function () {{
+                    run();
+                }});
             }}
-            .build-version {{
-                position: absolute;
-                top: 5px;
-                right: 10px;
-                font-size: 11px;
-                color: #6c757d;
-                background: rgba(255,255,255,0.8);
-                padding: 2px 6px;
-                border-radius: 3px;
-                font-family: monospace;
-            }}
-            .oauth-btn {{
-                background: linear-gradient(135deg, #28a745, #20c997);
-                color: white;
-                border: none;
-                padding: 12px 24px;
-                border-radius: 25px;
-                font-weight: bold;
-                text-decoration: none;
-                display: inline-block;
-                margin-right: 10px;
-                transition: all 0.3s ease;
-            }}
-            .jwt-btn {{
-                background: linear-gradient(135deg, #007bff, #6610f2);
-                color: white;
-                border: none;
-                padding: 12px 24px;
-                border-radius: 25px;
-                font-weight: bold;
-                cursor: pointer;
-                transition: all 0.3s ease;
-            }}
-            /* Hide the default Swagger UI authorize button */
-            .swagger-ui .auth-wrapper .authorize {{
-                display: none !important;
-            }}
-            .swagger-ui .btn.authorize {{
-                display: none !important;
-            }}
-        </style>
-    </head>
-    <body>
-        <div id="oauth-panel" class="oauth-panel">
-            <div style="margin-bottom: 15px;">
-                <a href="/oauth-login" class="oauth-btn">🚀 User Registration / Login with OAuth2</a>
-                <button onclick="openAuthModal()" class="jwt-btn">🎫 Use JWT/API Key</button>
-            </div>
-        </div>
-        
-        <div id="swagger-ui"></div>
-        
-        <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@4/swagger-ui-bundle.js"></script>
-        <script>
-            console.log('🔧 Loading Swagger UI...');
-            
-            // Force Swagger UI to use current server URL
-            const currentServerUrl = window.location.origin;
-            console.log('🌍 Current server URL:', currentServerUrl);
-            
-            const ui = SwaggerUIBundle({{
-                url: '/api/v1/openapi.json',
-                dom_id: '#swagger-ui',
-                layout: 'BaseLayout',
-                deepLinking: true,
-                persistAuthorization: true,
-                displayRequestDuration: true,
-                docExpansion: 'list',
-                filter: true,
-                tryItOutEnabled: true,
-                oauth2RedirectUrl: '/docs/oauth2-redirect',
-                // Force Swagger UI to use current host for API calls
-                servers: [
-                    {{ url: currentServerUrl, description: 'Current Server' }}
-                ]
-            }});
-            
-            console.log('✅ Swagger UI initialized with OAuth panel!');
-            
-            // Check for stored OAuth token and configure Swagger UI automatically
-            function configureStoredAuth() {{
-                // Check if we have a stored OAuth token
-                const storedToken = sessionStorage.getItem('oauth_access_token');
-                const tokenType = sessionStorage.getItem('oauth_token_type') || 'Bearer';
-                
-                if (storedToken) {{
-                    console.log('🎫 Found stored OAuth token, configuring Swagger UI...');
-                    
-                    // Configure Bearer token authorization in Swagger UI
-                    ui.preauthorizeApiKey('BearerAuth', storedToken);
-                    ui.preauthorizeApiKey('APIKeyAuth', `Bearer ${{storedToken}}`);
-                    
-                    // Try additional auth configuration methods
-                    try {{
-                        if (ui.authActions && ui.authActions.authorize) {{
-                            ui.authActions.authorize({{
-                                'BearerAuth': storedToken,
-                                'APIKeyAuth': `Bearer ${{storedToken}}`
-                            }});
-                        }}
-                        console.log('🔧 Auth configuration applied');
-                    }} catch (authError) {{
-                        console.log('🔧 Additional auth method failed:', authError.message);
-                    }}
-                    
-
-                     
-                    // Force authorization header on all requests as backup + handle logout after deletion
-                    const originalFetch = window.fetch;
-                    window.fetch = function(url, options = {{}}) {{
-                        console.log('🌐 Intercepted fetch to:', url, 'options:', options);
-                        
-                        // Only modify requests to our API
-                        if (url.startsWith('/api/')) {{
-                            options.headers = options.headers || {{}};
-                            
-                            // Log current headers
-                            console.log('📋 Current headers before modification:', options.headers);
-                            
-                            // Always add/override auth header for API calls
-                            const currentToken = sessionStorage.getItem('oauth_access_token');
-                            if (currentToken) {{
-                                options.headers.Authorization = `Bearer ${{currentToken}}`;
-                                console.log('🔧 Force-added auth header to:', url, '- Token:', currentToken.substring(0, 20) + '...');
-                            }} else {{
-                                console.error('❌ No token in sessionStorage for:', url);
-                            }}
-                            
-                            console.log('📋 Final headers:', options.headers);
-                        }}
-                        
-                        // Call original fetch and handle the response
-                        return originalFetch(url, options).then(response => {{
-                            // Check if this was a successful account deletion
-                            if (url.includes('/api/v1/auth/register') && options.method === 'DELETE' && response.ok) {{
-                                console.log('🗑️ Account deletion successful - logging out user...');
-                                
-                                // Clear all authentication data
-                                sessionStorage.removeItem('oauth_access_token');
-                                sessionStorage.removeItem('oauth_token_type');
-                                sessionStorage.removeItem('oauth_expires_in');
-                                
-                                // Clear authentication cookies
-                                document.cookie = 'oauth_code_verifier=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
-                                document.cookie = 'oauth_state=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
-                                
-                                // Clear any Swagger UI authentication
-                                if (window.ui && window.ui.preauthorizeApiKey) {{
-                                    window.ui.preauthorizeApiKey('BearerAuth', '');
-                                    window.ui.preauthorizeApiKey('APIKeyAuth', '');
-                                }}
-                                
-                                // Show success message and redirect after delay
-                                setTimeout(() => {{
-                                    alert('Account successfully deleted. You will be redirected to refresh the page.');
-                                    window.location.reload(); // Reload the page to clear authentication state
-                                }}, 2000); // 2 second delay to let the user see the success response
-                            }}
-                            
-                            return response;
-                        }}).catch(error => {{
-                            // Handle any fetch errors
-                            console.error('Fetch error:', error);
-                            throw error;
-                        }});
-                    }};
-                    
-                    console.log('🔧 Set authorization in Swagger UI:', {{ 
-                        tokenPreview: storedToken.substring(0, 20) + '...',
-                        tokenType: tokenType,
-                        method: 'preauthorizeApiKey + fetch override'
-                    }});
-                    
-
-                    
-                    // Update the OAuth panel to show authenticated status
-                    const oauthPanel = document.getElementById('oauth-panel');
-                    if (oauthPanel) {{
-                        oauthPanel.innerHTML = `
-                            <div class="build-version">Build: {build_version}</div>
-                            <h4 style="color: #155724; margin-top: 0;">✅ Successfully Authenticated</h4>
-                            <p style="margin-bottom: 15px; color: #155724;">You are logged in via OAuth2. All API calls will use your authenticated session.</p>
-                            <div style="margin-bottom: 15px;">
-                                <button onclick="logout()" style="background: #dc3545; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-right: 10px;">🚪 Logout</button>
-                                <span style="font-size: 12px; color: #6c757d;">Token: ${{storedToken.substring(0, 20)}}...</span>
-                            </div>
-                            <div style="margin-top: 10px; font-size: 14px; color: #6c757d;">
-                                🎯 Ready to make authenticated API calls!
-                            </div>
-                        `;
-                    }}
-                    
-                    console.log('✅ Swagger UI configured with stored token!');
-                }} else {{
-                    console.log('🔓 No stored token found - user needs to authenticate');
-                }}
-            }}
-            
-            // Logout function (make it globally accessible)
-            window.logout = function() {{
-                sessionStorage.removeItem('oauth_access_token');
-                sessionStorage.removeItem('oauth_token_type');
-                sessionStorage.removeItem('oauth_refresh_token');
-                console.log('🚪 Logged out - clearing stored tokens');
-                window.location.reload();
-            }}
-            
-            // Function to open the auth modal (simplified)
-            window.openAuthModal = function() {{
-                console.log('🔑 Opening authentication modal...');
-                
-                // Simple method: find and click authorize button
-                const authorizeBtn = document.querySelector('.btn.authorize') || 
-                                   document.querySelector('.authorize');
-                
-                if (authorizeBtn) {{
-                    authorizeBtn.style.display = 'block';
-                    authorizeBtn.click();
-                    setTimeout(function() {{ authorizeBtn.style.display = 'none'; }}, 100);
-                    console.log('✅ Auth modal opened');
-                }} else {{
-                    alert('Please use the lock icons next to individual endpoints to authenticate.');
-                    console.log('❌ Auth button not found');
-                }}
-            }}
-            
-
-            
-            // Configure auth when UI is ready
-            setTimeout(configureStoredAuth, 1000);
         </script>
     </body>
     </html>
@@ -882,8 +634,306 @@ async def custom_swagger_ui_html():
     
     return HTMLResponse(content=html_content)
 
+# Note: Custom OAuth2 login endpoint removed - now using standard Swagger UI OAuth2 flow
+
+
+# Simple working docs endpoint (before route class restoration)  
+@app.get("/docs", include_in_schema=False)
+def custom_swagger_ui_html():
+    """
+    Custom Swagger UI docs 
+    """
+    return HTMLResponse(content=f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Morpheus API Gateway - API Documentation</title>
+        <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@4/swagger-ui.css">
+    </head>
+    <body>
+        <div id="swagger-ui"></div>
+        <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@4/swagger-ui-bundle.js"></script>
+        <script>
+            const ui = SwaggerUIBundle({{
+                url: '/api/v1/openapi.json',
+                dom_id: '#swagger-ui',
+                layout: 'BaseLayout',
+                oauth2RedirectUrl: window.location.origin + '/docs/oauth2-redirect'
+            }});
+            
+            // Make UI available globally for token application
+            window.ui = ui;
+            
+            ui.initOAuth({{
+                clientId: '{settings.COGNITO_CLIENT_ID}',
+                realm: 'cognito',
+                appName: 'Morpheus API Gateway',
+                scopeSeparator: ' ',
+                scopes: 'openid email profile',
+                usePkceWithAuthorizationCodeGrant: false,
+                useBasicAuthenticationWithAccessCodeGrant: false,
+                additionalQueryStringParams: {{}}
+            }});
+            
+            // Debug: Log OAuth2 configuration
+            console.log('🔍 OAuth2 redirect configured');
+            
+            // Check for OAuth token in localStorage (from new tab flow)
+            setTimeout(() => {{
+                console.log('🔍 Checking for stored OAuth token...');
+                const storedToken = localStorage.getItem('swagger_oauth_token');
+                const tokenTimestamp = localStorage.getItem('swagger_oauth_token_timestamp');
+                
+                // Check token availability (reduced logging for production)
+                console.log('🔍 Checking OAuth token status...');
+                
+                if (storedToken && tokenTimestamp) {{
+                    const tokenAge = Date.now() - parseInt(tokenTimestamp);
+                    const maxAge = 5 * 60 * 1000; // 5 minutes
+                    
+                    if (tokenAge < maxAge) {{
+                        console.log('✅ Found stored OAuth token, applying automatically...');
+                        
+                        // Apply OAuth2 token to Swagger UI
+                        try {{
+                            console.log('🔍 Attempting to authorize with stored token...');
+                            
+                            if (window.ui) {{
+                                // Method 1: Use preauthorizeApiKey for BearerAuth (this usually works)
+                                try {{
+                                    window.ui.preauthorizeApiKey('BearerAuth', storedToken);
+                                    console.log('✅ BearerAuth preauthorized!');
+                                }} catch (e) {{
+                                    console.log('⚠️ preauthorizeApiKey failed:', e);
+                                }}
+                                
+                                // Method 2: Try the direct authActions approach
+                                if (window.ui.authActions) {{
+                                    try {{
+                                        window.ui.authActions.authorize({{
+                                            'BearerAuth': storedToken
+                                        }});
+                                        console.log('✅ BearerAuth via authActions!');
+                                    }} catch (e) {{
+                                        console.log('⚠️ authActions.authorize failed:', e);
+                                    }}
+                                }}
+                                
+                                // Method 3: Try to set OAuth2 authorization
+                                if (window.ui.authActions) {{
+                                    try {{
+                                        window.ui.authActions.authorize({{
+                                            'OAuth2': {{
+                                                token: {{
+                                                    access_token: storedToken,
+                                                    token_type: 'Bearer'
+                                                }}
+                                            }}
+                                        }});
+                                        console.log('✅ OAuth2 via authActions!');
+                                    }} catch (e) {{
+                                        console.log('⚠️ OAuth2 authActions failed:', e);
+                                    }}
+                                }}
+                                
+                                // Method 4: Direct state manipulation (last resort)
+                                setTimeout(() => {{
+                                    try {{
+                                        const state = window.ui.getState();
+                                        console.log('🔍 Current auth state:', state.getIn(['auth', 'authorized']));
+                                        
+                                        // Force update the auth state
+                                        window.ui.authActions.authorizeWithPersistOption({{
+                                            'BearerAuth': {{
+                                                value: storedToken
+                                            }}
+                                        }});
+                                        console.log('✅ State manipulation attempted!');
+                                    }} catch (e) {{
+                                        console.log('⚠️ State manipulation failed:', e);
+                                    }}
+                                }}, 1000);
+                                
+                            }} else {{
+                                console.error('❌ Swagger UI not available');
+                                alert('Authentication successful! Token: ' + storedToken.substring(0, 50) + '... Please manually paste in Bearer Auth field.');
+                            }}
+                        }} catch (error) {{
+                            console.error('❌ Error applying token:', error);
+                            alert('Authentication successful! Token: ' + storedToken.substring(0, 50) + '... Please manually paste in Bearer Auth field.');
+                        }}
+                        
+                        // Clean up localStorage
+                        localStorage.removeItem('swagger_oauth_token');
+                        localStorage.removeItem('swagger_oauth_token_timestamp');
+                    }} else {{
+                        console.log('⚠️ Stored token expired, removing...');
+                        localStorage.removeItem('swagger_oauth_token');
+                        localStorage.removeItem('swagger_oauth_token_timestamp');
+                    }}
+                }}
+            }}, 1000); // Wait for Swagger UI to fully initialize
+        </script>
+    </body>
+    </html>
+    """)
+
+@app.get("/exchange-token", include_in_schema=False)
+async def exchange_oauth_token(request: Request, code: str, state: str = None):
+    """
+    Exchange OAuth2 authorization code for access token
+    """
+    import httpx
+    
+    try:
+        # Exchange the authorization code for tokens
+        token_url = f"https://{settings.COGNITO_DOMAIN}/oauth2/token"
+        
+        data = {
+            "grant_type": "authorization_code",
+            "client_id": settings.COGNITO_CLIENT_ID,
+            "code": code,
+            "redirect_uri": f"{settings.BASE_URL}/docs/oauth2-redirect"
+        }
+        
+        # Add PKCE code_verifier if provided
+        code_verifier = request.query_params.get("code_verifier")
+        if code_verifier:
+            data["code_verifier"] = code_verifier
+        
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(token_url, data=data, headers=headers)
+            
+        if response.status_code == 200:
+            tokens = response.json()
+            return {
+                "success": True,
+                "access_token": tokens.get("access_token"),
+                "token_type": tokens.get("token_type"),
+                "expires_in": tokens.get("expires_in"),
+                "id_token": tokens.get("id_token"),
+                "message": "✅ Use the 'access_token' as your Bearer token in Swagger UI!"
+            }
+        else:
+            return {
+                "success": False,
+                "error": response.text,
+                "status_code": response.status_code
+            }
+            
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@app.get("/oauth-helper", include_in_schema=False)
+async def oauth_helper():
+    """
+    Generate proper OAuth2 URLs with PKCE for manual testing
+    """
+    import secrets
+    import hashlib
+    import base64
+    from urllib.parse import urlencode
+    
+    # Generate PKCE values
+    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8').rstrip('=')
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode('utf-8')).digest()
+    ).decode('utf-8').rstrip('=')
+    
+    # Build OAuth2 URLs
+    base_url = "https://auth.mor.org/oauth2/authorize"
+    redirect_uri = f"{settings.BASE_URL}/docs/oauth2-redirect"
+    
+    # Simple URL (no PKCE)
+    simple_params = {
+        "client_id": settings.COGNITO_CLIENT_ID,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "redirect_uri": redirect_uri,
+        "state": "manual-test"
+    }
+    simple_url = f"{base_url}?{urlencode(simple_params)}"
+    
+    # PKCE URL
+    pkce_params = {
+        "client_id": settings.COGNITO_CLIENT_ID,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "redirect_uri": redirect_uri,
+        "state": "manual-test-pkce",
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256"
+    }
+    pkce_url = f"{base_url}?{urlencode(pkce_params)}"
+    
+    return {
+        "instructions": "Try the simple URL first. If it requires PKCE, use the PKCE URL.",
+        "simple_url": simple_url,
+        "pkce_url": pkce_url,
+        "pkce_values": {
+            "code_verifier": code_verifier,
+            "code_challenge": code_challenge
+        },
+        "exchange_endpoint": f"{settings.BASE_URL}/exchange-token?code=YOUR_CODE&code_verifier={code_verifier}"
+    }
+
+@app.get("/debug/oauth-config", include_in_schema=False)
+async def debug_oauth_config():
+    """
+    Debug endpoint to see the actual OAuth2 configuration being generated.
+    Remove this in production.
+    """
+    client_id = settings.COGNITO_CLIENT_ID
+    
+    init_oauth_config = f'''{{
+        clientId: '{client_id}',
+        realm: 'cognito',
+        appName: 'Morpheus API Gateway',
+        scopeSeparator: ' ',
+        scopes: 'openid email profile',
+        usePkceWithAuthorizationCodeGrant: false,
+        useBasicAuthenticationWithAccessCodeGrant: false,
+        additionalQueryStringParams: {{
+            'response_type': 'code',
+            'state': 'swagger-ui-oauth2'
+        }}
+    }}'''
+    
+    # Test custom OpenAPI function
+    try:
+        openapi_schema = custom_openapi()
+        oauth2_scheme = openapi_schema.get("components", {}).get("securitySchemes", {}).get("OAuth2")
+        
+        return {
+            "client_id": client_id,
+            "cognito_domain": settings.COGNITO_DOMAIN,
+            "init_oauth_config": init_oauth_config,
+            "javascript_snippet": f"initOAuth: {init_oauth_config}",
+            "custom_openapi_working": bool(oauth2_scheme),
+            "oauth2_scheme": oauth2_scheme,
+            "openapi_url": f"{settings.API_V1_STR}/openapi.json",
+            "status": "client_id should be pre-filled in OAuth2 modal"
+        }
+    except Exception as e:
+        return {
+            "client_id": client_id,
+            "cognito_domain": settings.COGNITO_DOMAIN,
+            "error": str(e),
+            "openapi_url": f"{settings.API_V1_STR}/openapi.json",
+            "status": "Error in custom_openapi function"
+        }
+
 # Restore the original route class for subsequent routes
 app.router.route_class = original_route_class
+
+# Note: Routes defined after route class restoration don't work properly
 
 # Check database connection (async)
 async def check_db_connection(engine: AsyncEngine):
@@ -919,9 +969,23 @@ def custom_openapi():
     
     # Note: Component schemas are automatically generated by FastAPI
     
-    # Only include manual authentication methods for the modal
-    # OAuth2 is handled by the custom green button, not the modal
+    # Add OAuth2 security scheme for standard Swagger UI authorization
     openapi_schema["components"]["securitySchemes"] = {
+        "OAuth2": {
+            "type": "oauth2",
+            "flows": {
+                "authorizationCode": {
+                    "authorizationUrl": f"https://{settings.COGNITO_DOMAIN}/oauth2/authorize",
+                    "tokenUrl": f"https://{settings.COGNITO_DOMAIN}/oauth2/token",
+                    "scopes": {
+                        "openid": "OpenID Connect authentication",
+                        "email": "Access to email address", 
+                        "profile": "Access to profile information"
+                    }
+                }
+            },
+            "description": "🚀 OAuth2 authentication via Cognito"
+        },
         "BearerAuth": {
             "type": "http",
             "scheme": "bearer",
@@ -942,11 +1006,11 @@ def custom_openapi():
         if path_key in ["/", "/health", "/docs", "/api-docs"] or path_key.startswith("/docs/"):
             continue
             
-        # Apply manual authentication methods to API endpoints
-        # OAuth2 is handled by custom flow, not OpenAPI security
+        # Apply all authentication methods to API endpoints
         for method, operation in path_item.items():
             if method in ["get", "post", "put", "delete", "patch"]:
                 operation["security"] = [
+                    {"OAuth2": ["openid", "email", "profile"]},
                     {"BearerAuth": []},
                     {"APIKeyAuth": []}
                 ]
@@ -955,7 +1019,15 @@ def custom_openapi():
     return app.openapi_schema
 
 # Set custom OpenAPI schema generator
-app.openapi = custom_openapi 
+app.openapi = custom_openapi
+
+# Create custom OpenAPI endpoint to ensure our OAuth2 schema is used
+@app.get(f"{settings.API_V1_STR}/openapi.json", include_in_schema=False)
+async def get_custom_openapi():
+    """
+    Custom OpenAPI endpoint that ensures our OAuth2 security scheme is included
+    """
+    return custom_openapi() 
 
 # API Documentation landing page
 @app.get("/api-docs", include_in_schema=False)

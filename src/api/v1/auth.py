@@ -26,6 +26,8 @@ router = APIRouter(tags=["Auth"])
 # Users authenticate via Cognito OAuth2 flow and receive JWT tokens
 # The frontend should redirect to Cognito for login/registration
 
+# OAuth2 callback is handled by the /docs/oauth2-redirect endpoint
+
 @router.get("/me", response_model=dict)
 async def get_current_user_info(
     current_user: CurrentUser,
@@ -344,8 +346,10 @@ async def delete_user_account(
         # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        # Log the error (in production, use proper logging)
-        print(f"Error deleting user account {user_id}: {str(e)}")
+        # Log the error properly
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error deleting user account {user_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete user account"
