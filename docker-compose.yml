@@ -17,19 +17,6 @@ services:
         timeout: 5s
         retries: 5
 
-  redis:
-    image: redis:7-alpine
-    network_mode: "host"
-    command: redis-server --requirepass ${REDIS_PASSWORD:-supersecretredis}
-    volumes:
-      - redis_data:/data
-    ports:
-      - "6379:6379" # Expose only if needed for external inspection
-    healthcheck:
-        test: ["CMD", "redis-cli", "-a", "$${REDIS_PASSWORD:-supersecretredis}", "ping"]
-        interval: 5s
-        timeout: 5s
-        retries: 5
 
   api:
     build:
@@ -42,11 +29,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-morpheus_user}:${POSTGRES_PASSWORD:-morpheus_password}@localhost:5433/${POSTGRES_DB:-morpheus_db}
-      REDIS_URL: redis://:${REDIS_PASSWORD:-supersecretredis}@localhost:6379/0
       PROXY_ROUTER_URL: http://router.dev.mor.org:8082
       # Other env vars like JWT_SECRET_KEY, KMS settings etc. will be loaded from .env
     volumes:
@@ -58,5 +42,4 @@ services:
     # command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:
-  postgres_data:
-  redis_data: 
+  postgres_data: 

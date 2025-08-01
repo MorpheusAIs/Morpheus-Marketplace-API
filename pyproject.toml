@@ -16,7 +16,6 @@ pydantic-settings = "^2.1.0"
 sqlalchemy = "^2.0.25"
 asyncpg = "^0.29.0"
 alembic = "^1.13.1"
-redis = "^5.0.1"
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}
 passlib = {extras = ["bcrypt"], version = "^1.7.4"}
 httpx = "^0.26.0"

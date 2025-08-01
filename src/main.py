@@ -12,6 +12,9 @@ import time
 import logging
 import asyncio
 import os
+import uuid
+import socket
+import platform
 
 from src.api.v1 import models, chat, session, auth, automation
 from src.core.config import settings
@@ -36,11 +39,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Global variables for container diagnostics
+APP_START_TIME = None
+CONTAINER_ID = str(uuid.uuid4())
+APP_VERSION = f"0.2.0-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
 # Using our production-ready fixed route class
 app = FastAPI(
     title="Morpheus API Gateway",
     description="API Gateway connecting Web2 clients to the Morpheus-Lumerin AI Marketplace",
-    version=f"0.2.0-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+    version=APP_VERSION,
     redirect_slashes=False,  # Disable automatic redirects to prevent HTTPS→HTTP downgrade attacks
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     docs_url=None,  # Disable default docs so we can customize it
@@ -221,8 +229,13 @@ async def startup_event():
     """
     Perform startup initialization.
     """
+    global APP_START_TIME
+    APP_START_TIME = datetime.utcnow()
+    
     logger.info("🔄 Starting Morpheus API Gateway startup sequence...")
     logger.info(f"📊 Configuration: MODEL_SYNC_ON_STARTUP={settings.MODEL_SYNC_ON_STARTUP}, MODEL_SYNC_ENABLED={settings.MODEL_SYNC_ENABLED}")
+    logger.info(f"🏷️ Container ID: {CONTAINER_ID}")
+    logger.info(f"📦 Version: {APP_VERSION}")
     
     # Verify database migrations are up to date
     logger.info("🗃️ Checking database migrations...")
@@ -404,22 +417,70 @@ async def root():
 @app.get("/health", include_in_schema=True)
 async def health_check():
     """
-    Health check endpoint to verify API and database status.
+    Health check endpoint with container diagnostics for deployment monitoring.
+    
+    Returns system health, uptime, and unique container identifier for support and log analysis.
+    Note: No sensitive AWS or hostname information is exposed.
     """
+    current_time = datetime.utcnow()
+    
     # Check database connection
     try:
-        # Connect to the database and execute a simple query
         await check_db_connection(engine)
         db_status = "healthy"
     except Exception as e:
         db_status = f"unhealthy: {str(e)}"
     
-    return {
+    # Calculate uptime
+    uptime_seconds = None
+    uptime_human = None
+    if APP_START_TIME:
+        uptime_delta = current_time - APP_START_TIME
+        uptime_seconds = int(uptime_delta.total_seconds())
+        
+        # Human-readable uptime
+        days = uptime_delta.days
+        hours, remainder = divmod(uptime_delta.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        uptime_parts = []
+        if days > 0:
+            uptime_parts.append(f"{days}d")
+        if hours > 0:
+            uptime_parts.append(f"{hours}h")
+        if minutes > 0:
+            uptime_parts.append(f"{minutes}m")
+        if seconds > 0 or not uptime_parts:
+            uptime_parts.append(f"{seconds}s")
+        
+        uptime_human = " ".join(uptime_parts)
+    
+    # Get basic system information (non-sensitive)
+    try:
+        # Get just the kernel version without AWS-specific details
+        kernel_info = platform.release()  # e.g., "5.10.238"
+        system_info = f"Linux-{kernel_info}"
+    except:
+        system_info = "Unknown"
+    
+    response = {
         "status": "ok",
-        "timestamp": datetime.now().isoformat(),
-        "version": "0.2.0",
-        "database": db_status
+        "timestamp": current_time.isoformat(),
+        "version": APP_VERSION,
+        "database": db_status,
+        "container": {
+            "id": CONTAINER_ID,
+            "system": system_info,
+            "python_version": platform.python_version()
+        },
+        "uptime": {
+            "seconds": uptime_seconds,
+            "human_readable": uptime_human,
+            "started_at": APP_START_TIME.isoformat() if APP_START_TIME else None
+        }
     }
+    
+    return response
 
 # Custom docs endpoints using standard APIRoute
 @app.get("/docs/oauth2-redirect", include_in_schema=False)

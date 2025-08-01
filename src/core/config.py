@@ -1,7 +1,7 @@
 import os
 from typing import List, Union, Optional, Any
 from pydantic_settings import BaseSettings
-from pydantic import PostgresDsn, RedisDsn, Field, AnyHttpUrl, field_validator
+from pydantic import PostgresDsn, Field, AnyHttpUrl, field_validator
 from dotenv import load_dotenv
 
 # Load .env file variables
@@ -36,10 +36,6 @@ class Settings(BaseSettings):
     DB_USER: str = Field(default=os.getenv("POSTGRES_USER", "morpheus_user"))
     DB_PASSWORD: str = Field(default=os.getenv("POSTGRES_PASSWORD", "secure_password_here"))
     DB_NAME: str = Field(default=os.getenv("POSTGRES_DB", "morpheus_db"))
-
-    # Redis Settings
-    REDIS_URL: str = Field(default=os.getenv("REDIS_URL"))
-    REDIS_PASSWORD: str = Field(default=os.getenv("REDIS_PASSWORD", "secure_redis_password_here"))
 
     # JWT Settings
     JWT_SECRET_KEY: str = Field(default=os.getenv("JWT_SECRET_KEY", "super_secret_key_change_me"))
