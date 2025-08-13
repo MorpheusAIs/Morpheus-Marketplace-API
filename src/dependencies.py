@@ -241,6 +241,15 @@ async def get_api_key_user(
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
+        # Validate the full API key against the stored hash
+        if not verify_api_key(api_key, db_api_key.key_hash):
+            logging.error(f"API key hash validation failed for prefix: {key_prefix}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
         # Update last used timestamp
         await api_key_crud.update_last_used(db, db_api_key)
         
@@ -326,6 +335,15 @@ async def get_current_api_key(
         if not db_api_key:
             # Log the key prefix for debugging
             logging.error(f"Could not find API key with prefix: {key_prefix}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Validate the full API key against the stored hash
+        if not verify_api_key(api_key_str, db_api_key.key_hash):
+            logging.error(f"API key hash validation failed for prefix: {key_prefix}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid API key",
