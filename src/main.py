@@ -16,7 +16,7 @@ import uuid
 import socket
 import platform
 
-from src.api.v1 import models, chat, session, auth, automation
+from src.api.v1 import models, chat, session, auth, automation, chat_history
 from src.core.config import settings
 from src.api.v1.custom_route import FixedDependencyAPIRoute
 from src.db.models import Session as DbSession
@@ -270,7 +270,7 @@ async def startup_event():
     
     # Make sure all routers use our fixed route class
     try:
-        for router in [auth, models, chat, session, automation]:
+        for router in [auth, models, chat, session, automation, chat_history]:
             update_router_route_class(router, FixedDependencyAPIRoute)
         logger.info("✅ All routers configured with FixedDependencyAPIRoute")
     except Exception as e:
@@ -385,6 +385,7 @@ update_router_route_class(models)
 update_router_route_class(chat)
 update_router_route_class(session)
 update_router_route_class(automation)
+update_router_route_class(chat_history)
 
 # Include routers
 app.include_router(auth, prefix=f"{settings.API_V1_STR}/auth")
@@ -392,6 +393,7 @@ app.include_router(models, prefix=f"{settings.API_V1_STR}")  # Mount at /api/v1 
 app.include_router(chat, prefix=f"{settings.API_V1_STR}/chat")
 app.include_router(session, prefix=f"{settings.API_V1_STR}/session")
 app.include_router(automation, prefix=f"{settings.API_V1_STR}/automation")
+app.include_router(chat_history, prefix=f"{settings.API_V1_STR}/chat-history")
 
 
 
@@ -407,7 +409,7 @@ async def root():
     """
     return {
         "name": settings.PROJECT_NAME,
-        "version": "0.2.0",
+        "version": APP_VERSION,
         "description": "OpenAI-compatible API gateway for Morpheus blockchain models",
         "documentation": {
             "swagger_ui": "/docs"
@@ -747,13 +749,16 @@ def custom_swagger_ui_html():
             
             ui.initOAuth({{
                 clientId: '{settings.COGNITO_CLIENT_ID}',
-                realm: 'cognito',
+                realm: 'oauth2',
                 appName: 'Morpheus API Gateway',
                 scopeSeparator: ' ',
                 scopes: 'openid email profile',
                 usePkceWithAuthorizationCodeGrant: false,
                 useBasicAuthenticationWithAccessCodeGrant: false,
-                additionalQueryStringParams: {{}}
+                additionalQueryStringParams: {{
+                    'response_type': 'code',
+                    'state': 'swagger-ui-oauth2'
+                }}
             }});
             
             // Debug: Log OAuth2 configuration
@@ -1106,104 +1111,9 @@ async def exchange_oauth_token(request: Request, code: str, state: str = None):
             "error": str(e)
         }
 
-@app.get("/oauth-helper", include_in_schema=False)
-async def oauth_helper():
-    """
-    Generate proper OAuth2 URLs with PKCE for manual testing
-    """
-    import secrets
-    import hashlib
-    import base64
-    from urllib.parse import urlencode
-    
-    # Generate PKCE values
-    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8').rstrip('=')
-    code_challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode('utf-8')).digest()
-    ).decode('utf-8').rstrip('=')
-    
-    # Build OAuth2 URLs
-    base_url = "https://auth.mor.org/oauth2/authorize"
-    redirect_uri = f"{settings.BASE_URL}/docs/oauth2-redirect"
-    
-    # Simple URL (no PKCE)
-    simple_params = {
-        "client_id": settings.COGNITO_CLIENT_ID,
-        "response_type": "code",
-        "scope": "openid email profile",
-        "redirect_uri": redirect_uri,
-        "state": "manual-test"
-    }
-    simple_url = f"{base_url}?{urlencode(simple_params)}"
-    
-    # PKCE URL
-    pkce_params = {
-        "client_id": settings.COGNITO_CLIENT_ID,
-        "response_type": "code",
-        "scope": "openid email profile",
-        "redirect_uri": redirect_uri,
-        "state": "manual-test-pkce",
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256"
-    }
-    pkce_url = f"{base_url}?{urlencode(pkce_params)}"
-    
-    return {
-        "instructions": "Try the simple URL first. If it requires PKCE, use the PKCE URL.",
-        "simple_url": simple_url,
-        "pkce_url": pkce_url,
-        "pkce_values": {
-            "code_verifier": code_verifier,
-            "code_challenge": code_challenge
-        },
-        "exchange_endpoint": f"{settings.BASE_URL}/exchange-token?code=YOUR_CODE&code_verifier={code_verifier}"
-    }
+# OAuth helper endpoint removed for security - no longer exposing client_id in helper tools
 
-@app.get("/debug/oauth-config", include_in_schema=False)
-async def debug_oauth_config():
-    """
-    Debug endpoint to see the actual OAuth2 configuration being generated.
-    Remove this in production.
-    """
-    client_id = settings.COGNITO_CLIENT_ID
-    
-    init_oauth_config = f'''{{
-        clientId: '{client_id}',
-        realm: 'cognito',
-        appName: 'Morpheus API Gateway',
-        scopeSeparator: ' ',
-        scopes: 'openid email profile',
-        usePkceWithAuthorizationCodeGrant: false,
-        useBasicAuthenticationWithAccessCodeGrant: false,
-        additionalQueryStringParams: {{
-            'response_type': 'code',
-            'state': 'swagger-ui-oauth2'
-        }}
-    }}'''
-    
-    # Test custom OpenAPI function
-    try:
-        openapi_schema = custom_openapi()
-        oauth2_scheme = openapi_schema.get("components", {}).get("securitySchemes", {}).get("OAuth2")
-        
-        return {
-            "client_id": client_id,
-            "cognito_domain": settings.COGNITO_DOMAIN,
-            "init_oauth_config": init_oauth_config,
-            "javascript_snippet": f"initOAuth: {init_oauth_config}",
-            "custom_openapi_working": bool(oauth2_scheme),
-            "oauth2_scheme": oauth2_scheme,
-            "openapi_url": f"{settings.API_V1_STR}/openapi.json",
-            "status": "client_id should be pre-filled in OAuth2 modal"
-        }
-    except Exception as e:
-        return {
-            "client_id": client_id,
-            "cognito_domain": settings.COGNITO_DOMAIN,
-            "error": str(e),
-            "openapi_url": f"{settings.API_V1_STR}/openapi.json",
-            "status": "Error in custom_openapi function"
-        }
+# Debug endpoint removed for security - no longer exposing sensitive OAuth configuration
 
 # Restore the original route class for subsequent routes
 app.router.route_class = original_route_class
@@ -1259,7 +1169,7 @@ def custom_openapi():
                     }
                 }
             },
-            "description": "🚀 OAuth2 authentication via Cognito"
+            "description": "🚀 OAuth2 authentication via secure identity provider"
         },
         "BearerAuth": {
             "type": "http",
@@ -1338,7 +1248,7 @@ async def api_docs_landing(request: Request):
             <div class="description">
                 <h3>🔐 Authentication Methods</h3>
                 <ul>
-                    <li><strong>OAuth2:</strong> Login with your Cognito credentials for the easiest experience</li>
+                    <li><strong>OAuth2:</strong> Login with your account credentials for the easiest experience</li>
                     <li><strong>JWT Bearer Token:</strong> Use access tokens from successful OAuth2 logins</li>
                     <li><strong>API Keys:</strong> Programmatic access using generated API keys</li>
                 </ul>
