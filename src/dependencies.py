@@ -242,7 +242,7 @@ async def get_api_key_user(
             )
         
         # Validate the full API key against the stored hash
-        if not verify_api_key(api_key, db_api_key.key_hash):
+        if not verify_api_key(api_key, db_api_key.hashed_key):
             logging.error(f"API key hash validation failed for prefix: {key_prefix}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -342,7 +342,7 @@ async def get_current_api_key(
             )
         
         # Validate the full API key against the stored hash
-        if not verify_api_key(api_key_str, db_api_key.key_hash):
+        if not verify_api_key(api_key_str, db_api_key.hashed_key):
             logging.error(f"API key hash validation failed for prefix: {key_prefix}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
