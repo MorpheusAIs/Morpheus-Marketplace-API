@@ -36,10 +36,10 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY ./src ./src
 COPY ./alembic ./alembic
 COPY alembic.ini .
-COPY models.json .
 
-# Create logs directory before changing ownership
-RUN mkdir /app/logs
+# Create logs directory and initial models.json before changing ownership
+RUN mkdir /app/logs && \
+    echo '{"models": []}' > /app/models.json
 
 # Change ownership to non-root user
 RUN chown -R app:app /app
