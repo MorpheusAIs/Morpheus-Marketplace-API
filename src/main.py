@@ -380,12 +380,12 @@ def update_router_route_class(router: APIRouter, route_class=FixedDependencyAPIR
     return router
 
 # Update all imported routers with our custom route class
-update_router_route_class(auth.router)
-update_router_route_class(models.router)
-update_router_route_class(chat.router)
-update_router_route_class(session.router)
-update_router_route_class(automation.router)
-update_router_route_class(chat_history.router)
+update_router_route_class(auth)
+update_router_route_class(models)
+update_router_route_class(chat)
+update_router_route_class(session)
+update_router_route_class(automation)
+update_router_route_class(chat_history)
 
 # Include routers
 app.include_router(auth, prefix=f"{settings.API_V1_STR}/auth")
