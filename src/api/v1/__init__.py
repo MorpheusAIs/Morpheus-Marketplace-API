@@ -7,6 +7,7 @@ from .models import router as models_router
 from .chat import router as chat_router
 from .session import router as session_router
 from .automation import router as automation_router
+from .chat_history import router as chat_history_router
 
 # Create routers with the fixed dependency route class
 models = APIRouter(route_class=FixedDependencyAPIRoute)
@@ -24,4 +25,8 @@ automation.include_router(automation_router)
 
 # Wrap auth router in a router with our fixed route class
 auth = APIRouter(route_class=FixedDependencyAPIRoute)
-auth.include_router(auth_router) 
+auth.include_router(auth_router)
+
+# Chat history router
+chat_history = APIRouter(route_class=FixedDependencyAPIRoute)
+chat_history.include_router(chat_history_router) 

@@ -291,3 +291,6 @@ async def delete_message(
     success = await chat_crud.delete_message(db, message_id, current_user.id)
     if not success:
         raise HTTPException(status_code=404, detail="Message not found")
+
+# Export router
+chat_history_router = router
