@@ -10,7 +10,7 @@ from datetime import datetime
 
 from src.db.database import get_db
 from src.db.models import User, MessageRole
-from src.dependencies import get_current_user_from_api_key, get_current_user, CurrentUser
+from src.dependencies import get_api_key_user, get_current_user, CurrentUser
 from src.crud import chat as chat_crud
 
 
@@ -42,7 +42,7 @@ async def get_current_user_flexible(
         # Try API key authentication as fallback
         api_key = await api_key_header(request)
         if api_key:
-            user = await get_current_user_from_api_key(db=db, api_key=api_key)
+            user = await get_api_key_user(db=db, api_key=api_key)
             if user:
                 return user
     except Exception:
