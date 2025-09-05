@@ -83,19 +83,29 @@ build_and_push() {
 deploy_to_ecs() {
     echo -e "${BLUE}🚀 Deploying to ECS...${NC}"
     
-    aws ecs update-service \
+    # Capture the output and truncate it to avoid pagination issues
+    local deploy_output
+    deploy_output=$(aws ecs update-service \
         --cluster $ECS_CLUSTER \
         --service $ECS_SERVICE \
         --force-new-deployment \
-        --profile $AWS_PROFILE
+        --profile $AWS_PROFILE \
+        --output json 2>&1)
     
-    if [ $? -eq 0 ]; then
+    local exit_code=$?
+    
+    if [ $exit_code -eq 0 ]; then
         echo -e "${GREEN}✅ ECS deployment initiated successfully${NC}"
+        
+        # Show only essential info from the response
+        echo "$deploy_output" | jq -r '.service | "Service: \(.serviceName)\nStatus: \(.status)\nDesired: \(.desiredCount)\nRunning: \(.runningCount)\nPending: \(.pendingCount)"' 2>/dev/null || echo "Deployment initiated"
+        
         echo -e "${BLUE}Monitor deployment status:${NC}"
         echo -e "  ${YELLOW}aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE --profile $AWS_PROFILE${NC}"
         return 0
     else
         echo -e "${RED}❌ Failed to deploy to ECS${NC}"
+        echo "$deploy_output" | head -10  # Show first 10 lines of error
         return 1
     fi
 }
@@ -104,12 +114,33 @@ deploy_to_ecs() {
 show_deployment_status() {
     echo -e "${BLUE}📊 Checking ECS deployment status...${NC}"
     
-    aws ecs describe-services \
+    # Get concise status info to avoid pagination
+    local status_output
+    status_output=$(aws ecs describe-services \
         --cluster $ECS_CLUSTER \
         --services $ECS_SERVICE \
         --profile $AWS_PROFILE \
-        --query 'services[0].deployments[?status==`PRIMARY`].[status,taskDefinition,desiredCount,runningCount,createdAt]' \
-        --output table
+        --query 'services[0].{Status:status,Desired:desiredCount,Running:runningCount,Pending:pendingCount,TaskDef:taskDefinition}' \
+        --output json 2>/dev/null)
+    
+    if [ $? -eq 0 ] && [ -n "$status_output" ]; then
+        echo "$status_output" | jq -r '"Status: \(.Status) | Desired: \(.Desired) | Running: \(.Running) | Pending: \(.Pending)"' 2>/dev/null || echo "Status check completed"
+        
+        # Also show deployment status
+        local deploy_status
+        deploy_status=$(aws ecs describe-services \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE \
+            --profile $AWS_PROFILE \
+            --query 'services[0].deployments[0].{Status:status,TaskDef:taskDefinition,CreatedAt:createdAt}' \
+            --output json 2>/dev/null)
+        
+        if [ $? -eq 0 ] && [ -n "$deploy_status" ]; then
+            echo "$deploy_status" | jq -r '"Deployment: \(.Status) | Task: \(.TaskDef | split(":") | .[1]) | Created: \(.CreatedAt)"' 2>/dev/null || echo "Deployment info retrieved"
+        fi
+    else
+        echo -e "${RED}❌ Failed to get deployment status${NC}"
+    fi
 }
 
 # Function to show recent ECS logs
@@ -156,8 +187,15 @@ main_deploy() {
         return 1
     fi
     
-    # Step 5: Show deployment status
-    echo -e "${BLUE}⏳ Waiting 30 seconds for deployment to start...${NC}"
+    # Step 5: Wait for deployment to start and show status
+    echo -e "${BLUE}⏳ Waiting 60 seconds for deployment to start...${NC}"
+    sleep 60
+    
+    echo -e "${BLUE}📊 Checking deployment progress...${NC}"
+    show_deployment_status
+    
+    # Wait a bit more and check again
+    echo -e "${BLUE}⏳ Waiting additional 30 seconds for deployment to progress...${NC}"
     sleep 30
     show_deployment_status
     
