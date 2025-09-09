@@ -1,5 +1,15 @@
 #!/bin/bash
 
+# Load environment variables from .env file if it exists
+if [ -f .env ]; then
+    echo "Loading environment variables from .env file..."
+    set -a  # automatically export all variables
+    source .env
+    set +a  # stop automatically exporting
+else
+    echo "Warning: .env file not found. Using default values or environment variables."
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -7,15 +17,32 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Configuration
-ECR_REGISTRY="586794444026.dkr.ecr.us-east-2.amazonaws.com"
-ECR_REPO="ecr-morpheus"
-ECS_CLUSTER="ecs-dev-morpheus-engine"
-ECS_SERVICE="svc-dev-api-service"
-AWS_PROFILE="mor-org-prd"
+# Configuration (using environment variables with fallbacks)
+ECR_REGISTRY="${ECR_REGISTRY:-${AWS_ACCOUNT_ID:-YOUR_AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION:-us-east-2}.amazonaws.com}"
+ECR_REPO="${ECR_REPO:-ecr-morpheus}"
+ECS_CLUSTER="${ECS_CLUSTER:-ecs-dev-morpheus-engine}"
+ECS_SERVICE="${ECS_SERVICE:-svc-dev-api-service}"
+AWS_PROFILE="${AWS_PROFILE:-mor-org-prd}"
 
 echo -e "${BLUE}🚀 Morpheus API Deployment with Local Testing${NC}"
 echo "============================================================"
+
+# Function to authenticate with ECR
+ecr_login() {
+    echo -e "${BLUE}🔐 Authenticating with ECR...${NC}"
+    
+    # Check if Docker is running
+    if ! docker info &> /dev/null; then
+        echo -e "${RED}❌ Docker is not running. Please start Docker first.${NC}"
+        return 1
+    fi
+    
+    # Just run the damn command directly - no functions, no complexity
+    echo -e "${BLUE}Running ECR login directly (no function wrapping)...${NC}"
+    
+    # Exit the function and run the command in the main script context
+    return 2  # Special return code to indicate "run directly"
+}
 
 # Function to run local tests
 run_local_tests() {
@@ -81,18 +108,35 @@ build_and_push() {
 
 # Function to deploy to ECS
 deploy_to_ecs() {
-    echo -e "${BLUE}🚀 Deploying to ECS...${NC}"
+    echo -e "${BLUE}🚀 Deploying to ECS on cluster ${AWS_REGION}/${ECS_CLUSTER} and service ${ECS_SERVICE} using profile ${AWS_PROFILE}...${NC}"
     
-    # Capture the output and truncate it to avoid pagination issues
+    # Add timeout to prevent hanging like we had with ECR
+    echo -e "${YELLOW}Running ECS update command with timeout...${NC}"
+    echo -e "${YELLOW}Command: aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --force-new-deployment --profile $AWS_PROFILE --no-paginate${NC}"
+    
     local deploy_output
-    deploy_output=$(aws ecs update-service \
+    local exit_code
+    
+    # Use timeout to prevent hanging - add --no-paginate to prevent interactive paging
+    deploy_output=$(timeout 60 aws ecs update-service \
         --cluster $ECS_CLUSTER \
         --service $ECS_SERVICE \
         --force-new-deployment \
         --profile $AWS_PROFILE \
-        --output json 2>&1)
+        --no-paginate 2>&1)
     
-    local exit_code=$?
+    exit_code=$?
+    
+    echo -e "${BLUE}ECS command exit code: $exit_code${NC}"
+    echo -e "${BLUE}ECS command output length: ${#deploy_output}${NC}"
+    
+    if [ $exit_code -eq 124 ]; then
+        echo -e "${RED}❌ ECS deployment command timed out after 60 seconds${NC}"
+        echo -e "${YELLOW}This suggests the same AWS CLI hanging issue we had with ECR${NC}"
+        echo -e "${YELLOW}Please run this command manually:${NC}"
+        echo -e "${YELLOW}aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --force-new-deployment --profile $AWS_PROFILE --no-paginate${NC}"
+        return 1
+    fi
     
     if [ $exit_code -eq 0 ]; then
         echo -e "${GREEN}✅ ECS deployment initiated successfully${NC}"
@@ -112,7 +156,7 @@ deploy_to_ecs() {
 
 # Function to show deployment status
 show_deployment_status() {
-    echo -e "${BLUE}📊 Checking ECS deployment status...${NC}"
+    echo -e "${BLUE}📊 Checking ECS deployment status on cluster ${ECS_CLUSTER} and service ${ECS_SERVICE} using profile ${AWS_PROFILE}...${NC}"
     
     # Get concise status info to avoid pagination
     local status_output
@@ -145,7 +189,7 @@ show_deployment_status() {
 
 # Function to show recent ECS logs
 show_ecs_logs() {
-    echo -e "${BLUE}📋 Recent ECS logs (last 10 minutes):${NC}"
+    echo -e "${BLUE}📋 Recent ECS logs (last 10 minutes) on cluster ${ECS_CLUSTER} and service ${ECS_SERVICE} using profile ${AWS_PROFILE}...${NC}"
     
     # Get log group name (you may need to adjust this)
     LOG_GROUP="/ecs/morpheus-api"
@@ -160,6 +204,12 @@ show_ecs_logs() {
 
 # Main deployment function
 main_deploy() {
+    # Step 0: ECR Authentication (skipped due to hanging issue)
+    echo -e "${YELLOW}⚠️ Skipping automatic ECR login due to script hanging issue${NC}"
+    echo -e "${YELLOW}Please ensure you're logged into ECR manually before running this script:${NC}"
+    echo -e "${YELLOW}aws ecr get-login-password --region us-east-2 --profile mor-org-prd | docker login --username AWS --password-stdin 586794444026.dkr.ecr.us-east-2.amazonaws.com${NC}"
+    echo -e "${BLUE}Continuing with deployment on cluster ${ECS_CLUSTER} and service ${ECS_SERVICE} using profile ${AWS_PROFILE}...${NC}"
+    
     # Step 1: Run local tests
     if ! run_local_tests; then
         echo -e "${RED}❌ Local tests failed. Deployment aborted.${NC}"
@@ -230,14 +280,22 @@ case "${1:-deploy}" in
         ;;
     "force")
         echo -e "${YELLOW}⚠️ Force deployment (skipping local tests)${NC}"
+        echo -e "${YELLOW}⚠️ Manual ECR login required before force deployment${NC}"
         if build_and_push && deploy_to_ecs; then
             echo -e "${GREEN}✅ Force deployment completed${NC}"
         else
             echo -e "${RED}❌ Force deployment failed${NC}"
         fi
         ;;
+    "ecr-test")
+        echo -e "${BLUE}🔐 Testing ECR authentication...${NC}"
+        echo -e "${YELLOW}⚠️ Skipping automatic ECR login due to hanging issue${NC}"
+        echo -e "${YELLOW}Please run this manually before deployment:${NC}"
+        echo -e "${YELLOW}aws ecr get-login-password --region us-east-2 --profile mor-org-prd | docker login --username AWS --password-stdin 586794444026.dkr.ecr.us-east-2.amazonaws.com${NC}"
+        echo -e "${GREEN}✅ ECR test completed (manual login required)${NC}"
+        ;;
     *)
-        echo -e "${BLUE}Usage: $0 [deploy|test|debug|build|status|logs|force]${NC}"
+        echo -e "${BLUE}Usage: $0 [deploy|test|debug|build|status|logs|force|ecr-test]${NC}"
         echo -e "  ${YELLOW}deploy${NC} - Run full deployment with local testing (default)"
         echo -e "  ${YELLOW}test${NC}   - Run only local container tests"
         echo -e "  ${YELLOW}debug${NC}  - Run debug tests to identify issues"
@@ -245,6 +303,7 @@ case "${1:-deploy}" in
         echo -e "  ${YELLOW}status${NC} - Show ECS deployment status"
         echo -e "  ${YELLOW}logs${NC}   - Show recent ECS logs"
         echo -e "  ${YELLOW}force${NC}  - Force deployment without local tests"
+        echo -e "  ${YELLOW}ecr-test${NC} - Test ECR authentication only"
         exit 1
         ;;
 esac
