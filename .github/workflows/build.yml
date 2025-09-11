@@ -203,7 +203,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/cicd/')|| github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
+        (github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/cicd/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
         (github.event_name == 'workflow_dispatch' && github.event.inputs.create_deployment == 'true') 
       )
     needs:
@@ -331,10 +331,16 @@ jobs:
           # Set database URL for migrations
           export DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}"
           
-          # Create backup point (get current revision)
-          echo "📋 Recording current database state..."
-          CURRENT_REVISION=$(poetry run alembic current 2>/dev/null | head -1 | awk '{print $1}' || echo "none")
-          echo "Current revision: $CURRENT_REVISION"
+          # Create backup point (get current revision before migration)
+          echo "📋 Recording current database state before migration..."
+          CURRENT_REVISION=$(poetry run alembic current --verbose 2>/dev/null | grep "Current revision" | awk '{print $NF}' || echo "none")
+          echo "PRE_MIGRATION_REVISION=$CURRENT_REVISION" >> $GITHUB_ENV
+          echo "Current revision before migration: $CURRENT_REVISION"
+          
+          # Check if there are pending migrations
+          echo "🔍 Checking for pending migrations..."
+          PENDING_MIGRATIONS=$(poetry run alembic heads)
+          echo "Target revision: $PENDING_MIGRATIONS"
           
           # Run migrations
           echo "🚀 Applying database migrations..."
@@ -342,20 +348,27 @@ jobs:
           
           # Verify migration success
           echo "✅ Verifying migration success..."
+          NEW_REVISION=$(poetry run alembic current --verbose 2>/dev/null | grep "Current revision" | awk '{print $NF}' || echo "none")
+          echo "NEW_REVISION=$NEW_REVISION" >> $GITHUB_ENV
+          echo "New revision after migration: $NEW_REVISION"
+          
+          # Test database connectivity and basic functionality
           poetry run python -c "
           import asyncio
           import sys
           import os
           sys.path.insert(0, os.path.abspath('.'))
-          from src.main import verify_database_migrations
           
           async def verify():
               try:
+                  from src.main import verify_database_migrations
                   await verify_database_migrations()
                   print('✅ Database migrations verified successfully')
                   return True
               except Exception as e:
                   print(f'❌ Database verification failed: {e}')
+                  import traceback
+                  traceback.print_exc()
                   return False
           
           result = asyncio.run(verify())
@@ -593,6 +606,13 @@ jobs:
         run: |
           echo "🚨 Deployment failed - initiating database rollback"
           
+          # Check if we have a pre-migration revision to rollback to
+          if [ -z "${{ env.PRE_MIGRATION_REVISION }}" ] || [ "${{ env.PRE_MIGRATION_REVISION }}" == "none" ]; then
+            echo "⚠️ No pre-migration revision found - skipping database rollback"
+            echo "ℹ️ This might be the first deployment or no migrations were run"
+            exit 0
+          fi
+          
           # Determine environment and database
           if [ "${{ github.ref_name }}" == "test" ]; then
             ENV="dev"
@@ -605,6 +625,9 @@ jobs:
             exit 1
           fi
           
+          echo "📍 Rolling back database in environment: $ENV"
+          echo "🔄 Target rollback revision: ${{ env.PRE_MIGRATION_REVISION }}"
+          
           # Get database credentials from AWS Secrets Manager
           SECRET_VALUE=$(aws secretsmanager get-secret-value \
             --secret-id "${ENV}-morpheus-api" \
@@ -616,34 +639,58 @@ jobs:
           
           export DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}"
           
-          # Get the previous successful migration
-          PREVIOUS_REVISION=$(poetry run alembic history | grep -B1 "current" | head -1 | awk '{print $1}' | sed 's/[^a-zA-Z0-9]//g')
+          # Check current revision before rollback
+          CURRENT_REV=$(poetry run alembic current --verbose 2>/dev/null | grep "Current revision" | awk '{print $NF}' || echo "none")
+          echo "📋 Current revision before rollback: $CURRENT_REV"
           
-          if [ -n "$PREVIOUS_REVISION" ] && [ "$PREVIOUS_REVISION" != "current" ]; then
-            echo "📅 Rolling back database to revision: $PREVIOUS_REVISION"
-            poetry run alembic downgrade $PREVIOUS_REVISION
+          # Only rollback if we're not already at the target revision
+          if [ "$CURRENT_REV" == "${{ env.PRE_MIGRATION_REVISION }}" ]; then
+            echo "✅ Database is already at the target revision - no rollback needed"
+            exit 0
+          fi
+          
+          # Perform the rollback
+          echo "📅 Rolling back database to revision: ${{ env.PRE_MIGRATION_REVISION }}"
+          if poetry run alembic downgrade "${{ env.PRE_MIGRATION_REVISION }}"; then
+            echo "✅ Database rollback command completed"
             
             # Verify rollback success
-            poetry run python -c "
-            import asyncio
-            import sys
-            import os
-            sys.path.insert(0, os.path.abspath('.'))
-            from src.main import verify_database_migrations
+            ROLLED_BACK_REV=$(poetry run alembic current --verbose 2>/dev/null | grep "Current revision" | awk '{print $NF}' || echo "none")
+            echo "📋 Revision after rollback: $ROLLED_BACK_REV"
             
-            async def verify():
-                try:
-                    await verify_database_migrations()
-                    print('✅ Database rollback verification successful')
-                    return True
-                except Exception as e:
-                    print(f'❌ Database rollback verification failed: {e}')
-                    return False
-            
-            result = asyncio.run(verify())
-            " && echo "✅ Database rollback successful" || echo "❌ Database rollback failed"
+            if [ "$ROLLED_BACK_REV" == "${{ env.PRE_MIGRATION_REVISION }}" ]; then
+              echo "✅ Database rollback successful - revision matches target"
+              
+              # Test basic database connectivity
+              poetry run python -c "
+              import asyncio
+              import sys
+              import os
+              sys.path.insert(0, os.path.abspath('.'))
+              
+              async def test_db():
+                  try:
+                      from src.db.database import engine
+                      from sqlalchemy import text
+                      async with engine.begin() as conn:
+                          result = await conn.execute(text('SELECT 1'))
+                          result.scalar()
+                      print('✅ Database connectivity test passed after rollback')
+                      return True
+                  except Exception as e:
+                      print(f'❌ Database connectivity test failed after rollback: {e}')
+                      return False
+              
+              result = asyncio.run(test_db())
+              sys.exit(0 if result else 1)
+              " && echo "✅ Database rollback verification successful" || echo "❌ Database rollback verification failed"
+            else
+              echo "❌ Database rollback failed - revision mismatch"
+              echo "Expected: ${{ env.PRE_MIGRATION_REVISION }}, Got: $ROLLED_BACK_REV"
+            fi
           else
-            echo "⚠️ No previous revision found for rollback - manual intervention required"
+            echo "❌ Database rollback command failed"
+            echo "⚠️ Manual database intervention may be required"
           fi
 
   Create-Release:
