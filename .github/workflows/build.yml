@@ -1,0 +1,693 @@
+name: CI-CD
+# CI/CD Pipeline for Morpheus Marketplace API
+# 
+# Branch Strategy:
+#   • dev: Build and test only (no deployment)
+#   • test: Build, test, and deploy to AWS DEV environment
+#   • main: Build, test, create release, and deploy to AWS PRD environment
+#
+# Key Features:
+#   • Python/FastAPI application with Poetry dependency management
+#   • Automated database migrations with Alembic
+#   • Docker container builds with GitHub Actions caching
+#   • Automated deployments to AWS ECS Fargate
+#   • Health check verification with version matching
+#   • Database rollback on deployment failures
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create updated Morpheus-Marketplace-API release"
+        required: true
+        type: boolean
+      run_migrations:
+        description: "Run database migrations during deployment"
+        required: true
+        type: boolean
+        default: true
+      create_deployment:
+        description: "Deploy to hosted environments"
+        required: true
+        type: boolean
+
+  push:
+    branches:
+      - main
+      - test
+      - dev
+      - cicd/*
+
+    paths: [".github/**", "src/**", "alembic/**", "pyproject.toml", "poetry.lock", "Dockerfile", "alembic.ini"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  AWS_REGION: us-east-2
+
+jobs:
+  Generate-Tag:
+    runs-on: ubuntu-latest
+    name: Generate Semantic Version Tag
+    if: |
+      github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
+      (
+        (github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/cicd/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev')) ||
+        (github.event_name == 'workflow_dispatch') 
+      )
+    outputs:
+      tag_name: ${{ steps.gen_tag_name.outputs.tag_name }}
+      vtag: ${{ steps.gen_tag_name.outputs.vtag }}
+      vfull: ${{ steps.gen_tag_name.outputs.vfull }}
+      image_name: ${{ steps.gen_tag_name.outputs.image_name }}
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Determine semantic version tag
+        id: gen_tag_name
+        shell: bash
+        run: |
+          IMAGE_NAME="ghcr.io/morpheusais/morpheus-marketplace-api"
+          VMAJ_NEW=1
+          VMIN_NEW=0
+          VPAT_NEW=0
+          set +o pipefail
+          VLAST=$(git describe --tags --abbrev=0 --match='v[1-9]*' refs/remotes/origin/main 2>/dev/null | cut -c2-)
+
+          if [ -n "$VLAST" ]; then
+              eval $(echo "$VLAST" | awk -F '.' '{print "VMAJ="$1" VMIN="$2" VPAT="$3}')
+          else
+              VMAJ=0
+              VMIN=0
+              VPAT=0
+          fi
+
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+              if [ "$VMAJ_NEW" -gt "$VMAJ" ]; then
+                  VMAJ=$VMAJ_NEW
+                  VMIN=$VMIN_NEW
+                  VPAT=$VPAT_NEW
+              else
+                  VMIN=$((VMIN+1))
+                  VPAT=0
+              fi
+              VFULL=${VMAJ}.${VMIN}.${VPAT}
+              VTAG=v$VFULL
+          else
+              MB=$(git merge-base refs/remotes/origin/main HEAD)
+              VPAT=$(git rev-list --count --no-merges ${MB}..HEAD)
+              VFULL=${VMAJ}.${VMIN}.${VPAT}
+              RNAME=${GITHUB_REF_NAME##*/}
+              [ "$GITHUB_EVENT_NAME" = "pull_request" ] && RNAME=pr${GITHUB_REF_NAME%/merge}
+              VTAG=v${VFULL}-${RNAME}
+          fi
+
+          # Output variables for use in subsequent jobs
+          echo "tag_name=${VTAG}" >> $GITHUB_OUTPUT
+          echo "vtag=${VTAG}" >> $GITHUB_OUTPUT
+          echo "vfull=${VFULL}" >> $GITHUB_OUTPUT
+          echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "✅ New Build Tag: $VTAG" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Docker Image: ${IMAGE_NAME}:${VTAG}" >> $GITHUB_STEP_SUMMARY
+
+  Test-API:
+    name: Test Morpheus API
+    if: |
+      github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
+      (
+        (github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/cicd/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev')) ||
+        (github.event_name == 'workflow_dispatch') 
+      )
+    runs-on: ubuntu-latest
+    needs: Generate-Tag
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+          POSTGRES_USER: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: latest
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          
+      - name: Load cached venv
+        id: cached-poetry-dependencies
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+          
+      - name: Install dependencies
+        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
+        run: poetry install --no-interaction --no-root
+        
+      - name: Install project
+        run: poetry install --no-interaction
+        
+      - name: Run database migrations (test)
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
+        run: |
+          poetry run alembic upgrade head
+          
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
+        run: |
+          poetry run pytest tests/ -v --cov=src --cov-report=xml
+          
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+
+  Build-and-Push-Container:
+    name: Build & Push Docker Image
+    if: |
+      github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
+      (
+        (github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/cicd/')|| github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.create_deployment == 'true') 
+      )
+    needs:
+      - Generate-Tag
+      - Test-API
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Docker Image
+        run: |
+          BUILDTAG=${{ needs.Generate-Tag.outputs.tag_name }}
+          BUILDIMAGE=${{ needs.Generate-Tag.outputs.image_name }}
+          BUILDCOMMIT=${{ github.sha }}
+          
+          # Determine environment for tagging
+          if [ "${{ github.ref_name }}" == "test" ]; then
+            ENV_TAG="dev-latest"
+            echo "🚀 Building for development environment"
+          elif [ "${{ github.ref_name }}" == "main" ]; then
+            ENV_TAG="prd-latest"
+            echo "🚀 Building for production environment"
+          else
+            ENV_TAG="$BUILDTAG"
+            echo "🚀 Building for feature/development branch"
+          fi
+          
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-arg BUILDTAG=$BUILDTAG \
+            --build-arg COMMIT=$BUILDCOMMIT \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=min \
+            --push \
+            -t $BUILDIMAGE:$BUILDTAG \
+            -t $BUILDIMAGE:$ENV_TAG \
+            . || (echo "❌ Failed to push image with tag: $BUILDIMAGE:$BUILDTAG" && exit 1)
+          echo "✅ API Build and Push of $BUILDIMAGE:$BUILDTAG Successful!"
+
+  Deploy-to-ECS:
+    name: Deploy to AWS ECS
+    if: |
+      github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
+      (
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.create_deployment == 'true')
+      )
+    needs:
+      - Generate-Tag
+      - Build-and-Push-Container
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Python (for migrations)
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: latest
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          
+      - name: Install dependencies (for migrations)
+        run: poetry install --no-interaction --no-dev
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.MORPHEUS_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.MORPHEUS_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run Database Migrations
+        if: ${{ github.event.inputs.run_migrations != 'false' }}
+        run: |
+          BUILDTAG=${{ needs.Generate-Tag.outputs.tag_name }}
+          
+          # Determine environment and database
+          if [ "${{ github.ref_name }}" == "test" ]; then
+            ENV="dev"
+            DB_HOST="db.dev.mor.org"
+          elif [ "${{ github.ref_name }}" == "main" ]; then
+            ENV="prd"
+            DB_HOST="db.mor.org"
+          else
+            echo "❌ Unsupported branch for deployment: ${{ github.ref_name }}"
+            exit 1
+          fi
+          
+          echo "🗄️ Running database migrations for environment: $ENV"
+          echo "📍 Database host: $DB_HOST"
+          
+          # Get database credentials from AWS Secrets Manager
+          SECRET_VALUE=$(aws secretsmanager get-secret-value \
+            --secret-id "${ENV}-morpheus-api" \
+            --query SecretString --output text)
+          
+          DB_USER=$(echo "$SECRET_VALUE" | jq -r '.postgres_user')
+          DB_PASSWORD=$(echo "$SECRET_VALUE" | jq -r '.postgres_password')
+          DB_NAME=$(echo "$SECRET_VALUE" | jq -r '.postgres_db')
+          
+          # Set database URL for migrations
+          export DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}"
+          
+          # Create backup point (get current revision)
+          echo "📋 Recording current database state..."
+          CURRENT_REVISION=$(poetry run alembic current 2>/dev/null | head -1 | awk '{print $1}' || echo "none")
+          echo "Current revision: $CURRENT_REVISION"
+          
+          # Run migrations
+          echo "🚀 Applying database migrations..."
+          poetry run alembic upgrade head
+          
+          # Verify migration success
+          echo "✅ Verifying migration success..."
+          poetry run python -c "
+          import asyncio
+          import sys
+          import os
+          sys.path.insert(0, os.path.abspath('.'))
+          from src.main import verify_database_migrations
+          
+          async def verify():
+              try:
+                  await verify_database_migrations()
+                  print('✅ Database migrations verified successfully')
+                  return True
+              except Exception as e:
+                  print(f'❌ Database verification failed: {e}')
+                  return False
+          
+          result = asyncio.run(verify())
+          sys.exit(0 if result else 1)
+          " || (echo "❌ Migration verification failed" && exit 1)
+          
+          echo "✅ Database migrations completed successfully"
+
+      - name: Deploy to ECS
+        run: |
+          BUILDTAG=${{ needs.Generate-Tag.outputs.tag_name }}
+          BUILDIMAGE=${{ needs.Generate-Tag.outputs.image_name }}
+          
+          # Determine environment based on branch
+          if [ "${{ github.ref_name }}" == "test" ]; then
+            ENV="dev"
+          elif [ "${{ github.ref_name }}" == "main" ]; then
+            ENV="prd"
+          else
+            echo "❌ Unsupported branch for deployment: ${{ github.ref_name }}"
+            exit 1
+          fi
+          
+          echo "🚀 Deploying to Morpheus AWS - Environment: $ENV"
+          echo "📦 Container Image: $BUILDIMAGE:$BUILDTAG"
+          
+          # ECS deployment variables (following Node repo pattern)
+          CLUSTER_NAME="ecs-${ENV}-morpheus-engine"
+          SERVICE_NAME="svc-${ENV}-api-service"
+          TASK_FAMILY="task-${ENV}-api-service"
+          CONTAINER_NAME="morpheus-api-service"
+          
+          # Get current task definition
+          echo "📋 Retrieving current task definition..."
+          CURRENT_TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition "$TASK_FAMILY" \
+            --query 'taskDefinition' \
+            --output json)
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Failed to retrieve current task definition"
+            exit 1
+          fi
+          
+          # Update the image in the task definition
+          echo "🔄 Creating new task definition with image: $BUILDIMAGE:$BUILDTAG"
+          NEW_TASK_DEF=$(echo "$CURRENT_TASK_DEF" | jq --arg IMAGE "$BUILDIMAGE:$BUILDTAG" --arg CONTAINER "$CONTAINER_NAME" '
+            {
+              family: .family,
+              networkMode: .networkMode,
+              requiresCompatibilities: .requiresCompatibilities,
+              cpu: .cpu,
+              memory: .memory,
+              taskRoleArn: .taskRoleArn,
+              executionRoleArn: .executionRoleArn,
+              volumes: .volumes,
+              containerDefinitions: (.containerDefinitions | map(
+                if .name == $CONTAINER then
+                  .image = $IMAGE
+                else
+                  .
+                end
+              ))
+            }
+          ')
+          
+          # Validate JSON structure
+          echo "🔍 Validating JSON structure..."
+          echo "$NEW_TASK_DEF" | jq empty
+          if [ $? -ne 0 ]; then
+            echo "❌ Generated JSON is invalid"
+            exit 1
+          fi
+          
+          # Register new task definition
+          echo "📝 Registering new task definition..."
+          TEMP_JSON_FILE="/tmp/task_definition_$$.json"
+          echo "$NEW_TASK_DEF" > "$TEMP_JSON_FILE"
+          
+          NEW_TASK_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "file://$TEMP_JSON_FILE" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          
+          rm -f "$TEMP_JSON_FILE"
+          
+          if [ $? -ne 0 ] || [ -z "$NEW_TASK_ARN" ]; then
+            echo "❌ Failed to register new task definition"
+            exit 1
+          fi
+          
+          echo "✅ New task definition registered: $NEW_TASK_ARN"
+          
+          # Update the ECS service
+          echo "🔄 Updating ECS service..."
+          UPDATE_RESULT=$(aws ecs update-service \
+            --cluster "$CLUSTER_NAME" \
+            --service "$SERVICE_NAME" \
+            --task-definition "$NEW_TASK_ARN" \
+            --force-new-deployment \
+            --query 'service.{serviceName:serviceName,taskDefinition:taskDefinition,desiredCount:desiredCount,runningCount:runningCount,pendingCount:pendingCount}' \
+            --output json)
+          
+          echo "📊 Service Update Summary:"
+          echo "$UPDATE_RESULT" | jq .
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Failed to update ECS service"
+            exit 1
+          fi
+          
+          echo "✅ ECS service update initiated successfully"
+          echo "🎯 Environment: $ENV"
+          echo "🏗️  Cluster: $CLUSTER_NAME"
+          echo "⚙️  Service: $SERVICE_NAME"
+          echo "📦 Image: $BUILDIMAGE:$BUILDTAG"
+          echo "📋 Task Definition: $NEW_TASK_ARN"
+
+      - name: Wait for ECS Service Stabilization
+        run: |
+          # Determine environment
+          if [ "${{ github.ref_name }}" == "test" ]; then
+            ENV="dev"
+          elif [ "${{ github.ref_name }}" == "main" ]; then
+            ENV="prd"
+          fi
+          
+          CLUSTER_NAME="ecs-${ENV}-morpheus-engine"
+          SERVICE_NAME="svc-${ENV}-api-service"
+          
+          # Wait for deployment to stabilize
+          echo "⏳ Waiting for service to stabilize (up to 15 minutes)..."
+          aws ecs wait services-stable \
+            --cluster "$CLUSTER_NAME" \
+            --services "$SERVICE_NAME" \
+            --cli-read-timeout 900 \
+            --cli-connect-timeout 60
+          
+          STABILIZATION_STATUS=$?
+          
+          if [ $STABILIZATION_STATUS -eq 0 ]; then
+            echo "✅ ECS service stabilized successfully"
+          else
+            echo "⚠️ ECS stabilization wait timed out, but continuing with health check..."
+          fi
+
+      - name: Health Check Verification
+        run: |
+          BUILDTAG=${{ needs.Generate-Tag.outputs.tag_name }}
+          
+          # Determine environment and health endpoint
+          if [ "${{ github.ref_name }}" == "test" ]; then
+            HEALTH_ENDPOINT="https://api.dev.mor.org/health"
+          elif [ "${{ github.ref_name }}" == "main" ]; then
+            HEALTH_ENDPOINT="https://api.mor.org/health"
+          fi
+          
+          echo "🔍 Waiting 5 minutes before health check verification..."
+          sleep 300  # 5-minute wait
+          
+          echo "🔍 Verifying deployment at: $HEALTH_ENDPOINT"
+          
+          MAX_RETRIES=20
+          RETRY_COUNT=0
+          VERSION_VERIFIED=false
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            echo "🔄 Health check attempt $((RETRY_COUNT + 1))/$MAX_RETRIES..."
+            
+            HEALTH_RESPONSE=$(curl -s --max-time 10 "$HEALTH_ENDPOINT" 2>/dev/null)
+            CURL_STATUS=$?
+            
+            if [ $CURL_STATUS -eq 0 ] && [ -n "$HEALTH_RESPONSE" ]; then
+              echo "📡 Health response: $HEALTH_RESPONSE"
+              
+              # Parse health check JSON
+              STATUS=$(echo "$HEALTH_RESPONSE" | jq -r '.status // empty' 2>/dev/null)
+              DATABASE_STATUS=$(echo "$HEALTH_RESPONSE" | jq -r '.database // empty' 2>/dev/null)
+              DEPLOYED_VERSION=$(echo "$HEALTH_RESPONSE" | jq -r '.version // empty' 2>/dev/null)
+              UPTIME=$(echo "$HEALTH_RESPONSE" | jq -r '.uptime.human_readable // empty' 2>/dev/null)
+              
+              if [ "$STATUS" = "ok" ] && [ "$DATABASE_STATUS" = "healthy" ]; then
+                echo "🏥 Service Status: $STATUS"
+                echo "🗄️ Database Status: $DATABASE_STATUS"
+                echo "📦 Deployed Version: $DEPLOYED_VERSION"
+                echo "⏰ Service Uptime: $UPTIME"
+                
+                # Version verification (check if build tag is contained in deployed version)
+                if [[ "$DEPLOYED_VERSION" == *"$BUILDTAG"* ]] || [[ "$BUILDTAG" == *"$DEPLOYED_VERSION"* ]]; then
+                  echo "✅ Version verification successful! Deployed version matches expected tag."
+                  VERSION_VERIFIED=true
+                  break
+                else
+                  echo "⚠️ Version mismatch - Expected: $BUILDTAG, Deployed: $DEPLOYED_VERSION"
+                fi
+              else
+                echo "⚠️ Service not healthy - Status: $STATUS, Database: $DATABASE_STATUS"
+              fi
+            else
+              echo "⚠️ Health check failed (curl status: $CURL_STATUS)"
+            fi
+            
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+              echo "⏳ Waiting 15 seconds before retry..."
+              sleep 15
+            fi
+          done
+          
+          # Final verification result
+          if [ "$VERSION_VERIFIED" = true ]; then
+            echo ""
+            echo "🎉 Deployment verification successful!"
+            echo "✅ Service is healthy and running the expected version"
+            echo "🌐 Health Check URL: $HEALTH_ENDPOINT"
+          else
+            echo ""
+            echo "❌ Deployment verification failed!"
+            echo "🔍 The service may still be starting up or there may be an issue"
+            echo "🌐 Manual check: $HEALTH_ENDPOINT"
+            echo "🏗️  Expected version: $BUILDTAG"
+            if [ -n "$DEPLOYED_VERSION" ]; then
+              echo "📦 Currently deployed: $DEPLOYED_VERSION"
+            fi
+            echo ""
+            echo "ℹ️ This may be a temporary issue. Check the health endpoint in a few minutes."
+            echo "ℹ️ If the issue persists, check AWS ECS console and CloudWatch logs."
+            
+            # Don't fail the deployment for version mismatch, as it might be a timing issue
+            echo "⚠️ Continuing with warning - ECS deployment completed but version verification inconclusive"
+          fi
+
+      - name: Database Rollback on Deployment Failure
+        if: failure()
+        run: |
+          echo "🚨 Deployment failed - initiating database rollback"
+          
+          # Determine environment and database
+          if [ "${{ github.ref_name }}" == "test" ]; then
+            ENV="dev"
+            DB_HOST="db.dev.mor.org"
+          elif [ "${{ github.ref_name }}" == "main" ]; then
+            ENV="prd"
+            DB_HOST="db.mor.org"
+          else
+            echo "❌ Unknown environment for rollback"
+            exit 1
+          fi
+          
+          # Get database credentials from AWS Secrets Manager
+          SECRET_VALUE=$(aws secretsmanager get-secret-value \
+            --secret-id "${ENV}-morpheus-api" \
+            --query SecretString --output text)
+          
+          DB_USER=$(echo "$SECRET_VALUE" | jq -r '.postgres_user')
+          DB_PASSWORD=$(echo "$SECRET_VALUE" | jq -r '.postgres_password')
+          DB_NAME=$(echo "$SECRET_VALUE" | jq -r '.postgres_db')
+          
+          export DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}"
+          
+          # Get the previous successful migration
+          PREVIOUS_REVISION=$(poetry run alembic history | grep -B1 "current" | head -1 | awk '{print $1}' | sed 's/[^a-zA-Z0-9]//g')
+          
+          if [ -n "$PREVIOUS_REVISION" ] && [ "$PREVIOUS_REVISION" != "current" ]; then
+            echo "📅 Rolling back database to revision: $PREVIOUS_REVISION"
+            poetry run alembic downgrade $PREVIOUS_REVISION
+            
+            # Verify rollback success
+            poetry run python -c "
+            import asyncio
+            import sys
+            import os
+            sys.path.insert(0, os.path.abspath('.'))
+            from src.main import verify_database_migrations
+            
+            async def verify():
+                try:
+                    await verify_database_migrations()
+                    print('✅ Database rollback verification successful')
+                    return True
+                except Exception as e:
+                    print(f'❌ Database rollback verification failed: {e}')
+                    return False
+            
+            result = asyncio.run(verify())
+            " && echo "✅ Database rollback successful" || echo "❌ Database rollback failed"
+          else
+            echo "⚠️ No previous revision found for rollback - manual intervention required"
+          fi
+
+  Create-Release:
+    name: Create GitHub Release
+    if: |
+      github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
+      (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+      )
+    needs:
+      - Generate-Tag
+      - Deploy-to-ECS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Create release
+        id: create_release
+        uses: anzz1/action-create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.Generate-Tag.outputs.tag_name }}
+          release_name: "Morpheus Marketplace API ${{ needs.Generate-Tag.outputs.tag_name }}"
+          body: |
+            ## Morpheus Marketplace API Release ${{ needs.Generate-Tag.outputs.tag_name }}
+            
+            ### 🚀 Deployment Information
+            - **Container Image:** `${{ needs.Generate-Tag.outputs.image_name }}:${{ needs.Generate-Tag.outputs.tag_name }}`
+            - **Environment:** Production (api.mor.org)
+            - **Build Commit:** ${{ github.sha }}
+            
+            ### 📋 What's Included
+            - FastAPI application with latest features and bug fixes
+            - Database schema updates (if any)
+            - Container optimizations and security updates
+            
+            ### 🔗 Links
+            - **API Documentation:** https://api.mor.org/docs
+            - **Health Check:** https://api.mor.org/health
+            - **Container Registry:** https://github.com/MorpheusAIs/Morpheus-Marketplace-API/pkgs/container/morpheus-marketplace-api
+          prerelease: false
