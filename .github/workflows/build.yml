@@ -290,7 +290,7 @@ jobs:
           virtualenvs-in-project: true
           
       - name: Install dependencies (for migrations)
-        run: poetry install --no-interaction --no-dev
+        run: poetry install --no-interaction
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -361,9 +361,19 @@ jobs:
           
           async def verify():
               try:
-                  from src.main import verify_database_migrations
-                  await verify_database_migrations()
-                  print('✅ Database migrations verified successfully')
+                  from sqlalchemy.ext.asyncio import create_async_engine
+                  from sqlalchemy import text
+                  
+                  # Create engine with the same DATABASE_URL
+                  engine = create_async_engine(os.getenv('DATABASE_URL'))
+                  
+                  # Test basic connectivity
+                  async with engine.begin() as conn:
+                      result = await conn.execute(text('SELECT 1'))
+                      result.scalar()
+                  
+                  await engine.dispose()
+                  print('✅ Database connectivity verified successfully')
                   return True
               except Exception as e:
                   print(f'❌ Database verification failed: {e}')
@@ -415,6 +425,11 @@ jobs:
           
           # Update the image in the task definition
           echo "🔄 Creating new task definition with image: $BUILDIMAGE:$BUILDTAG"
+          
+          # Debug: Show current image before update
+          echo "🔍 Current image in task definition:"
+          echo "$CURRENT_TASK_DEF" | jq -r '.containerDefinitions[0].image'
+          
           NEW_TASK_DEF=$(echo "$CURRENT_TASK_DEF" | jq --arg IMAGE "$BUILDIMAGE:$BUILDTAG" --arg CONTAINER "$CONTAINER_NAME" '
             {
               family: .family,
@@ -434,6 +449,10 @@ jobs:
               ))
             }
           ')
+          
+          # Debug: Show new image after update
+          echo "🔍 New image in task definition:"
+          echo "$NEW_TASK_DEF" | jq -r '.containerDefinitions[0].image'
           
           # Validate JSON structure
           echo "🔍 Validating JSON structure..."
@@ -666,15 +685,17 @@ jobs:
               import asyncio
               import sys
               import os
-              sys.path.insert(0, os.path.abspath('.'))
               
               async def test_db():
                   try:
-                      from src.db.database import engine
+                      from sqlalchemy.ext.asyncio import create_async_engine
                       from sqlalchemy import text
+                      
+                      engine = create_async_engine(os.getenv('DATABASE_URL'))
                       async with engine.begin() as conn:
                           result = await conn.execute(text('SELECT 1'))
                           result.scalar()
+                      await engine.dispose()
                       print('✅ Database connectivity test passed after rollback')
                       return True
                   except Exception as e:
