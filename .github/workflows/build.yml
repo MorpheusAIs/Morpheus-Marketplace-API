@@ -298,7 +298,7 @@ jobs:
       - Generate-Tag
       - Build-and-Push-Container
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name }}
+    environment: ${{ github.ref_name == 'main' && 'main' || 'test' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
