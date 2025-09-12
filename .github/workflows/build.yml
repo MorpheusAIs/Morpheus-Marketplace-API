@@ -266,7 +266,7 @@ jobs:
           
           docker buildx build \
             --platform $PLATFORMS \
-            --build-arg BUILD_VERSION=${{ needs.Generate-Tag.outputs.vfull }} \
+            --build-arg BUILD_VERSION=${{ needs.Generate-Tag.outputs.tag_name }} \
             --build-arg BUILD_COMMIT=$BUILDCOMMIT \
             --build-arg BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
             --cache-from type=gha \
