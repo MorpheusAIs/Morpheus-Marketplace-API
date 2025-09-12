@@ -126,7 +126,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev')) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev')) ||
         (github.event_name == 'workflow_dispatch') 
       )
     runs-on: ubuntu-latest
