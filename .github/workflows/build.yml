@@ -291,7 +291,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
+        (github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/cicd/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
         (github.event_name == 'workflow_dispatch' && github.event.inputs.create_deployment == 'true')
       )
     needs:
@@ -340,7 +340,7 @@ jobs:
           BUILDTAG=${{ needs.Generate-Tag.outputs.tag_name }}
           
           # Determine environment and database
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
             DB_HOST="db.dev.mor.org"
           elif [ "${{ github.ref_name }}" == "main" ]; then
@@ -428,7 +428,7 @@ jobs:
           BUILDIMAGE=${{ needs.Generate-Tag.outputs.image_name }}
           
           # Determine environment based on branch
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
@@ -544,7 +544,7 @@ jobs:
       - name: Wait for ECS Service Stabilization
         run: |
           # Determine environment
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
@@ -574,7 +574,7 @@ jobs:
           BUILDTAG=${{ needs.Generate-Tag.outputs.tag_name }}
           
           # Determine environment and health endpoint
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             HEALTH_ENDPOINT="https://api.dev.mor.org/health"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             HEALTH_ENDPOINT="https://api.mor.org/health"
@@ -668,7 +668,7 @@ jobs:
           fi
           
           # Determine environment and database
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
             DB_HOST="db.dev.mor.org"
           elif [ "${{ github.ref_name }}" == "main" ]; then
