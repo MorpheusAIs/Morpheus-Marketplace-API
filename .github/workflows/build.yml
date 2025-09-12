@@ -178,7 +178,7 @@ jobs:
           # Check if lock file is out of sync and regenerate if needed
           if ! poetry check --lock; then
             echo "🔄 Lock file out of sync, regenerating..."
-            poetry lock --no-update
+            poetry lock
           fi
           poetry install --no-interaction --no-root
         
@@ -300,7 +300,7 @@ jobs:
           # Check if lock file is out of sync and regenerate if needed
           if ! poetry check --lock; then
             echo "🔄 Lock file out of sync, regenerating..."
-            poetry lock --no-update
+            poetry lock
           fi
           poetry install --no-interaction
 
