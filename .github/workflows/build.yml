@@ -170,11 +170,17 @@ jobs:
         uses: actions/cache@v3
         with:
           path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock', '**/pyproject.toml') }}
           
       - name: Install dependencies
         if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-        run: poetry install --no-interaction --no-root
+        run: |
+          # Check if lock file is out of sync and regenerate if needed
+          if ! poetry check --lock; then
+            echo "🔄 Lock file out of sync, regenerating..."
+            poetry lock --no-update
+          fi
+          poetry install --no-interaction --no-root
         
       - name: Install project
         run: poetry install --no-interaction
@@ -290,7 +296,13 @@ jobs:
           virtualenvs-in-project: true
           
       - name: Install dependencies (for migrations)
-        run: poetry install --no-interaction
+        run: |
+          # Check if lock file is out of sync and regenerate if needed
+          if ! poetry check --lock; then
+            echo "🔄 Lock file out of sync, regenerating..."
+            poetry lock --no-update
+          fi
+          poetry install --no-interaction
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
