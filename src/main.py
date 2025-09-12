@@ -18,6 +18,7 @@ import platform
 
 from src.api.v1 import models, chat, session, auth, automation, chat_history
 from src.core.config import settings
+from src.core.version import get_version, get_version_info
 from src.api.v1.custom_route import FixedDependencyAPIRoute
 from src.db.models import Session as DbSession
 from src.services import session_service
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 # Global variables for container diagnostics
 APP_START_TIME = None
 CONTAINER_ID = str(uuid.uuid4())
-APP_VERSION = f"0.2.0-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+APP_VERSION = get_version()
 
 # Using our production-ready fixed route class
 app = FastAPI(

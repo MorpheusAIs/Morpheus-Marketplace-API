@@ -266,8 +266,9 @@ jobs:
           
           docker buildx build \
             --platform $PLATFORMS \
-            --build-arg BUILDTAG=$BUILDTAG \
-            --build-arg COMMIT=$BUILDCOMMIT \
+            --build-arg BUILD_VERSION=${{ needs.Generate-Tag.outputs.vfull }} \
+            --build-arg BUILD_COMMIT=$BUILDCOMMIT \
+            --build-arg BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
             --cache-from type=gha \
             --cache-to type=gha,mode=min \
             --push \
@@ -553,8 +554,37 @@ jobs:
           CLUSTER_NAME="ecs-${ENV}-morpheus-engine"
           SERVICE_NAME="svc-${ENV}-api-service"
           
-          # Wait for deployment to stabilize
+          # Wait for deployment to stabilize with better monitoring
           echo "⏳ Waiting for service to stabilize (up to 15 minutes)..."
+          echo "📊 Monitoring service status..."
+          
+          # Start monitoring in background
+          (
+            for i in {1..30}; do
+              sleep 30
+              echo "🔍 Check $i/30: Service status at $(date)"
+              aws ecs describe-services \
+                --cluster "$CLUSTER_NAME" \
+                --services "$SERVICE_NAME" \
+                --query 'services[0].{Status:status,Running:runningCount,Pending:pendingCount,Desired:desiredCount}' \
+                --output table || echo "Failed to get service status"
+              
+              # Check task status
+              TASK_ARNS=$(aws ecs list-tasks --cluster "$CLUSTER_NAME" --service-name "$SERVICE_NAME" --query 'taskArns' --output text)
+              if [ -n "$TASK_ARNS" ] && [ "$TASK_ARNS" != "None" ]; then
+                echo "📋 Task details:"
+                aws ecs describe-tasks \
+                  --cluster "$CLUSTER_NAME" \
+                  --tasks $TASK_ARNS \
+                  --query 'tasks[0].{LastStatus:lastStatus,HealthStatus:healthStatus,StoppedReason:stoppedReason}' \
+                  --output table 2>/dev/null || echo "No task details available"
+              fi
+              echo "---"
+            done
+          ) &
+          MONITOR_PID=$!
+          
+          # Wait for stabilization
           aws ecs wait services-stable \
             --cluster "$CLUSTER_NAME" \
             --services "$SERVICE_NAME" \
@@ -563,10 +593,18 @@ jobs:
           
           STABILIZATION_STATUS=$?
           
+          # Stop monitoring
+          kill $MONITOR_PID 2>/dev/null || true
+          
           if [ $STABILIZATION_STATUS -eq 0 ]; then
             echo "✅ ECS service stabilized successfully"
           else
-            echo "⚠️ ECS stabilization wait timed out, but continuing with health check..."
+            echo "⚠️ ECS stabilization wait timed out, checking final status..."
+            aws ecs describe-services \
+              --cluster "$CLUSTER_NAME" \
+              --services "$SERVICE_NAME" \
+              --query 'services[0]' \
+              --output json | jq '.deployments[] | {status, taskDefinition, runningCount, pendingCount, failedTasks}'
           fi
 
       - name: Health Check Verification

@@ -23,9 +23,17 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Build arguments for version information
+ARG BUILD_VERSION="0.0.0-dev"
+ARG BUILD_COMMIT="unknown"
+ARG BUILD_TIME=""
+
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV BUILD_VERSION=${BUILD_VERSION}
+ENV BUILD_COMMIT=${BUILD_COMMIT}
+ENV BUILD_TIME=${BUILD_TIME}
 
 # Create a non-root user
 RUN addgroup --system app && adduser --system --group app
