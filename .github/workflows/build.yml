@@ -443,7 +443,7 @@ jobs:
           # ECS deployment variables (following Node repo pattern)
           CLUSTER_NAME="ecs-${ENV}-morpheus-engine"
           SERVICE_NAME="svc-${ENV}-api-service"
-          TASK_FAMILY="task-${ENV}-api-service"
+          TASK_FAMILY="tsk-${ENV}-api-service"
           CONTAINER_NAME="morpheus-api-service"
           
           # Get current task definition
