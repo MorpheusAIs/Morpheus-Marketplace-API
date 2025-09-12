@@ -1,35 +1,28 @@
 from fastapi import FastAPI, Request, status, Depends
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+from fastapi.routing import APIRoute, APIRouter
+from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 import time
 import logging
 import asyncio
 import os
-import pathlib
-import datetime
-from fastapi.routing import APIRoute, APIRouter
-from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
-from sqlalchemy import select, text
+import uuid
+import socket
+import platform
 
-from src.api.v1 import models, chat, session, auth, automation
+from src.api.v1 import models, chat, session, auth, automation, chat_history
 from src.core.config import settings
+from src.core.version import get_version, get_version_info
 from src.api.v1.custom_route import FixedDependencyAPIRoute
 from src.db.models import Session as DbSession
 from src.services import session_service
-
-# Add the import for testing database connection
-from sqlalchemy.ext.asyncio import AsyncEngine
-from src.db.database import engine
-
-# Import what we need for proper SQL execution
-from sqlalchemy import text
-
-# Import the model sync service
+from src.db.database import engine, get_db
 from src.core.model_sync import model_sync_service
 
 # Define log directory
@@ -47,117 +40,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Global variables for container diagnostics
+APP_START_TIME = None
+CONTAINER_ID = str(uuid.uuid4())
+APP_VERSION = get_version()
+
 # Using our production-ready fixed route class
 app = FastAPI(
     title="Morpheus API Gateway",
     description="API Gateway connecting Web2 clients to the Morpheus-Lumerin AI Marketplace",
-    version="0.1.0",
+    version=APP_VERSION,
     redirect_slashes=False,  # Disable automatic redirects to prevent HTTPS→HTTP downgrade attacks
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    swagger_ui_parameters={
-        "persistAuthorization": True,
-        "defaultModelsExpandDepth": -1,
-        "displayRequestDuration": True,
-        "deepLinking": True,
-        "docExpansion": "list",
-        "filter": True,
-        "tryItOutEnabled": True,
-        "syntaxHighlight.theme": "monokai",
-        "dom_id": "#swagger-ui",
-        "layout": "BaseLayout",
-        "onComplete": """
-            function() {
-                // Add custom CSS for animations
-                const style = document.createElement('style');
-                style.textContent = `
-                    @keyframes pulse {
-                        0% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7); }
-                        70% { box-shadow: 0 0 0 10px rgba(220, 53, 69, 0); }
-                        100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0); }
-                    }
-                    .authorize.pulse {
-                        animation: pulse 2s infinite;
-                    }
-                `;
-                document.head.appendChild(style);
-                
-                // Add helpful instruction panel
-                const instructionDiv = document.createElement('div');
-                instructionDiv.innerHTML = `
-                    <div style="background-color: #f8d7da; padding: 15px; margin-bottom: 20px; border-radius: 5px; border-left: 5px solid #dc3545;">
-                        <h3 style="margin-top: 0; color: #721c24;">Authentication Required</h3>
-                        <p><strong>⚠️ Two authentication methods available!</strong></p>
-                        <p><strong>1. JWT Authentication (BearerAuth):</strong> For most endpoints except /session</p>
-                        <p>- Register or Login using the /auth/register or /auth/login endpoints</p>
-                        <p>- Copy the access_token from the response</p>
-                        <p>- Click "Authorize" and paste the token in the BearerAuth field (without "Bearer" prefix)</p>
-                        <p><strong>2. API Key Authentication (APIKeyAuth):</strong> For /session endpoints</p>
-                        <p>- Create an API key via /auth/keys endpoint (requires JWT auth)</p>
-                        <p>- Copy the API key from the response</p>
-                        <p>- Click "Authorize" and paste the API key in the APIKeyAuth field</p>
-                        <p>- The API key can be entered as either "Bearer sk-xxxxxx" or just "sk-xxxxxx"</p>
-                    </div>
-                `;
-                
-                // Add it to the top of the Swagger UI for better visibility
-                const swaggerUI = document.querySelector('.swagger-ui');
-                const infoContainer = swaggerUI.querySelector('.information-container');
-                infoContainer.after(instructionDiv);
-                
-                // Fix session endpoints to use API key auth when the page loads
-                setTimeout(function() {
-                    const authButton = document.querySelector('.authorize');
-                    if (!localStorage.getItem('auth_reminded')) {
-                        authButton.classList.add('pulse');
-                        localStorage.setItem('auth_reminded', 'true');
-                    }
-                    
-                    // Check if we're on a session endpoint and select the right auth
-                    const pathElements = document.querySelectorAll('.opblock-summary-path');
-                    pathElements.forEach(function(elem) {
-                        const path = elem.innerText;
-                        if (path && path.includes('/session/')) {
-                            const opblock = elem.closest('.opblock');
-                            if (opblock) {
-                                const authEl = opblock.querySelector('.authorization__btn');
-                                if (authEl) {
-                                    // Add a visual indicator for API Key auth
-                                    const indicator = document.createElement('span');
-                                    indicator.className = 'api-key-indicator';
-                                    indicator.innerText = 'API Key';
-                                    indicator.style.backgroundColor = '#28a745';
-                                    indicator.style.color = 'white';
-                                    indicator.style.padding = '2px 8px';
-                                    indicator.style.borderRadius = '4px';
-                                    indicator.style.fontSize = '10px';
-                                    indicator.style.marginLeft = '8px';
-                                    authEl.appendChild(indicator);
-                                }
-                            }
-                        }
-                    });
-                }, 1000);
-            }
-        """
-    },
-    servers=[
-        {
-            "url": "https://api.mor.org",
-            "description": "Production"
-        },
-        {
-            "url": "https://api.dev.mor.org",
-            "description": "Testing"
-        },
-        {
-            "url": "http://localhost:8000",
-            "description": "Development"
-        }
-    ]
+    docs_url=None,  # Disable default docs so we can customize it
+    redoc_url="/redoc",  # Re-enable ReDoc for alternative documentation
+    swagger_ui_oauth2_redirect_url="/docs/oauth2-redirect"
 )
 
 # Set our fixed dependency route class for all APIRouters
 app.router.route_class = FixedDependencyAPIRoute
+
+# Note: Custom OpenAPI function is defined later in the file
 
 # Set up CORS
 if hasattr(settings, 'BACKEND_CORS_ORIGINS'):
@@ -245,107 +148,6 @@ async def enforce_https(request: Request, call_next):
     
     return await call_next(request)
 
-# Custom docs endpoint
-@app.get("/docs", include_in_schema=False)
-async def custom_swagger_ui_html():
-    return get_swagger_ui_html(
-        openapi_url=app.openapi_url,
-        title=f"{app.title} - API Documentation",
-        oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
-        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@4/swagger-ui-bundle.js",
-        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@4/swagger-ui.css",
-        swagger_ui_parameters={
-            "persistAuthorization": True,
-            "defaultModelsExpandDepth": -1,
-            "displayRequestDuration": True,
-            "deepLinking": True,
-            "docExpansion": "list",
-            "filter": True,
-            "tryItOutEnabled": True,
-            "syntaxHighlight.theme": "monokai",
-            "dom_id": "#swagger-ui",
-            "layout": "BaseLayout",
-            "onComplete": """
-                function() {
-                    // Add custom CSS for animations
-                    const style = document.createElement('style');
-                    style.textContent = `
-                        @keyframes pulse {
-                            0% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7); }
-                            70% { box-shadow: 0 0 0 10px rgba(220, 53, 69, 0); }
-                            100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0); }
-                        }
-                        .authorize.pulse {
-                            animation: pulse 2s infinite;
-                        }
-                    `;
-                    document.head.appendChild(style);
-                    
-                    // Add helpful instruction panel
-                    const instructionDiv = document.createElement('div');
-                    instructionDiv.innerHTML = `
-                        <div style="background-color: #f8d7da; padding: 15px; margin-bottom: 20px; border-radius: 5px; border-left: 5px solid #dc3545;">
-                            <h3 style="margin-top: 0; color: #721c24;">Authentication Required</h3>
-                            <p><strong>⚠️ Two authentication methods available!</strong></p>
-                            <p><strong>1. JWT Authentication (BearerAuth):</strong> For most endpoints except /session</p>
-                            <p>- Register or Login using the /auth/register or /auth/login endpoints</p>
-                            <p>- Copy the access_token from the response</p>
-                            <p>- Click "Authorize" and paste the token in the BearerAuth field (without "Bearer" prefix)</p>
-                            <p><strong>2. API Key Authentication (APIKeyAuth):</strong> For /session endpoints</p>
-                            <p>- Create an API key via /auth/keys endpoint (requires JWT auth)</p>
-                            <p>- Copy the API key from the response</p>
-                            <p>- Click "Authorize" and paste the API key in the APIKeyAuth field</p>
-                            <p>- The API key can be entered as either "Bearer sk-xxxxxx" or just "sk-xxxxxx"</p>
-                        </div>
-                    `;
-                    
-                    // Add it to the top of the Swagger UI for better visibility
-                    const swaggerUI = document.querySelector('.swagger-ui');
-                    const infoContainer = swaggerUI.querySelector('.information-container');
-                    infoContainer.after(instructionDiv);
-                    
-                    // Fix session endpoints to use API key auth when the page loads
-                    setTimeout(function() {
-                        const authButton = document.querySelector('.authorize');
-                        if (!localStorage.getItem('auth_reminded')) {
-                            authButton.classList.add('pulse');
-                            localStorage.setItem('auth_reminded', 'true');
-                        }
-                        
-                        // Check if we're on a session endpoint and select the right auth
-                        const pathElements = document.querySelectorAll('.opblock-summary-path');
-                        pathElements.forEach(function(elem) {
-                            const path = elem.innerText;
-                            if (path && path.includes('/session/')) {
-                                const opblock = elem.closest('.opblock');
-                                if (opblock) {
-                                    const authEl = opblock.querySelector('.authorization__btn');
-                                    if (authEl) {
-                                        // Add a visual indicator for API Key auth
-                                        const indicator = document.createElement('span');
-                                        indicator.className = 'api-key-indicator';
-                                        indicator.innerText = 'API Key';
-                                        indicator.style.backgroundColor = '#28a745';
-                                        indicator.style.color = 'white';
-                                        indicator.style.padding = '2px 8px';
-                                        indicator.style.borderRadius = '4px';
-                                        indicator.style.fontSize = '10px';
-                                        indicator.style.marginLeft = '8px';
-                                        authEl.appendChild(indicator);
-                                    }
-                                }
-                            }
-                        });
-                    }, 1000);
-                }
-            """
-        }
-    )
-
-# Set up Jinja2 templates
-templates_path = pathlib.Path(__file__).parent / "templates"
-templates = Jinja2Templates(directory=str(templates_path))
-
 # Error handler for OpenAI-compatible error responses
 @app.exception_handler(Exception)
 async def openai_exception_handler(request: Request, exc: Exception):
@@ -423,18 +225,27 @@ async def cleanup_expired_sessions():
         # Run every 15 minutes
         await asyncio.sleep(15 * 60)
 
-# Application startup event
 @app.on_event("startup")
 async def startup_event():
     """
     Perform startup initialization.
     """
+    global APP_START_TIME
+    APP_START_TIME = datetime.utcnow()
+    
+    logger.info("🔄 Starting Morpheus API Gateway startup sequence...")
+    logger.info(f"📊 Configuration: MODEL_SYNC_ON_STARTUP={settings.MODEL_SYNC_ON_STARTUP}, MODEL_SYNC_ENABLED={settings.MODEL_SYNC_ENABLED}")
+    logger.info(f"🏷️ Container ID: {CONTAINER_ID}")
+    logger.info(f"📦 Version: {APP_VERSION}")
+    
     # Verify database migrations are up to date
+    logger.info("🗃️ Checking database migrations...")
     await verify_database_migrations()
     
     # Sync models on startup if enabled
+    logger.info("🤖 Initializing model synchronization...")
     if settings.MODEL_SYNC_ON_STARTUP and settings.MODEL_SYNC_ENABLED:
-        logger.info("Starting model synchronization...")
+        logger.info("📥 Starting model synchronization from active.mor.org...")
         try:
             sync_success = await model_sync_service.perform_sync()
             if sync_success:
@@ -445,89 +256,112 @@ async def startup_event():
             logger.error(f"❌ Model sync failed during startup: {e}")
             logger.warning("Continuing startup with existing models.json file")
     else:
-        logger.info("Model sync on startup is disabled")
+        logger.info("📴 Model sync on startup is disabled")
     
     # Start background model sync task if enabled
     if settings.MODEL_SYNC_ENABLED:
-        await model_sync_service.start_background_sync()
+        try:
+            await model_sync_service.start_background_sync()
+            logger.info("✅ Background model sync started successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to start background model sync: {e}")
+            logger.warning("Continuing startup without background model sync...")
     else:
         logger.info("Background model sync is disabled")
     
     # Make sure all routers use our fixed route class
-    for router in [auth, models, chat, session, automation]:
-        update_router_route_class(router, FixedDependencyAPIRoute)
-    
-    logger.info("Application startup complete. Using FixedDependencyAPIRoute for all routes.")
+    try:
+        for router in [auth, models, chat, session, automation, chat_history]:
+            update_router_route_class(router, FixedDependencyAPIRoute)
+        logger.info("✅ All routers configured with FixedDependencyAPIRoute")
+    except Exception as e:
+        logger.error(f"❌ Error configuring routers: {e}")
+        logger.warning("Continuing startup with default route classes...")
     
     # Start the background tasks
-    asyncio.create_task(cleanup_expired_sessions())
-    logger.info("Started background task for expired session cleanup")
+    try:
+        asyncio.create_task(cleanup_expired_sessions())
+        logger.info("✅ Started background task for expired session cleanup")
+    except Exception as e:
+        logger.error(f"❌ Failed to start background cleanup task: {e}")
+        logger.warning("Continuing startup without background session cleanup...")
+    
+    logger.info("🚀 Application startup complete!")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """
     Perform cleanup during application shutdown.
     """
-    logger.info("Application shutdown initiated...")
+    logger.info("🛑 Application shutdown initiated...")
     
     # Stop the background model sync task
-    await model_sync_service.stop_background_sync()
+    try:
+        await model_sync_service.stop_background_sync()
+        logger.info("✅ Background model sync stopped successfully")
+    except Exception as e:
+        logger.error(f"❌ Error stopping background model sync: {e}")
     
-    logger.info("Application shutdown complete")
+    logger.info("🏁 Application shutdown complete")
 
 async def verify_database_migrations():
     """
     Verify that database migrations are up to date.
     """
     try:
+        logger.info("Starting database migration check")
+        
         # Import what we need to check migration revisions
         from alembic.script import ScriptDirectory
         from alembic.config import Config
         from sqlalchemy import text
-        from sqlalchemy.ext.asyncio import AsyncSession
         from src.db.database import engine
         import os
         
-        # Get the expected head revision
-        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "alembic.ini")
-        config = Config(config_path)
-        script = ScriptDirectory.from_config(config)
-        head_revision = script.get_current_head()
+        # Get the alembic config
+        alembic_cfg_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "alembic.ini")
+        config = Config(alembic_cfg_path)
+        script_dir = ScriptDirectory.from_config(config)
         
-        logger.info(f"Checking database migrations (expected head: {head_revision})")
+        # Get the current head revision from the script directory
+        head_revision = script_dir.get_current_head()
+        logger.info(f"Latest migration head: {head_revision}")
         
-        # Get the current database revision
-        async with AsyncSession(engine) as session:
-            try:
-                result = await session.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'alembic_version')"))
-                table_exists = result.scalar()
+        # Connect to database and check current revision
+        async with engine.begin() as conn:
+            # Check if alembic_version table exists
+            result = await conn.execute(text(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='alembic_version')"
+            ))
+            table_exists = result.scalar()
+            
+            if not table_exists:
+                logger.warning("Alembic version table doesn't exist - database may need initialization")
+                return
+            
+            # Get current database revision
+            result = await conn.execute(text("SELECT version_num FROM alembic_version"))
+            current_revision = result.scalar()
+            
+            if current_revision is None:
+                logger.warning("No migration version found in database")
+                return
                 
-                if not table_exists:
-                    logger.error("Database not initialized: alembic_version table doesn't exist")
-                    logger.error("Please run 'alembic upgrade head' to initialize the database")
-                    return
+            logger.info(f"Current database revision: {current_revision}")
+            
+            # Compare revisions
+            if current_revision == head_revision:
+                logger.info("✅ Database migrations are up to date")
+            else:
+                logger.warning(f"⚠️ Database migration mismatch - DB: {current_revision}, Latest: {head_revision}")
+                logger.info("Database may need migration, but continuing startup...")
                 
-                result = await session.execute(text("SELECT version_num FROM alembic_version"))
-                current_revision = result.scalar_one_or_none()
-                
-                if current_revision != head_revision:
-                    logger.error(f"Database schema out of date. Current: {current_revision}, Expected: {head_revision}")
-                    logger.error("Please run 'alembic upgrade head' to update your database schema")
-                else:
-                    logger.info(f"Database schema is up to date (revision: {current_revision})")
-                    
-                # Also check if the sessions table exists
-                result = await session.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sessions')"))
-                sessions_exists = result.scalar()
-                
-                if not sessions_exists:
-                    logger.error("Sessions table doesn't exist despite migrations being up to date")
-                    logger.error("There may be an issue with your migrations - consider recreating the database")
-            except Exception as db_error:
-                logger.error(f"Error checking migration status: {db_error}")
     except Exception as e:
-        logger.error(f"Failed to verify migrations: {e}")
-        logger.error("Continuing startup, but there may be database schema issues")
+        logger.error(f"Error checking migrations: {str(e)}")
+        logger.warning("Migration check failed, but continuing startup...")
+        # Don't raise the exception to prevent startup failure
+    finally:
+        logger.info("Migration check completed")
 
 # Update router route classes
 def update_router_route_class(router: APIRouter, route_class=FixedDependencyAPIRoute):
@@ -552,6 +386,7 @@ update_router_route_class(models)
 update_router_route_class(chat)
 update_router_route_class(session)
 update_router_route_class(automation)
+update_router_route_class(chat_history)
 
 # Include routers
 app.include_router(auth, prefix=f"{settings.API_V1_STR}/auth")
@@ -559,6 +394,9 @@ app.include_router(models, prefix=f"{settings.API_V1_STR}")  # Mount at /api/v1 
 app.include_router(chat, prefix=f"{settings.API_V1_STR}/chat")
 app.include_router(session, prefix=f"{settings.API_V1_STR}/session")
 app.include_router(automation, prefix=f"{settings.API_V1_STR}/automation")
+app.include_router(chat_history, prefix=f"{settings.API_V1_STR}/chat-history")
+
+
 
 # Default routes - using standard APIRoute for these endpoints to avoid dependency resolution issues
 # Reset the route_class temporarily for these specific routes
@@ -572,7 +410,7 @@ async def root():
     """
     return {
         "name": settings.PROJECT_NAME,
-        "version": "0.1.0",
+        "version": APP_VERSION,
         "description": "OpenAI-compatible API gateway for Morpheus blockchain models",
         "documentation": {
             "swagger_ui": "/docs"
@@ -582,25 +420,706 @@ async def root():
 @app.get("/health", include_in_schema=True)
 async def health_check():
     """
-    Health check endpoint to verify API and database status.
+    Health check endpoint with container diagnostics for deployment monitoring.
+    
+    Returns system health, uptime, and unique container identifier for support and log analysis.
+    Note: No sensitive AWS or hostname information is exposed.
     """
+    current_time = datetime.utcnow()
+    
     # Check database connection
     try:
-        # Connect to the database and execute a simple query
         await check_db_connection(engine)
         db_status = "healthy"
     except Exception as e:
         db_status = f"unhealthy: {str(e)}"
     
-    return {
+    # Calculate uptime
+    uptime_seconds = None
+    uptime_human = None
+    if APP_START_TIME:
+        uptime_delta = current_time - APP_START_TIME
+        uptime_seconds = int(uptime_delta.total_seconds())
+        
+        # Human-readable uptime
+        days = uptime_delta.days
+        hours, remainder = divmod(uptime_delta.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        uptime_parts = []
+        if days > 0:
+            uptime_parts.append(f"{days}d")
+        if hours > 0:
+            uptime_parts.append(f"{hours}h")
+        if minutes > 0:
+            uptime_parts.append(f"{minutes}m")
+        if seconds > 0 or not uptime_parts:
+            uptime_parts.append(f"{seconds}s")
+        
+        uptime_human = " ".join(uptime_parts)
+    
+    # Get basic system information (non-sensitive)
+    try:
+        # Get just the kernel version without AWS-specific details
+        kernel_info = platform.release()  # e.g., "5.10.238"
+        system_info = f"Linux-{kernel_info}"
+    except:
+        system_info = "Unknown"
+    
+    response = {
         "status": "ok",
-        "timestamp": datetime.now().isoformat(),
-        "version": "0.1.0",
-        "database": db_status
+        "timestamp": current_time.isoformat(),
+        "version": APP_VERSION,
+        "database": db_status,
+        "container": {
+            "id": CONTAINER_ID,
+            "system": system_info,
+            "python_version": platform.python_version()
+        },
+        "uptime": {
+            "seconds": uptime_seconds,
+            "human_readable": uptime_human,
+            "started_at": APP_START_TIME.isoformat() if APP_START_TIME else None
+        }
     }
+    
+    return response
+
+# Custom docs endpoints using standard APIRoute
+@app.get("/docs/oauth2-redirect", include_in_schema=False)
+async def swagger_ui_oauth2_redirect(request: Request):
+    """
+    OAuth2 redirect endpoint that automatically exchanges code for token and integrates with Swagger UI.
+    """
+    import httpx
+    
+    # Extract the authorization code and state
+    code = request.query_params.get("code")
+    state = request.query_params.get("state")
+    error = request.query_params.get("error")
+    
+    if error:
+        return HTMLResponse(content=f"""
+        <!DOCTYPE html>
+        <html>
+        <head><title>OAuth2 Error</title></head>
+        <body>
+            <h1>OAuth2 Authentication Error</h1>
+            <p><strong>Error:</strong> {error}</p>
+            <p><strong>Description:</strong> {request.query_params.get("error_description", "Unknown error")}</p>
+            <p><a href="/docs">Return to API Documentation</a></p>
+        </body>
+        </html>
+        """)
+    
+    # If we have a code, exchange it for an access token
+    access_token = None
+    token_error = None
+    if code:
+        try:
+            # Exchange the authorization code for tokens
+            token_url = f"https://{settings.COGNITO_DOMAIN}/oauth2/token"
+            
+            data = {
+                "grant_type": "authorization_code",
+                "client_id": settings.COGNITO_CLIENT_ID,
+                "code": code,
+                "redirect_uri": f"{settings.BASE_URL}/docs/oauth2-redirect"
+            }
+            
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(token_url, data=data, headers=headers)
+                
+            if response.status_code == 200:
+                tokens = response.json()
+                access_token = tokens.get("access_token")
+                logger.info("Token exchange successful")
+            else:
+                error_body = response.text
+                logger.warning(f"Token exchange failed - Status: {response.status_code}")
+                logger.warning("Token exchange error response received")
+                token_error = f"HTTP {response.status_code}: {error_body}"
+                
+        except Exception as e:
+            logger.error(f"Token exchange exception: {str(e)}")
+            token_error = str(e)
+    
+    # Build the HTML with proper JavaScript variable interpolation
+    js_access_token = f'"{access_token}"' if access_token else '""'
+    js_auth_code = f'"{code}"' if code else '""'
+    js_state = f'"{state}"' if state else '""'
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en-US">
+    <head>
+        <title>OAuth2 Redirect</title>
+        <style>
+            body {{ 
+                font-family: Arial, sans-serif; 
+                padding: 40px; 
+                text-align: center;
+                background: #f8f9fa;
+            }}
+            .success {{ color: #28a745; }}
+            .spinner {{ 
+                border: 4px solid #f3f3f3; 
+                border-top: 4px solid #28a745; 
+                border-radius: 50%; 
+                width: 40px; 
+                height: 40px; 
+                animation: spin 1s linear infinite; 
+                margin: 20px auto; 
+            }}
+            @keyframes spin {{ 
+                0% {{ transform: rotate(0deg); }} 
+                100% {{ transform: rotate(360deg); }} 
+            }}
+            .token-display {{
+                background: #f8f9fa;
+                border: 2px solid #28a745;
+                border-radius: 8px;
+                padding: 15px;
+                margin: 20px auto;
+                max-width: 600px;
+                word-break: break-all;
+                font-family: monospace;
+                font-size: 12px;
+            }}
+        </style>
+    </head>
+    <body>
+        <h1 class="success">✅ Authentication Successful!</h1>
+        <div class="spinner" id="spinner"></div>
+        <p id="status">Processing OAuth2 authentication...</p>
+        
+        <script>
+            'use strict';
+            
+            const accessToken = {js_access_token};
+            const authCode = {js_auth_code};
+            const authState = {js_state};
+            
+            function run() {{
+                console.log('🔍 OAuth2 redirect processing...');
+                console.log('🔑 Access token available:', accessToken ? 'Yes' : 'No');
+                console.log('🔍 Authorization code:', authCode ? 'Present' : 'Missing');
+                console.log('🪟 Window opener:', window.opener ? 'Present' : 'Null');
+                
+                // Hide spinner
+                document.getElementById('spinner').style.display = 'none';
+                
+                // Try to handle as popup first
+                console.log('🔍 Popup detection:', {{
+                    hasOpener: !!window.opener,
+                    hasSwaggerCallback: !!(window.opener && window.opener.swaggerUIRedirectOauth2)
+                }});
+                
+                if (window.opener && window.opener.swaggerUIRedirectOauth2) {{
+                    console.log('🔄 Handling as popup window');
+                    try {{
+                        const oauth2 = window.opener.swaggerUIRedirectOauth2;
+                        
+                        // If we have an access token, pass it directly
+                        if (accessToken) {{
+                            console.log('✅ Passing access token to Swagger UI');
+                            oauth2.callback({{
+                                auth: oauth2.auth,
+                                token: {{
+                                    access_token: accessToken,
+                                    token_type: 'Bearer'
+                                }},
+                                redirectUrl: oauth2.redirectUrl
+                            }});
+                        }} else {{
+                            // Fall back to code-based flow
+                            oauth2.callback({{
+                                auth: oauth2.auth,
+                                code: authCode,
+                                state: authState,
+                                redirectUrl: oauth2.redirectUrl
+                            }});
+                        }}
+                        
+                        document.getElementById('status').innerHTML = `
+                            <div>
+                                <h2 style="color: #28a745;">✅ Authentication Complete!</h2>
+                                <p>Token has been applied to the main window.</p>
+                                <button onclick="window.close()" style="background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 6px; font-size: 16px; cursor: pointer; margin-top: 15px;">
+                                    Close Window
+                                </button>
+                                <p style="color: #6c757d; margin-top: 10px; font-size: 14px;">Window will close automatically in 3 seconds...</p>
+                            </div>
+                        `;
+                        setTimeout(() => window.close(), 3000);
+                        return;
+                    }} catch (e) {{
+                        console.error('❌ Popup callback error:', e);
+                    }}
+                }}
+                
+                // Handle as new tab OR popup - simplified approach
+                console.log('🔄 Handling authentication completion');
+                
+                if (accessToken) {{
+                    // Store token in localStorage 
+                    console.log('✅ Storing token in localStorage...');
+                    localStorage.setItem('swagger_oauth_token', accessToken);
+                    localStorage.setItem('swagger_oauth_token_timestamp', Date.now().toString());
+                    
+                    // Always show close button - no redirect, no detection needed
+                    console.log('🔄 Showing close button');
+                    document.getElementById('status').innerHTML = `
+                        <div>
+                            <h2 style="color: #28a745;">✅ Authentication Complete!</h2>
+                            <p>Token has been applied to the main window.</p>
+                            <button onclick="window.close()" style="background: #6c757d; color: white; padding: 12px 24px; border: none; border-radius: 6px; font-size: 16px; cursor: pointer; margin-top: 15px;">
+                                Close Window
+                            </button>
+                            <p style="color: #6c757d; margin-top: 10px; font-size: 14px;">Window will close automatically in 3 seconds...</p>
+                        </div>
+                    `;
+                    
+                    // Auto-close after 3 seconds using the same code as the button
+                    setTimeout(() => {{
+                        window.close();
+                    }}, 3000);
+                }} else {{
+                    // No token - show error
+                    document.getElementById('status').innerHTML = `
+                        <div>
+                            <h2 style="color: #dc3545;">❌ Token Exchange Failed</h2>
+                            <p>Authentication succeeded but automatic token exchange failed.</p>
+                            <p>Authorization code: <code>${{authCode || "None"}}</code></p>
+                            <p>Please try the manual process or contact support.</p>
+                            <p style="margin-top: 30px;">
+                                <a href="/docs" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px;">Return to API Docs</a>
+                            </p>
+                        </div>
+                    `;
+                }}
+            }}
+            
+            if (document.readyState !== 'loading') {{
+                run();
+            }} else {{
+                document.addEventListener('DOMContentLoaded', function () {{
+                    run();
+                }});
+            }}
+        </script>
+    </body>
+    </html>
+    """
+    
+    return HTMLResponse(content=html_content)
+
+# Note: Custom OAuth2 login endpoint removed - now using standard Swagger UI OAuth2 flow
+
+
+# Simple working docs endpoint (before route class restoration)  
+@app.get("/docs", include_in_schema=False)
+def custom_swagger_ui_html():
+    """
+    Custom Swagger UI docs 
+    """
+    return HTMLResponse(content=f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Morpheus API Gateway - API Documentation</title>
+        <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@4/swagger-ui.css">
+    </head>
+    <body>
+        <div id="swagger-ui"></div>
+        <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@4/swagger-ui-bundle.js"></script>
+        <script>
+            const ui = SwaggerUIBundle({{
+                url: '/api/v1/openapi.json',
+                dom_id: '#swagger-ui',
+                layout: 'BaseLayout',
+                oauth2RedirectUrl: window.location.origin + '/docs/oauth2-redirect'
+            }});
+            
+            // Make UI available globally for token application
+            window.ui = ui;
+            
+            ui.initOAuth({{
+                clientId: '{settings.COGNITO_CLIENT_ID}',
+                realm: 'oauth2',
+                appName: 'Morpheus API Gateway',
+                scopeSeparator: ' ',
+                scopes: 'openid email profile',
+                usePkceWithAuthorizationCodeGrant: false,
+                useBasicAuthenticationWithAccessCodeGrant: false,
+                additionalQueryStringParams: {{
+                    'response_type': 'code',
+                    'state': 'swagger-ui-oauth2'
+                }}
+            }});
+            
+            // Debug: Log OAuth2 configuration
+            console.log('🔍 OAuth2 redirect configured');
+            
+            // Override OAuth2 authorization to use popup instead of new tab
+            setTimeout(() => {{
+                console.log('🔍 Setting up OAuth2 popup override...');
+                
+                // Override the window.open function specifically for OAuth2 URLs
+                const originalWindowOpen = window.open;
+                window.open = function(url, target, features) {{
+                    if (url && url.includes('/oauth2/authorize')) {{
+                        console.log('🔍 OAuth2 authorization detected, opening popup instead of tab');
+                        
+                        // Set up Swagger UI OAuth2 redirect callback for popup detection
+                        window.swaggerUIRedirectOauth2 = {{
+                            auth: 'OAuth2',
+                            redirectUrl: window.location.origin + '/docs/oauth2-redirect',
+                            callback: function(data) {{
+                                console.log('✅ OAuth2 popup callback received:', data);
+                                if (data.token && data.token.access_token) {{
+                                    console.log('✅ Applying token from popup callback...');
+                                    try {{
+                                        window.ui.preauthorizeApiKey('BearerAuth', data.token.access_token);
+                                        console.log('✅ Bearer token applied successfully from popup!');
+                                    }} catch (e) {{
+                                        console.log('⚠️ Error applying token from popup:', e);
+                                    }}
+                                }}
+                            }}
+                        }};
+                        
+                        // Open popup with specific features
+                        const popup = originalWindowOpen.call(
+                            this, 
+                            url, 
+                            'oauth2_auth_popup',
+                            'width=600,height=700,scrollbars=yes,resizable=yes,status=yes,location=yes,toolbar=no,menubar=no,left=' + 
+                            Math.round((screen.width - 600) / 2) + ',top=' + Math.round((screen.height - 700) / 2)
+                        );
+                        
+                        // Store popup reference globally for direct access
+                        window.oauth2Popup = popup;
+                        
+                        // Monitor popup closure and token retrieval
+                        const checkPopup = setInterval(() => {{
+                            try {{
+                                if (popup.closed) {{
+                                    clearInterval(checkPopup);
+                                    console.log('🔍 OAuth2 popup closed, checking for tokens...');
+                                    
+                                    // Check for token in localStorage with extended monitoring for new user flows
+                                    setTimeout(() => {{
+                                        const token = localStorage.getItem('swagger_oauth_token');
+                                        if (token) {{
+                                            console.log('✅ Token found from popup, applying to Bearer Auth...');
+                                            try {{
+                                                window.ui.preauthorizeApiKey('BearerAuth', token);
+                                                console.log('✅ Bearer token applied successfully!');
+                                            }} catch (e) {{
+                                                console.log('⚠️ Error applying token:', e);
+                                            }}
+                                            localStorage.removeItem('swagger_oauth_token');
+                                            localStorage.removeItem('swagger_oauth_token_timestamp');
+                                        }} else {{
+                                            // Extended monitoring for new user registration flows
+                                            console.log('🔍 No token found immediately - starting extended monitoring for new user flows...');
+                                            let extendedChecks = 0;
+                                            const maxExtendedChecks = 10; // Check for 10 more seconds
+                                            
+                                            const extendedMonitor = setInterval(() => {{
+                                                extendedChecks++;
+                                                const delayedToken = localStorage.getItem('swagger_oauth_token');
+                                                
+                                                if (delayedToken) {{
+                                                    console.log('✅ Token found during extended monitoring!');
+                                                    clearInterval(extendedMonitor);
+                                                    
+                                                    // Use the same multi-method approach as page load
+                                                    try {{
+                                                        console.log('🔍 Attempting to authorize with delayed token...');
+                                                        
+                                                        if (window.ui) {{
+                                                            // Method 1: Use preauthorizeApiKey for BearerAuth
+                                                            try {{
+                                                                window.ui.preauthorizeApiKey('BearerAuth', delayedToken);
+                                                                console.log('✅ BearerAuth preauthorized from extended monitoring!');
+                                                            }} catch (e) {{
+                                                                console.log('⚠️ preauthorizeApiKey failed:', e);
+                                                            }}
+                                                            
+                                                            // Method 2: Try the direct authActions approach
+                                                            if (window.ui.authActions) {{
+                                                                try {{
+                                                                    window.ui.authActions.authorize({{
+                                                                        'BearerAuth': delayedToken
+                                                                    }});
+                                                                    console.log('✅ BearerAuth via authActions from extended monitoring!');
+                                                                }} catch (e) {{
+                                                                    console.log('⚠️ authActions.authorize failed:', e);
+                                                                }}
+                                                            }}
+                                                            
+                                                            // Method 3: Safari-specific handling
+                                                            if (navigator.userAgent.includes('Safari') && !navigator.userAgent.includes('Chrome')) {{
+                                                                setTimeout(() => {{
+                                                                    try {{
+                                                                        window.ui.authActions.authorize({{
+                                                                            'BearerAuth': {{
+                                                                                value: delayedToken
+                                                                            }}
+                                                                        }});
+                                                                        console.log('✅ Safari-specific auth from extended monitoring!');
+                                                                    }} catch (e) {{
+                                                                        console.log('⚠️ Safari auth failed:', e);
+                                                                    }}
+                                                                }}, 500);
+                                                            }}
+                                                        }}
+                                                    }} catch (error) {{
+                                                        console.error('❌ Error applying delayed token:', error);
+                                                    }}
+                                                    
+                                                    localStorage.removeItem('swagger_oauth_token');
+                                                    localStorage.removeItem('swagger_oauth_token_timestamp');
+                                                }} else if (extendedChecks >= maxExtendedChecks) {{
+                                                    console.log('⚠️ Extended monitoring timeout - no token found');
+                                                    clearInterval(extendedMonitor);
+                                                }}
+                                            }}, 1000);
+                                        }}
+                                    }}, 500);
+                                    return;
+                                }}
+                                
+                                // Check for successful token every second
+                                const token = localStorage.getItem('swagger_oauth_token');
+                                if (token) {{
+                                    console.log('✅ Token detected! Closing popup and applying token...');
+                                    clearInterval(checkPopup);
+                                    
+                                    // Store token for Safari handling before cleanup
+                                    const tokenForSafari = token;
+                                    
+                                    // Apply token immediately
+                                    try {{
+                                        window.ui.preauthorizeApiKey('BearerAuth', token);
+                                        console.log('✅ Bearer token applied successfully!');
+                                    }} catch (e) {{
+                                        console.log('⚠️ Error applying token:', e);
+                                    }}
+                                    
+                                    // Close popup explicitly
+                                    if (!popup.closed) {{
+                                        popup.close();
+                                        console.log('✅ Popup closed successfully');
+                                    }}
+                                    
+                                    // Clean up
+                                    localStorage.removeItem('swagger_oauth_token');
+                                    localStorage.removeItem('swagger_oauth_token_timestamp');
+                                    delete window.oauth2Popup;
+                                    
+                                    // Safari-specific: Force a UI refresh to ensure token visibility
+                                    if (navigator.userAgent.includes('Safari') && !navigator.userAgent.includes('Chrome')) {{
+                                        console.log('🍎 Safari detected - forcing UI refresh...');
+                                        setTimeout(() => {{
+                                            try {{
+                                                // Try multiple Safari-friendly approaches
+                                                if (window.ui && window.ui.authActions) {{
+                                                    window.ui.authActions.authorize({{
+                                                        'BearerAuth': {{
+                                                            value: tokenForSafari
+                                                        }}
+                                                    }});
+                                                    console.log('✅ Safari UI refresh attempted');
+                                                }}
+                                            }} catch (e) {{
+                                                console.log('⚠️ Safari refresh attempt failed:', e);
+                                            }}
+                                        }}, 500);
+                                    }}
+                                }}
+                            }} catch (e) {{
+                                // Cross-origin error - popup still open, continue monitoring
+                            }}
+                        }}, 1000);
+                        
+                        return popup;
+                    }}
+                    
+                    // For all other URLs, use original window.open
+                    return originalWindowOpen.call(this, url, target, features);
+                }};
+                
+                console.log('✅ OAuth2 popup override installed');
+            }}, 2000); // Wait for Swagger UI to fully initialize
+            
+            // Check for OAuth token in localStorage (from new tab flow)
+            setTimeout(() => {{
+                console.log('🔍 Checking for stored OAuth token...');
+                const storedToken = localStorage.getItem('swagger_oauth_token');
+                const tokenTimestamp = localStorage.getItem('swagger_oauth_token_timestamp');
+                
+                // Check token availability (reduced logging for production)
+                console.log('🔍 Checking OAuth token status...');
+                
+                if (storedToken && tokenTimestamp) {{
+                    const tokenAge = Date.now() - parseInt(tokenTimestamp);
+                    const maxAge = 5 * 60 * 1000; // 5 minutes
+                    
+                    if (tokenAge < maxAge) {{
+                        console.log('✅ Found stored OAuth token, applying automatically...');
+                        
+                        // Apply OAuth2 token to Swagger UI
+                        try {{
+                            console.log('🔍 Attempting to authorize with stored token...');
+                            
+                            if (window.ui) {{
+                                // Method 1: Use preauthorizeApiKey for BearerAuth (this usually works)
+                                try {{
+                                    window.ui.preauthorizeApiKey('BearerAuth', storedToken);
+                                    console.log('✅ BearerAuth preauthorized!');
+                                }} catch (e) {{
+                                    console.log('⚠️ preauthorizeApiKey failed:', e);
+                                }}
+                                
+                                // Method 2: Try the direct authActions approach
+                                if (window.ui.authActions) {{
+                                    try {{
+                                        window.ui.authActions.authorize({{
+                                            'BearerAuth': storedToken
+                                        }});
+                                        console.log('✅ BearerAuth via authActions!');
+                                    }} catch (e) {{
+                                        console.log('⚠️ authActions.authorize failed:', e);
+                                    }}
+                                }}
+                                
+                                // Method 3: Try to set OAuth2 authorization
+                                if (window.ui.authActions) {{
+                                    try {{
+                                        window.ui.authActions.authorize({{
+                                            'OAuth2': {{
+                                                token: {{
+                                                    access_token: storedToken,
+                                                    token_type: 'Bearer'
+                                                }}
+                                            }}
+                                        }});
+                                        console.log('✅ OAuth2 via authActions!');
+                                    }} catch (e) {{
+                                        console.log('⚠️ OAuth2 authActions failed:', e);
+                                    }}
+                                }}
+                                
+                                // Method 4: Direct state manipulation (last resort)
+                                setTimeout(() => {{
+                                    try {{
+                                        const state = window.ui.getState();
+                                        console.log('🔍 Current auth state:', state.getIn(['auth', 'authorized']));
+                                        
+                                        // Force update the auth state
+                                        window.ui.authActions.authorizeWithPersistOption({{
+                                            'BearerAuth': {{
+                                                value: storedToken
+                                            }}
+                                        }});
+                                        console.log('✅ State manipulation attempted!');
+                                    }} catch (e) {{
+                                        console.log('⚠️ State manipulation failed:', e);
+                                    }}
+                                }}, 1000);
+                                
+                            }} else {{
+                                console.error('❌ Swagger UI not available');
+                                alert('Authentication successful! Token: ' + storedToken.substring(0, 50) + '... Please manually paste in Bearer Auth field.');
+                            }}
+                        }} catch (error) {{
+                            console.error('❌ Error applying token:', error);
+                            alert('Authentication successful! Token: ' + storedToken.substring(0, 50) + '... Please manually paste in Bearer Auth field.');
+                        }}
+                        
+                        // Clean up localStorage
+                        localStorage.removeItem('swagger_oauth_token');
+                        localStorage.removeItem('swagger_oauth_token_timestamp');
+                    }} else {{
+                        console.log('⚠️ Stored token expired, removing...');
+                        localStorage.removeItem('swagger_oauth_token');
+                        localStorage.removeItem('swagger_oauth_token_timestamp');
+                    }}
+                }}
+            }}, 1000); // Wait for Swagger UI to fully initialize
+        </script>
+    </body>
+    </html>
+    """)
+
+@app.get("/exchange-token", include_in_schema=False)
+async def exchange_oauth_token(request: Request, code: str, state: str = None):
+    """
+    Exchange OAuth2 authorization code for access token
+    """
+    import httpx
+    
+    try:
+        # Exchange the authorization code for tokens
+        token_url = f"https://{settings.COGNITO_DOMAIN}/oauth2/token"
+        
+        data = {
+            "grant_type": "authorization_code",
+            "client_id": settings.COGNITO_CLIENT_ID,
+            "code": code,
+            "redirect_uri": f"{settings.BASE_URL}/docs/oauth2-redirect"
+        }
+        
+        # Add PKCE code_verifier if provided
+        code_verifier = request.query_params.get("code_verifier")
+        if code_verifier:
+            data["code_verifier"] = code_verifier
+        
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(token_url, data=data, headers=headers)
+            
+        if response.status_code == 200:
+            tokens = response.json()
+            return {
+                "success": True,
+                "access_token": tokens.get("access_token"),
+                "token_type": tokens.get("token_type"),
+                "expires_in": tokens.get("expires_in"),
+                "id_token": tokens.get("id_token"),
+                "message": "✅ Use the 'access_token' as your Bearer token in Swagger UI!"
+            }
+        else:
+            return {
+                "success": False,
+                "error": response.text,
+                "status_code": response.status_code
+            }
+            
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+# OAuth helper endpoint removed for security - no longer exposing client_id in helper tools
+
+# Debug endpoint removed for security - no longer exposing sensitive OAuth configuration
 
 # Restore the original route class for subsequent routes
 app.router.route_class = original_route_class
+
+# Note: Routes defined after route class restoration don't work properly
 
 # Check database connection (async)
 async def check_db_connection(engine: AsyncEngine):
@@ -624,6 +1143,9 @@ def custom_openapi():
         routes=app.routes,
     )
     
+    # Ensure OpenAPI version is set
+    openapi_schema["openapi"] = "3.0.2"
+    
     # Ensure servers are included in the schema
     openapi_schema["servers"] = app.servers
 
@@ -631,109 +1153,67 @@ def custom_openapi():
     if "components" not in openapi_schema:
         openapi_schema["components"] = {}
     
-    if "securitySchemes" not in openapi_schema["components"]:
-        openapi_schema["components"]["securitySchemes"] = {}
+    # Note: Component schemas are automatically generated by FastAPI
     
-    # Add clear documentation for the Bearer token
-    openapi_schema["components"]["securitySchemes"]["BearerAuth"] = {
-        "type": "http",
-        "scheme": "bearer",
-        "bearerFormat": "JWT",
-        "description": "Enter the JWT token you received from the login endpoint (without 'Bearer' prefix)"
-    }
-
-    # Add clear documentation for API Key auth
-    openapi_schema["components"]["securitySchemes"]["APIKeyAuth"] = {
-        "type": "apiKey",
-        "in": "header",
-        "name": "Authorization",
-        "description": "Provide the API key in either format: 'Bearer sk-xxxxxx.yyyyyyy' or just 'sk-xxxxxx.yyyyyyy'. The prefix is 9 characters long including 'sk-'."
+    # Add OAuth2 security scheme for standard Swagger UI authorization
+    openapi_schema["components"]["securitySchemes"] = {
+        "OAuth2": {
+            "type": "oauth2",
+            "flows": {
+                "authorizationCode": {
+                    "authorizationUrl": f"https://{settings.COGNITO_DOMAIN}/oauth2/authorize",
+                    "tokenUrl": f"https://{settings.COGNITO_DOMAIN}/oauth2/token",
+                    "scopes": {
+                        "openid": "OpenID Connect authentication",
+                        "email": "Access to email address", 
+                        "profile": "Access to profile information"
+                    }
+                }
+            },
+            "description": "🚀 OAuth2 authentication via secure identity provider"
+        },
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+            "description": "🎫 JWT Bearer token from OAuth2 login or direct token"
+        },
+        "APIKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "Authorization",
+            "description": "🗝️ API key in format: 'Bearer sk-xxxxxx'"
+        }
     }
     
-    # Update security for specific paths and completely remove args and kwargs parameters
+    # Apply security to all API endpoints (except excluded ones)
     for path_key, path_item in openapi_schema["paths"].items():
-        # Process each operation (GET, POST, etc.)
+        # Skip certain endpoints that should remain unauthenticated
+        if path_key in ["/", "/health", "/docs", "/api-docs"] or path_key.startswith("/docs/"):
+            continue
+            
+        # Apply all authentication methods to API endpoints
         for method, operation in path_item.items():
-            # Remove args and kwargs parameters from all routes
-            if "parameters" in operation:
-                # Remove args and kwargs parameters entirely
-                operation["parameters"] = [
-                    param for param in operation["parameters"]
-                    if param.get("name") not in ["args", "kwargs"]
+            if method in ["get", "post", "put", "delete", "patch"]:
+                operation["security"] = [
+                    {"OAuth2": ["openid", "email", "profile"]},
+                    {"BearerAuth": []},
+                    {"APIKeyAuth": []}
                 ]
-                
-                # If no parameters are left, remove the empty parameters list
-                if not operation["parameters"]:
-                    del operation["parameters"]
-            
-            # IMPORTANT: Check if there are required properties in the schema and remove args and kwargs
-            if "requestBody" in operation and "content" in operation["requestBody"]:
-                for content_type, content_schema in operation["requestBody"]["content"].items():
-                    if "schema" in content_schema and "properties" in content_schema["schema"]:
-                        # Remove args and kwargs from properties
-                        if "args" in content_schema["schema"]["properties"]:
-                            del content_schema["schema"]["properties"]["args"]
-                        if "kwargs" in content_schema["schema"]["properties"]:
-                            del content_schema["schema"]["properties"]["kwargs"]
-                        
-                        # Remove args and kwargs from required list
-                        if "required" in content_schema["schema"]:
-                            content_schema["schema"]["required"] = [
-                                prop for prop in content_schema["schema"]["required"] 
-                                if prop not in ["args", "kwargs"]
-                            ]
-        
-            # Add example for chat completions endpoint
-            if path_key == "/api/v1/chat/completions" and method == "post" and "requestBody" in operation:
-                for content_type in operation["requestBody"]["content"]:
-                    operation["requestBody"]["content"][content_type]["example"] = {
-                        "model": "default",
-                        "messages": [
-                            {"role": "system", "content": "You are a helpful assistant."},
-                            {"role": "user", "content": "Hello, how are you?"}
-                        ],
-                        "temperature": 0.7,
-                        "stream": True
-                    }
-                    
-                    # Add description about session_id
-                    if "schema" in operation["requestBody"]["content"][content_type]:
-                        schema = operation["requestBody"]["content"][content_type]["schema"]
-                        description = schema.get("description", "")
-                        schema["description"] = description + "\n\nNote: You can optionally include 'session_id' if you want to use a specific session."
-            
-            # Add example for automation settings endpoint
-            if path_key == "/api/v1/automation/settings" and method == "put" and "requestBody" in operation:
-                for content_type in operation["requestBody"]["content"]:
-                    operation["requestBody"]["content"][content_type]["example"] = {
-                        "is_enabled": True,
-                        "session_duration": 3600
-                    }
-                    
-                    # Add description about session_duration
-                    if "schema" in operation["requestBody"]["content"][content_type]:
-                        schema = operation["requestBody"]["content"][content_type]["schema"]
-                        description = schema.get("description", "")
-                        schema["description"] = description + "\n\nNote: session_duration is in seconds. Default is 3600 (1 hour). Min: 60, Max: 86400 (24 hours)."
-        
-            # Determine which security scheme to apply based on the endpoint
-            if path_key.startswith("/api/v1/auth/login") or path_key.startswith("/api/v1/auth/register"):
-                # No security for login/register endpoints
-                pass
-            elif path_key.startswith("/api/v1/session/") or path_key == "/api/v1/chat/completions":
-                # Apply API Key authentication to session endpoints and chat completions
-                for method in path_item:
-                    path_item[method]["security"] = [{"APIKeyAuth": []}]
-            else:
-                # Apply JWT Bearer authentication to all other endpoints
-                for method in path_item:
-                    path_item[method]["security"] = [{"BearerAuth": []}]
 
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
 # Set custom OpenAPI schema generator
-app.openapi = custom_openapi 
+app.openapi = custom_openapi
+
+# Create custom OpenAPI endpoint to ensure our OAuth2 schema is used
+@app.get(f"{settings.API_V1_STR}/openapi.json", include_in_schema=False)
+async def get_custom_openapi():
+    """
+    Custom OpenAPI endpoint that ensures our OAuth2 security scheme is included
+    """
+    return custom_openapi() 
 
 # API Documentation landing page
 @app.get("/api-docs", include_in_schema=False)
@@ -741,15 +1221,52 @@ async def api_docs_landing(request: Request):
     """
     Landing page for API docs
     """
-    return templates.TemplateResponse(
-        "api_docs_landing.html",
-        {
-            "request": request,
-            "title": app.title,
-            "year": datetime.now().year
-        }
-    )
-
-# The test-private-key endpoint has been removed
-
-# The set-private-key endpoint has been removed 
+    return HTMLResponse(content=f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>{app.title} - Documentation</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }}
+            .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+            h1 {{ color: #333; margin-bottom: 20px; }}
+            .api-link {{ display: inline-block; background: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; margin: 10px 10px 10px 0; }}
+            .api-link:hover {{ background: #0056b3; }}
+            .description {{ margin: 20px 0; line-height: 1.6; color: #666; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🚀 {app.title}</h1>
+            <p class="description">
+                Welcome to the Morpheus API Gateway documentation. 
+                Choose your preferred documentation format below:
+            </p>
+            
+            <a href="/docs" class="api-link">📋 Interactive API Docs (Swagger UI)</a>
+            <a href="/redoc" class="api-link">📖 API Documentation (ReDoc)</a>
+            
+            <div class="description">
+                <h3>🔐 Authentication Methods</h3>
+                <ul>
+                    <li><strong>OAuth2:</strong> Login with your account credentials for the easiest experience</li>
+                    <li><strong>JWT Bearer Token:</strong> Use access tokens from successful OAuth2 logins</li>
+                    <li><strong>API Keys:</strong> Programmatic access using generated API keys</li>
+                </ul>
+                
+                <h3>📚 Key Features</h3>
+                <ul>
+                    <li>OpenAI-compatible chat completions endpoint</li>
+                    <li>Model discovery and management</li>
+                    <li>Session management for blockchain interactions</li>
+                    <li>Comprehensive authentication and authorization</li>
+                </ul>
+                
+                <p style="margin-top: 30px; font-size: 12px; color: #999;">
+                    © {datetime.now().year} Morpheus API Gateway
+                </p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """) 

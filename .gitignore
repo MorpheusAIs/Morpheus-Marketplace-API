@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+*.internal.*
 
 # Morpheus specific
 Morpheus-Lumerin-Node/

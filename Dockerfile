@@ -1,5 +1,5 @@
 # Stage 1: Build stage
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
@@ -12,18 +12,28 @@ COPY pyproject.toml poetry.lock* ./
 
 # Install dependencies
 # --no-root: Don't install the project itself yet
-# --no-dev: Exclude development dependencies
+# --only main: Exclude development dependencies (replaces deprecated --no-dev)
 RUN poetry config virtualenvs.create false && \
-    poetry install --no-root --no-dev --no-interaction --no-ansi
+    # Check if lock file is out of sync and regenerate if needed \
+    (poetry check --lock || poetry lock) && \
+    poetry install --no-root --only main --no-interaction --no-ansi
 
 # Stage 2: Final stage
 FROM python:3.11-slim
 
 WORKDIR /app
 
+# Build arguments for version information
+ARG BUILD_VERSION="0.0.0-dev"
+ARG BUILD_COMMIT="unknown"
+ARG BUILD_TIME=""
+
 # Set environment variables
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV BUILD_VERSION=${BUILD_VERSION}
+ENV BUILD_COMMIT=${BUILD_COMMIT}
+ENV BUILD_TIME=${BUILD_TIME}
 
 # Create a non-root user
 RUN addgroup --system app && adduser --system --group app
@@ -37,8 +47,9 @@ COPY ./src ./src
 COPY ./alembic ./alembic
 COPY alembic.ini .
 
-# Create logs directory before changing ownership
-RUN mkdir /app/logs
+# Create logs directory and initial models.json before changing ownership
+RUN mkdir /app/logs && \
+    echo '{"models": []}' > /app/models.json
 
 # Change ownership to non-root user
 RUN chown -R app:app /app

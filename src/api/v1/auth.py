@@ -2,136 +2,81 @@
 from typing import List, Any, Optional
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, status, Depends, Body, Request, Response
+from fastapi import APIRouter, HTTPException, status, Depends, Body, Request, Response, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.security import create_access_token, create_refresh_token
 from src.crud import user as user_crud
 from src.crud import api_key as api_key_crud
 from src.crud import private_key as private_key_crud
 from src.crud import delegation as delegation_crud
 from src.crud import session as session_crud
 from src.db.database import get_db
-from src.schemas.user import UserCreate, UserResponse, UserLogin, UserDeletionResponse
-from src.schemas.token import Token, TokenRefresh, TokenPayload
+from src.schemas.user import UserDeletionResponse
 from src.schemas.api_key import APIKeyCreate, APIKeyResponse, APIKeyDB
 from src.schemas import private_key as private_key_schemas
 from src.schemas import delegation as delegation_schemas
 from src.dependencies import CurrentUser
 from src.db.models import User
 from src.core.config import settings
+from src.services.cognito_service import cognito_service
 
 router = APIRouter(tags=["Auth"])
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def register_user(
-    user_in: UserCreate,
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Register a new user.
-    """
-    # Check if user already exists
-    existing_user = await user_crud.get_user_by_email(db, user_in.email)
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User with this email already exists"
-        )
-    
-    # Create user
-    user = await user_crud.create_user(db, user_in)
-    
-    return user
+# Note: Authentication is now handled by Cognito
+# Users authenticate via Cognito OAuth2 flow and receive JWT tokens
+# The frontend should redirect to Cognito for login/registration
 
-@router.post("/login", response_model=Token)
-async def login(
-    user_in: UserLogin,
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Log in a user and return JWT tokens.
-    
-    Simply provide your email and password directly in the request body:
-    
-    ```json
-    {
-        "email": "user@example.com",
-        "password": "yourpassword"
-    }
-    ```
-    
-    The response will contain an access_token that should be used in the Authorization header
-    for protected endpoints, with the format: `Bearer {access_token}`
-    """
-    # Authenticate user
-    user = await user_crud.authenticate_user(db, user_in.email, user_in.password)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    # Create tokens
-    access_token = create_access_token(user.id)
-    refresh_token = create_refresh_token(user.id)
-    
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer"
-    }
+# OAuth2 callback is handled by the /docs/oauth2-redirect endpoint
 
-@router.post("/refresh", response_model=Token)
-async def refresh_token(
-    refresh_token_in: TokenRefresh,
-    db: AsyncSession = Depends(get_db)
+@router.get("/me", response_model=dict)
+async def get_current_user_info(
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+    refresh_from_cognito: bool = Query(False, description="Fetch fresh user data from Cognito")
 ):
     """
-    Get a new access token using a refresh token.
-    """
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    Get current user information.
     
-    try:
-        # Decode the refresh token
-        from jose import jwt, JWTError
-        
-        payload = jwt.decode(
-            refresh_token_in.refresh_token, 
-            settings.JWT_SECRET_KEY, 
-            algorithms=[settings.JWT_ALGORITHM]
-        )
-        
-        # Extract user ID and token type
-        user_id = payload.get("sub")
-        token_type = payload.get("type")
-        
-        # Check token type and user ID
-        if token_type != "refresh" or not user_id:
-            raise credentials_exception
-            
-        # Get user from database
-        user = await user_crud.get_user_by_id(db, int(user_id))
-        if not user or not user.is_active:
-            raise credentials_exception
-            
-        # Create new tokens
-        access_token = create_access_token(user.id)
-        refresh_token = create_refresh_token(user.id)
-        
-        return {
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "token_type": "bearer"
-        }
-        
-    except JWTError:
-        raise credentials_exception
+    Requires JWT Bearer authentication with Cognito token.
+    
+    Args:
+        refresh_from_cognito: If True, fetches fresh user data from Cognito and updates the database
+    """
+    user = current_user
+    
+    # If refresh_from_cognito is requested, try to get fresh data from Cognito
+    if refresh_from_cognito:
+        try:
+            updated_user = await user_crud.update_user_from_cognito(
+                db, db_user=user, cognito_service=cognito_service
+            )
+            if updated_user:
+                user = updated_user
+                data_source = "cognito_refreshed"
+            else:
+                data_source = "database_cached"
+        except Exception as e:
+            data_source = "database_cached"
+    else:
+        data_source = "database_cached"
+    
+    # Return user data focusing on email and cognito_id
+    response_data = {
+        "id": user.id,
+        "cognito_user_id": user.cognito_user_id,
+        "email": user.email,
+        "name": user.name,
+        "is_active": user.is_active,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at,
+        "data_source": data_source
+    }
+    
+    # Simple indicator if email is still a placeholder
+    if user.email == user.cognito_user_id:
+        response_data["note"] = "Email not yet available from Cognito - try refresh_from_cognito=true"
+    
+    return response_data
 
 @router.post("/keys", response_model=APIKeyResponse)
 async def create_api_key(
@@ -344,10 +289,12 @@ async def delete_user_account(
     4. Delete automation settings (via cascade)
     5. Delete delegation data (via cascade)
     6. Delete the user account
+    7. Delete/deactivate the Cognito identity
     
     Requires JWT Bearer authentication.
     """
     user_id = current_user.id
+    cognito_user_id = current_user.cognito_user_id
     
     try:
         # 1. Delete all sessions first (to avoid foreign key constraint violations)
@@ -365,6 +312,9 @@ async def delete_user_account(
                 detail="User not found"
             )
         
+        # 4. Delete the user from Cognito User Pool
+        cognito_deletion_result = await cognito_service.delete_user(cognito_user_id)
+        
         # Prepare response data
         deleted_data = {
             "sessions": sessions_deleted,
@@ -378,9 +328,16 @@ async def delete_user_account(
         deleted_at_with_tz = datetime.now(timezone.utc)
         deleted_at = deleted_at_with_tz.replace(tzinfo=None)
         
+        # Determine overall success message
+        if cognito_deletion_result["success"]:
+            message = "User account successfully deleted from both database and Cognito"
+        else:
+            message = "User account deleted from database, but Cognito deletion failed"
+        
         return UserDeletionResponse(
-            message="User account successfully deleted",
+            message=message,
             deleted_data=deleted_data,
+            cognito_deletion=cognito_deletion_result,
             user_id=user_id,
             deleted_at=deleted_at
         )
@@ -389,8 +346,10 @@ async def delete_user_account(
         # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        # Log the error (in production, use proper logging)
-        print(f"Error deleting user account {user_id}: {str(e)}")
+        # Log the error properly
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error deleting user account {user_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete user account"

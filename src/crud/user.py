@@ -3,7 +3,6 @@ from typing import Optional, List, Union
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.security import get_password_hash, verify_password
 from src.db.models import User
 from src.schemas.user import UserCreate, UserUpdate
 
@@ -21,6 +20,20 @@ async def get_user_by_id(db: AsyncSession, user_id: int) -> Optional[User]:
     result = await db.execute(select(User).where(User.id == user_id))
     return result.scalars().first()
 
+async def get_user_by_cognito_id(db: AsyncSession, cognito_user_id: str) -> Optional[User]:
+    """
+    Get a user by Cognito user ID.
+    
+    Args:
+        db: Database session
+        cognito_user_id: Cognito user ID (sub claim)
+        
+    Returns:
+        User object if found, None otherwise
+    """
+    result = await db.execute(select(User).where(User.cognito_user_id == cognito_user_id))
+    return result.scalars().first()
+
 async def get_user_by_email(db: AsyncSession, email: str) -> Optional[User]:
     """
     Get a user by email.
@@ -35,26 +48,23 @@ async def get_user_by_email(db: AsyncSession, email: str) -> Optional[User]:
     result = await db.execute(select(User).where(User.email == email))
     return result.scalars().first()
 
-async def create_user(db: AsyncSession, user_in: UserCreate) -> User:
+async def create_user_from_cognito(db: AsyncSession, user_data: dict) -> User:
     """
-    Create a new user.
+    Create a new user from Cognito authentication data.
     
     Args:
         db: Database session
-        user_in: User creation data
+        user_data: User data from Cognito token
         
     Returns:
         Created user object
     """
-    # Hash the password
-    hashed_password = get_password_hash(user_in.password)
-    
     # Create user object
     db_user = User(
-        email=user_in.email,
-        name=user_in.name,
-        hashed_password=hashed_password,
-        is_active=True
+        cognito_user_id=user_data['cognito_user_id'],
+        email=user_data['email'],
+        name=user_data.get('name'),
+        is_active=user_data.get('is_active', True)
     )
     
     # Add to database
@@ -81,13 +91,9 @@ async def update_user(
     # Convert to dict if not already
     update_data = user_in if isinstance(user_in, dict) else user_in.model_dump(exclude_unset=True)
     
-    # Hash the password if provided
-    if "password" in update_data and update_data["password"]:
-        update_data["hashed_password"] = get_password_hash(update_data.pop("password"))
-    
-    # Update user fields
+    # Update user fields (exclude cognito_user_id and id which shouldn't be updated)
     for field, value in update_data.items():
-        if hasattr(db_user, field) and field != "id":
+        if hasattr(db_user, field) and field not in ["id", "cognito_user_id"]:
             setattr(db_user, field, value)
     
     # Commit changes
@@ -95,31 +101,6 @@ async def update_user(
     await db.refresh(db_user)
     
     return db_user
-
-async def authenticate_user(db: AsyncSession, email: str, password: str) -> Optional[User]:
-    """
-    Authenticate a user by email and password.
-    
-    Args:
-        db: Database session
-        email: User email
-        password: User password
-        
-    Returns:
-        User object if authenticated, None otherwise
-    """
-    # Get user by email
-    user = await get_user_by_email(db, email)
-    
-    # Return None if user not found or inactive
-    if not user or not user.is_active:
-        return None
-    
-    # Verify password
-    if not verify_password(password, user.hashed_password):
-        return None
-    
-    return user
 
 async def get_all_users(db: AsyncSession, skip: int = 0, limit: int = 100) -> List[User]:
     """
@@ -158,4 +139,49 @@ async def delete_user(db: AsyncSession, user_id: int) -> Optional[User]:
     await db.delete(user)
     await db.commit()
     
-    return user 
+    return user
+
+async def update_user_from_cognito(
+    db: AsyncSession, *, db_user: User, cognito_service
+) -> Optional[User]:
+    """
+    Update user data by fetching fresh information from Cognito.
+    
+    Args:
+        db: Database session
+        db_user: User object to update
+        cognito_service: Cognito service instance
+        
+    Returns:
+        Updated user object or None if Cognito fetch fails
+    """
+    try:
+        # Fetch user info from Cognito
+        cognito_info = await cognito_service.get_user_info(db_user.cognito_user_id)
+        
+        if not cognito_info:
+            return None
+        
+        # Extract attributes from Cognito response
+        attributes = cognito_info.get('attributes', {})
+        email = attributes.get('email')
+        
+        # Prepare update data
+        update_data = {}
+        
+        # Update email if we have a real email from Cognito
+        if email and email != db_user.cognito_user_id:
+            update_data['email'] = email
+            update_data['name'] = email  # Use email as name since no name fields are collected
+        
+        # Apply updates if we have any
+        if update_data:
+            return await update_user(db, db_user=db_user, user_in=update_data)
+        
+        return db_user
+        
+    except Exception as e:
+        # Log error but don't fail - return the original user
+        import logging
+        logging.error(f"❌ Failed to update user from Cognito: {str(e)}")
+        return db_user 
