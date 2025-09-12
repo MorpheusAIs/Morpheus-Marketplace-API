@@ -125,7 +125,8 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/cicd/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev')) ||
+        # <CHANGEME>(github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/cicd/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev')) ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev')) ||
         (github.event_name == 'workflow_dispatch') 
       )
     runs-on: ubuntu-latest
@@ -254,8 +255,17 @@ jobs:
             echo "🚀 Building for feature/development branch"
           fi
           
+          # Use single platform for test builds and feature branches, multi-platform for main
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == feat/* ]] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
+            PLATFORMS="linux/amd64"
+            echo "🚀 Building single platform (amd64) for faster deployment"
+          else
+            PLATFORMS="linux/amd64,linux/arm64"
+            echo "🚀 Building multi-platform for production release"
+          fi
+          
           docker buildx build \
-            --platform linux/amd64 \
+            --platform $PLATFORMS \
             --build-arg BUILDTAG=$BUILDTAG \
             --build-arg COMMIT=$BUILDCOMMIT \
             --cache-from type=gha \
@@ -265,6 +275,16 @@ jobs:
             -t $BUILDIMAGE:$ENV_TAG \
             . || (echo "❌ Failed to push image with tag: $BUILDIMAGE:$BUILDTAG" && exit 1)
           echo "✅ API Build and Push of $BUILDIMAGE:$BUILDTAG Successful!"
+
+      - name: Optionally Push Latest Tag
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          BUILDIMAGE=${{ needs.Generate-Tag.outputs.image_name }}
+          BUILDTAG=${{ needs.Generate-Tag.outputs.tag_name }}
+          docker pull $BUILDIMAGE:$BUILDTAG || (echo "❌ Failed to pull image: $BUILDIMAGE:$BUILDTAG" && exit 1)
+          docker tag $BUILDIMAGE:$BUILDTAG $BUILDIMAGE:latest || (echo "❌ Failed to tag image as :latest" && exit 1)
+          docker push $BUILDIMAGE:latest || (echo "❌ Failed to push image as :latest" && exit 1)
+          echo "✅ API Push $BUILDIMAGE:latest Tag Successful!"
 
   Deploy-to-ECS:
     name: Deploy to AWS ECS

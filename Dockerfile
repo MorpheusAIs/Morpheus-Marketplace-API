@@ -12,9 +12,11 @@ COPY pyproject.toml poetry.lock* ./
 
 # Install dependencies
 # --no-root: Don't install the project itself yet
-# --no-dev: Exclude development dependencies
+# --only main: Exclude development dependencies (replaces deprecated --no-dev)
 RUN poetry config virtualenvs.create false && \
-    poetry install --no-root --no-dev --no-interaction --no-ansi
+    # Check if lock file is out of sync and regenerate if needed \
+    (poetry check --lock || poetry lock) && \
+    poetry install --no-root --only main --no-interaction --no-ansi
 
 # Stage 2: Final stage
 FROM python:3.11-slim
