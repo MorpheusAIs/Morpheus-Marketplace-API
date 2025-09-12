@@ -10,7 +10,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.main import app
-from src.db.models import User, APIKey, UserAutomationSettings, UserSession
+from src.db.models import User, APIKey, UserAutomationSettings, Session
 from src.crud import automation as automation_crud
 from src.dependencies import get_api_key_user, get_db
 from src.api.v1.chat import ChatCompletionRequest, ChatMessage
@@ -56,7 +56,7 @@ def mock_automation_settings():
 @pytest.fixture
 def mock_session():
     """Create a mock session for testing."""
-    session = MagicMock(spec=UserSession)
+    session = MagicMock(spec=Session)
     session.id = 1
     session.api_key_id = 1
     session.session_id = "test-session-id"
