@@ -58,7 +58,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/cicd/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev')) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/cicd/'))) ||
         (github.event_name == 'workflow_dispatch') 
       )
     outputs:
@@ -125,7 +125,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/cicd/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev')) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/cicd/'))) ||
         (github.event_name == 'workflow_dispatch') 
       )
     runs-on: ubuntu-latest
@@ -218,8 +218,8 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/cicd/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
-        (github.event_name == 'workflow_dispatch' && github.event.inputs.create_deployment == 'true') 
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || startsWith(github.ref, 'refs/heads/cicd/'))) ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.create_deployment == 'true')
       )
     needs:
       - Generate-Tag
@@ -261,7 +261,7 @@ jobs:
           fi
           
           # Use single platform for test builds and feature branches, multi-platform for main
-          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == feat/* ]] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
+          if [ "${{ github.ref_name }}" == "test" ]; then
             PLATFORMS="linux/amd64"
             echo "🚀 Building single platform (amd64) for faster deployment"
           else
@@ -297,7 +297,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/cicd/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
         (github.event_name == 'workflow_dispatch' && github.event.inputs.create_deployment == 'true')
       )
     needs:
@@ -346,7 +346,7 @@ jobs:
           BUILDTAG=${{ needs.Generate-Tag.outputs.tag_name }}
           
           # Determine environment and database
-          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
+          if [ "${{ github.ref_name }}" == "test" ]; then
             ENV="dev"
             DB_HOST="db.dev.mor.org"
           elif [ "${{ github.ref_name }}" == "main" ]; then
@@ -434,7 +434,7 @@ jobs:
           BUILDIMAGE=${{ needs.Generate-Tag.outputs.image_name }}
           
           # Determine environment based on branch
-          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
+          if [ "${{ github.ref_name }}" == "test" ]; then
             ENV="dev"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
@@ -550,7 +550,7 @@ jobs:
       - name: Wait for ECS Service Stabilization
         run: |
           # Determine environment
-          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
+          if [ "${{ github.ref_name }}" == "test" ]; then
             ENV="dev"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
@@ -617,7 +617,7 @@ jobs:
           BUILDTAG=${{ needs.Generate-Tag.outputs.tag_name }}
           
           # Determine environment and health endpoint
-          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
+          if [ "${{ github.ref_name }}" == "test" ]; then
             HEALTH_ENDPOINT="https://api.dev.mor.org/health"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             HEALTH_ENDPOINT="https://api.mor.org/health"
@@ -711,7 +711,7 @@ jobs:
           fi
           
           # Determine environment and database
-          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
+          if [ "${{ github.ref_name }}" == "test" ]; then
             ENV="dev"
             DB_HOST="db.dev.mor.org"
           elif [ "${{ github.ref_name }}" == "main" ]; then
@@ -793,13 +793,11 @@ jobs:
           fi
 
   Create-Release:
-    name: Create GitHub Release
+    name: Create Git Tags
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
-      (
-        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-        (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
-      )
+      github.event_name == 'push' && 
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')
     needs:
       - Generate-Tag
       - Deploy-to-ECS
@@ -811,29 +809,67 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Create release
-        id: create_release
-        uses: anzz1/action-create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create Git Tag
+        uses: actions/github-script@v7
         with:
-          tag_name: ${{ needs.Generate-Tag.outputs.tag_name }}
-          release_name: "Morpheus Marketplace API ${{ needs.Generate-Tag.outputs.tag_name }}"
-          body: |
-            ## Morpheus Marketplace API Release ${{ needs.Generate-Tag.outputs.tag_name }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const tag = '${{ needs.Generate-Tag.outputs.tag_name }}';
+            const sha = '${{ github.sha }}';
+            const branch = '${{ github.ref_name }}';
+            const isMain = branch === 'main';
+            const isTest = branch === 'test';
             
-            ### 🚀 Deployment Information
-            - **Container Image:** `${{ needs.Generate-Tag.outputs.image_name }}:${{ needs.Generate-Tag.outputs.tag_name }}`
-            - **Environment:** Production (api.mor.org)
-            - **Build Commit:** ${{ github.sha }}
-            
-            ### 📋 What's Included
-            - FastAPI application with latest features and bug fixes
-            - Database schema updates (if any)
-            - Container optimizations and security updates
-            
-            ### 🔗 Links
-            - **API Documentation:** https://api.mor.org/docs
-            - **Health Check:** https://api.mor.org/health
-            - **Container Registry:** https://github.com/MorpheusAIs/Morpheus-Marketplace-API/pkgs/container/morpheus-marketplace-api
-          prerelease: false
+            try {
+              // Check if tag already exists
+              try {
+                await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${tag}`
+                });
+                console.log(`⚠️ Tag ${tag} already exists, skipping creation`);
+                return;
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                // Tag doesn't exist, proceed to create it
+              }
+              
+              // Create the tag
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `refs/tags/${tag}`,
+                sha: sha
+              });
+              
+              // Determine environment and URLs
+              const environment = isMain ? 'Production' : 'Development';
+              const baseUrl = isMain ? 'https://api.mor.org' : 'https://api.dev.mor.org';
+              const tagType = isMain ? 'Production' : 'Test';
+              
+              console.log(`✅ Created ${tagType.toLowerCase()} tag: ${tag}`);
+              console.log(`📦 Container: ${{ needs.Generate-Tag.outputs.image_name }}:${tag}`);
+              console.log(`🚀 Deployed to: ${baseUrl}`);
+              
+              // Add to step summary
+              core.summary
+                .addHeading(`🏷️ ${tagType} Release Tagged`)
+                .addTable([
+                  [{data: 'Tag', header: true}, {data: 'Container Image', header: true}, {data: 'Environment', header: true}],
+                  [tag, `${{ needs.Generate-Tag.outputs.image_name }}:${tag}`, `${environment} (${baseUrl})`]
+                ])
+                .addLink('API Documentation', `${baseUrl}/docs`)
+                .addLink('Health Check', `${baseUrl}/health`);
+                
+              // Add latest tag info for main branch
+              if (isMain) {
+                core.summary.addRaw('\n**Latest Tag:** This container is also tagged as `:latest`');
+              }
+              
+              core.summary.write();
+                
+            } catch (error) {
+              console.error(`❌ Failed to create tag: ${error.message}`);
+              core.setFailed(`Failed to create tag: ${error.message}`);
+            }
