@@ -183,7 +183,13 @@ jobs:
           poetry install --no-interaction --no-root
         
       - name: Install project
-        run: poetry install --no-interaction
+        run: |
+          # Check if lock file is out of sync and regenerate if needed
+          if ! poetry check --lock; then
+            echo "🔄 Lock file out of sync, regenerating..."
+            poetry lock
+          fi
+          poetry install --no-interaction
         
       - name: Run database migrations (test)
         env:
