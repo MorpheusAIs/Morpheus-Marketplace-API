@@ -4,6 +4,8 @@
 
 Implemented automated CI/CD pipeline with semantic versioning, containerized deployments, and database migrations. The pipeline supports different promotion levels: DEV (test only), TEST (deploy to staging), MAIN (deploy to production), and feature branches (build/test only). All deployments use GHCR containers with automatic health checks and rollback capabilities.
 
+For any questions, please contact nomadicrogue@mor.org or @NomadicRogue on GitHub
+
 ---
 
 ## 🚀 Code Promotion Process

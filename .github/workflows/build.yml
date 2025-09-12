@@ -118,7 +118,7 @@ jobs:
           echo "vfull=${VFULL}" >> $GITHUB_OUTPUT
           echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
           echo "✅ New Build Tag: $VTAG" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Docker Image: ${IMAGE_NAME}:${VTAG}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Docker Image Tag: ${IMAGE_NAME}:${VTAG}" >> $GITHUB_STEP_SUMMARY
 
   Test-API:
     name: Test Morpheus API
