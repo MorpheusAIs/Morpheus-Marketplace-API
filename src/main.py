@@ -16,7 +16,8 @@ import uuid
 import socket
 import platform
 
-from src.api.v1 import models, chat, session, auth, automation, chat_history
+from src.api.v1 import models, chat, session, auth, automation
+from src.api.v1.chat_history import chat_history_router
 from src.core.config import settings
 from src.core.version import get_version, get_version_info
 from src.api.v1.custom_route import FixedDependencyAPIRoute
@@ -254,7 +255,7 @@ async def startup_event():
     
     # Make sure all routers use our fixed route class
     try:
-        for router in [auth, models, chat, session, automation, chat_history]:
+        for router in [auth, models, chat, session, automation, chat_history_router]:
             update_router_route_class(router, FixedDependencyAPIRoute)
         logger.info("✅ All routers configured with FixedDependencyAPIRoute")
     except Exception as e:
@@ -362,7 +363,7 @@ update_router_route_class(models)
 update_router_route_class(chat)
 update_router_route_class(session)
 update_router_route_class(automation)
-update_router_route_class(chat_history)
+update_router_route_class(chat_history_router)
 
 # Include routers
 app.include_router(auth, prefix=f"{settings.API_V1_STR}/auth")
@@ -370,7 +371,7 @@ app.include_router(models, prefix=f"{settings.API_V1_STR}")  # Mount at /api/v1 
 app.include_router(chat, prefix=f"{settings.API_V1_STR}/chat")
 app.include_router(session, prefix=f"{settings.API_V1_STR}/session")
 app.include_router(automation, prefix=f"{settings.API_V1_STR}/automation")
-app.include_router(chat_history, prefix=f"{settings.API_V1_STR}/chat-history")
+app.include_router(chat_history_router, prefix=f"{settings.API_V1_STR}/chat-history")
 
 
 
