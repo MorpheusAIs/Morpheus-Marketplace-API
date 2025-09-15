@@ -253,10 +253,10 @@ async def startup_event():
         # Initialize direct model service with memory-conscious approach
         logger.info("🤖 Initializing direct model service...")
         try:
-            # Stagger model fetching to reduce memory pressure and concurrent requests
-            stagger_delay = (worker_pid % 4) * 2.0  # 0, 2, 4, 6 second delays
+            # Stagger model fetching to reduce concurrent requests (shorter delays to avoid timeout)
+            stagger_delay = (worker_pid % 4) * 0.5  # 0, 0.5, 1.0, 1.5 second delays
             if stagger_delay > 0:
-                logger.info(f"⏳ Staggering model fetch by {stagger_delay}s to reduce memory pressure")
+                logger.info(f"⏳ Staggering model fetch by {stagger_delay}s to reduce concurrent requests")
                 await asyncio.sleep(stagger_delay)
             
             # Test initial fetch to ensure service is working
