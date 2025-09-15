@@ -247,18 +247,21 @@ async def startup_event():
         logger.info("🗃️ Checking database version compatibility...")
         await check_database_version()
         
-        # Initialize direct model service (all workers can do this - it's cached)
+        # Initialize direct model service with memory-conscious approach
         logger.info("🤖 Initializing direct model service...")
         try:
+            # Stagger model fetching to reduce memory pressure and concurrent requests
+            stagger_delay = (worker_pid % 4) * 2.0  # 0, 2, 4, 6 second delays
+            if stagger_delay > 0:
+                logger.info(f"⏳ Staggering model fetch by {stagger_delay}s to reduce memory pressure")
+                await asyncio.sleep(stagger_delay)
+            
             # Test initial fetch to ensure service is working
             models = await direct_model_service.get_model_mapping()
             logger.info(f"✅ Direct model service initialized with {len(models)} models")
         except Exception as e:
             logger.error(f"❌ Failed to initialize direct model service: {e}")
             logger.warning("Continuing startup - model service will retry on first request")
-        
-        # Small staggered delay to prevent all workers hitting external services simultaneously
-        await asyncio.sleep(0.1 * (worker_pid % 4))  # 0-300ms staggered delay
         
     except Exception as e:
         logger.error(f"❌ Error during worker initialization: {e}")
