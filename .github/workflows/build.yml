@@ -219,12 +219,12 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || startsWith(github.ref, 'refs/heads/cicd/'))) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
         (github.event_name == 'workflow_dispatch' && github.event.inputs.create_deployment == 'true')
       )
     needs:
       - Generate-Tag
-      # - Test-API
+      - Test-API
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
