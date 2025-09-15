@@ -4,6 +4,7 @@ name: CI-CD
 # Branch Strategy:
 #   • dev: Build and test only (no deployment)
 #   • test: Build, test, and deploy to AWS DEV environment
+#   • cicd/*: Build, test, and deploy to AWS DEV environment (for fast cycle testing)
 #   • main: Build, test, create release, and deploy to AWS PRD environment
 #
 # Key Features:
@@ -249,7 +250,7 @@ jobs:
           BUILDCOMMIT=${{ github.sha }}
           
           # Determine environment for tagging
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV_TAG="dev-latest"
             echo "🚀 Building for development environment"
           elif [ "${{ github.ref_name }}" == "main" ]; then
@@ -261,7 +262,7 @@ jobs:
           fi
           
           # Use single platform for test builds and feature branches, multi-platform for main
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             PLATFORMS="linux/amd64"
             echo "🚀 Building single platform (amd64) for faster deployment"
           else
@@ -297,7 +298,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || startsWith(github.ref, 'refs/heads/cicd/'))) ||
         (github.event_name == 'workflow_dispatch' && github.event.inputs.create_deployment == 'true')
       )
     needs:
