@@ -243,9 +243,12 @@ async def startup_event():
     logger.info(f"🔧 Worker PID: {worker_pid}")
     
     try:
-        # Lightweight database version check (fast, all workers can do this)
-        logger.info("🗃️ Checking database version compatibility...")
-        await check_database_version()
+        # Only first worker checks database version to prevent connection pool exhaustion
+        if worker_pid % 4 == 0:  # Only one worker does DB version check
+            logger.info("🗃️ Checking database version compatibility...")
+            await check_database_version()
+        else:
+            logger.info("⏩ Skipping database version check in this worker to prevent connection contention")
         
         # Initialize direct model service with memory-conscious approach
         logger.info("🤖 Initializing direct model service...")
