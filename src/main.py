@@ -243,30 +243,51 @@ async def startup_event():
     worker_pid = os.getpid()
     logger.info(f"🔧 Worker PID: {worker_pid}")
     
-    # Only do heavy initialization in the first worker (lowest PID)
-    # This prevents all workers from hitting the database and external APIs simultaneously
+    # Only do heavy initialization in ONE worker to prevent resource contention
+    # Use a more selective approach - only the worker with the lowest PID does initialization
     try:
-        # Check if we should skip initialization (let other workers start faster)
-        if worker_pid % 4 == 0:  # Only 1 in 4 workers does full initialization
-            logger.info("🗃️ This worker will perform database and service initialization...")
+        # Get all worker PIDs from the process group to find the first one
+        import psutil
+        try:
+            current_process = psutil.Process(worker_pid)
+            parent_pid = current_process.ppid()
+            parent = psutil.Process(parent_pid)
+            worker_pids = [child.pid for child in parent.children() if child.pid != parent_pid]
+            is_first_worker = worker_pid == min(worker_pids) if worker_pids else True
+        except:
+            # Fallback to simple modulo approach if psutil fails
+            is_first_worker = worker_pid % 8 == 0  # Even more selective - 1 in 8 workers
+        
+        if is_first_worker:
+            logger.info("🗃️ This worker selected for database and service initialization...")
             
-            # Verify database migrations are up to date
-            logger.info("🗃️ Checking database migrations...")
-            await verify_database_migrations()
+            # Add timeout wrapper for all initialization tasks
+            async def initialization_with_timeout():
+                # Verify database migrations are up to date
+                logger.info("🗃️ Checking database migrations...")
+                await verify_database_migrations()
+                
+                # Initialize direct model service (no background tasks needed)
+                logger.info("🤖 Initializing direct model service...")
+                try:
+                    # Test initial fetch to ensure service is working
+                    models = await direct_model_service.get_model_mapping()
+                    logger.info(f"✅ Direct model service initialized with {len(models)} models")
+                except Exception as e:
+                    logger.error(f"❌ Failed to initialize direct model service: {e}")
+                    logger.warning("Continuing startup - model service will retry on first request")
             
-            # Initialize direct model service (no background tasks needed)
-            logger.info("🤖 Initializing direct model service...")
+            # Run initialization with a 20-second timeout to prevent worker timeout
             try:
-                # Test initial fetch to ensure service is working
-                models = await direct_model_service.get_model_mapping()
-                logger.info(f"✅ Direct model service initialized with {len(models)} models")
-            except Exception as e:
-                logger.error(f"❌ Failed to initialize direct model service: {e}")
-                logger.warning("Continuing startup - model service will retry on first request")
+                await asyncio.wait_for(initialization_with_timeout(), timeout=20.0)
+                logger.info("✅ Worker initialization completed within timeout")
+            except asyncio.TimeoutError:
+                logger.error("❌ Worker initialization timed out after 20 seconds")
+                logger.warning("Continuing startup - services will initialize on first request")
         else:
             logger.info("⏩ Skipping database/service initialization in this worker to avoid contention")
-            # Add a small delay to stagger worker startup
-            await asyncio.sleep(0.5)
+            # Add a longer delay to stagger worker startup and reduce resource pressure
+            await asyncio.sleep(1.0 + (worker_pid % 4) * 0.5)  # 1-3 second staggered delay
     except Exception as e:
         logger.error(f"❌ Error during worker initialization: {e}")
         logger.warning("Continuing startup with minimal initialization")
