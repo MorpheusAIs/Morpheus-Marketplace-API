@@ -1,19 +1,19 @@
 #!/bin/bash
 
-# Local Testing Script
-# Runs the API locally using external dev database and Cognito
-# This allows fast cycle testing without full deployment
+# Self-Contained Local Testing Script
+# Runs the API with local PostgreSQL and bypassed authentication
+# Perfect for development without external dependencies
 
 set -e
 
-echo "🧪 Starting Local Testing Environment"
+echo "🧪 Starting Self-Contained Local Testing Environment"
 
 # Check if .env.local exists
 if [ ! -f .env.local ]; then
     echo "❌ .env.local not found!"
-    echo "📋 Please copy env.local.example to .env.local and fill in your values:"
+    echo "📋 Please copy env.local.example to .env.local:"
     echo "   cp env.local.example .env.local"
-    echo "   # Edit .env.local with your dev environment values"
+    echo "   # Edit .env.local if needed (defaults should work)"
     exit 1
 fi
 
@@ -27,8 +27,18 @@ fi
 
 echo "✅ Docker is running"
 
-# Build and start the local testing environment
-echo "🔨 Building and starting local API container..."
-docker-compose -f docker-compose.local.yml up --build --remove-orphans
+# Clean up any previous containers
+echo "🧹 Cleaning up previous containers..."
+docker compose -f docker-compose.local.yml down --volumes --remove-orphans
 
-echo "🎉 Local testing environment stopped"
+# Build and start the self-contained environment
+echo "🔨 Building and starting self-contained local environment..."
+echo "📦 This includes:"
+echo "   - Local PostgreSQL database (ephemeral)"
+echo "   - API with bypassed Cognito authentication"
+echo "   - Hot reload for development"
+echo "   - Test user: test@local.dev"
+
+docker compose -f docker-compose.local.yml up --build --remove-orphans
+
+echo "🎉 Self-contained local testing environment stopped"

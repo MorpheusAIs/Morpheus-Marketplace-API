@@ -238,6 +238,10 @@ async def startup_event():
     logger.info(f"🏷️ Container ID: {CONTAINER_ID}")
     logger.info(f"📦 Version: {APP_VERSION}")
     
+    # Log local testing status
+    from src.core.local_testing import log_local_testing_status
+    log_local_testing_status()
+    
     # All workers perform lightweight checks - no complex coordination needed
     worker_pid = os.getpid()
     logger.info(f"🔧 Worker PID: {worker_pid}")

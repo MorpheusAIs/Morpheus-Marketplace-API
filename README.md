@@ -33,21 +33,29 @@ morpheus_api_python/
 │   │   ├── v1/
 │   │   │   ├── auth.py       # User registration, login, API keys, private key mgmt
 │   │   │   ├── models.py     # OpenAI compatible models endpoint
-│   │   │   └── chat.py       # OpenAI compatible chat completions
+│   │   │   ├── chat.py       # OpenAI compatible chat completions
+│   │   │   ├── chat_history.py # Chat history management
+│   │   │   ├── session.py    # Session management
+│   │   │   └── automation.py # Automation settings
 │   │   └── __init__.py
 │   ├── core/                 # Core logic, configuration, security
 │   │   ├── config.py         # Pydantic settings
 │   │   ├── security.py       # JWT generation/validation, password hashing, API key handling
 │   │   ├── key_vault.py      # Private key encryption/decryption, KMS interaction
+│   │   ├── direct_model_service.py # Direct model fetching with in-memory cache
+│   │   ├── model_routing.py  # Model name to blockchain ID routing
+│   │   ├── local_testing.py  # Local testing mode and authentication bypass
 │   │   └── __init__.py
 │   ├── crud/                 # Database interaction functions
 │   │   ├── user.py
 │   │   ├── api_key.py
 │   │   ├── private_key.py
+│   │   ├── chat.py           # Chat and message CRUD operations
+│   │   ├── session.py        # Session CRUD operations
 │   │   └── __init__.py
 │   ├── db/                   # Database session management, base model
 │   │   ├── database.py
-│   │   ├── models.py         # SQLAlchemy models
+│   │   ├── models.py         # SQLAlchemy models (includes Chat, Message)
 │   │   └── __init__.py
 │   ├── schemas/              # Pydantic schemas for request/response validation
 │   │   ├── user.py
@@ -57,30 +65,68 @@ morpheus_api_python/
 │   │   ├── openai.py         # Schemas for OpenAI compatibility
 │   │   └── __init__.py
 │   ├── services/             # Business logic layer
-│   │   ├── direct_model_service.py   # In-memory model caching
-│   │   ├── model_mapper.py   # Mapping OpenAI model names <-> Blockchain IDs
-│   │   ├── init_cache.py     # Cache initialization
+│   │   ├── cognito_service.py    # Cognito integration
+│   │   ├── session_service.py    # Session management logic
+│   │   ├── proxy_router.py       # Proxy router communication
 │   │   └── __init__.py
 │   ├── dependencies.py       # FastAPI dependency injection functions
 │   └── main.py               # FastAPI application instance and root setup
-├── .env.example              # Environment variable template
+├── ai-docs/                  # Documentation and guides
+│   ├── DOCKER_TESTING.md     # Local testing guide
+│   ├── SELF_CONTAINED_LOCAL_TESTING.md # Detailed local setup
+│   └── ...                   # Other documentation files
+├── scripts/                  # Development and deployment scripts
+│   ├── test_local.sh         # Self-contained local testing
+│   ├── start_local_dev.sh    # Container startup with auto-migration
+│   └── ...                   # Other utility scripts
+├── tests/                    # Test files
+│   ├── api/                  # API integration tests
+│   └── unit/                 # Unit tests
+├── .env.example              # Production environment template
+├── env.local.example         # Local testing environment template
 ├── .gitignore                # Git ignore file
 ├── Dockerfile                # Docker build configuration
-├── docker-compose.yml        # Container orchestration configuration
+├── docker-compose.local.yml  # Local development container setup
 ├── pyproject.toml            # Python project dependencies
 └── README.md                 # This file
 ```
 
 ## Getting Started
 
-### Prerequisites
+### 🚀 Quick Start - Local Development (Recommended)
+
+**No external dependencies needed!** For rapid development and testing:
+
+```bash
+# One-time setup
+cp env.local.example .env.local
+
+# Start local development environment
+./scripts/test_local.sh
+```
+
+**What this gives you:**
+- ✅ **No Authentication Required** - All endpoints work without tokens/keys
+- ✅ **Fresh Database** - PostgreSQL with auto-migrations on every start
+- ✅ **Hot Reload** - Code changes apply instantly
+- ✅ **Complete API Testing** - Test all endpoints via Swagger UI
+- ✅ **Ephemeral Environment** - Clean state every restart
+
+**Access your local environment:**
+- **API**: http://localhost:8000
+- **Swagger UI**: http://localhost:8000/docs (all endpoints work without auth!)
+- **Health Check**: http://localhost:8000/health
+
+📚 **For detailed testing instructions, see [Docker Testing Guide](ai-docs/DOCKER_TESTING.md)**
+
+### Prerequisites (Production Setup)
 
 - Python 3.11+
 - Docker and Docker Compose
-- PostgreSQL (if running locally)
+- PostgreSQL (if running locally without Docker)
 - AWS Account with KMS access (for production)
 
-### Installation
+### Production Installation
 
 1. Clone the repository:
    ```bash
@@ -141,7 +187,14 @@ PROXY_ROUTER_URL=http://localhost:8545  # URL of the Morpheus-Lumerin Node proxy
 
 ## Database Setup
 
-### Local Database Setup
+### Local Development Database
+
+**Using Local Testing Environment (Recommended):**
+- Database setup is **automatic** when using `./scripts/test_local.sh`
+- PostgreSQL starts in Docker with auto-migrations
+- No manual database setup required!
+
+### Manual Database Setup (Production)
 
 1. Start PostgreSQL:
    ```bash
@@ -153,22 +206,26 @@ PROXY_ROUTER_URL=http://localhost:8545  # URL of the Morpheus-Lumerin Node proxy
    alembic upgrade head
    ```
 
-### Running Migrations
+### Database Migrations
+
+**Local Development:**
+- Migrations run automatically on container startup
+- Always uses the latest schema
+- Fresh database on every restart
+
+**Production/Manual:**
 
 Generate a new migration after model changes:
-
 ```bash
 alembic revision --autogenerate -m "Description of changes"
 ```
 
 Apply migrations:
-
 ```bash
 alembic upgrade head
 ```
 
 Roll back migrations:
-
 ```bash
 alembic downgrade -1  # Roll back one migration
 ```
@@ -186,7 +243,32 @@ The API uses an in-memory caching system for model data fetched from CloudFront.
 
 ## Running the Application
 
-### Docker Setup (Recommended)
+### 🚀 Local Development (Recommended)
+
+**One command starts everything:**
+```bash
+./scripts/test_local.sh
+```
+
+**Features:**
+- ✅ PostgreSQL database with auto-migrations
+- ✅ API with hot reload
+- ✅ Authentication bypass for easy testing
+- ✅ All endpoints accessible via Swagger UI
+
+**Monitor your environment:**
+```bash
+# View logs
+docker compose -f docker-compose.local.yml logs -f api-local
+
+# Check status
+docker compose -f docker-compose.local.yml ps
+
+# Stop environment
+docker compose -f docker-compose.local.yml down
+```
+
+### Production Docker Setup
 
 1. Build and start containers:
    ```bash
@@ -203,9 +285,9 @@ The API uses an in-memory caching system for model data fetched from CloudFront.
    docker-compose logs -f api
    ```
 
-### Local Development
+### Manual Local Development
 
-1. Start PostgreSQL (see above)
+1. Start PostgreSQL (see Database Setup above)
 
 2. Run the FastAPI application:
    ```bash
@@ -214,14 +296,33 @@ The API uses an in-memory caching system for model data fetched from CloudFront.
 
 ## Testing the API
 
+### 🧪 Local Development Testing
+
+**Using Local Environment (No Authentication Required):**
+```bash
+# Start environment
+./scripts/test_local.sh
+
+# Access Swagger UI - all endpoints work without authentication!
+# http://localhost:8000/docs
+```
+
+**Test any endpoint directly:**
+- No Bearer tokens needed
+- No API keys required
+- Click "Try it out" and execute immediately
+- Test user automatically created: `test@local.dev`
+
 ### API Documentation
 
 FastAPI automatically generates interactive API documentation:
 
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+- **Swagger UI**: http://localhost:8000/docs
+- **ReDoc**: http://localhost:8000/redoc
 
-### Core uvicorn src.main:app --reload --host 0.0.0.0 --port 8000Endpoints
+📚 **For comprehensive testing instructions, see [Docker Testing Guide](ai-docs/DOCKER_TESTING.md)**
+
+### Core Endpoints
 
 #### Authentication
 
@@ -247,7 +348,34 @@ FastAPI automatically generates interactive API documentation:
 - `GET /api/v1/models/{model_id}` - Get model details
 - `POST /api/v1/chat/completions` - Create a chat completion
 
-### Example: Creating a Chat Completion
+### Example: Testing Chat Completion
+
+#### 🚀 Local Development (No Authentication)
+
+```bash
+# Start local environment
+./scripts/test_local.sh
+
+# Test chat completion directly (no auth needed!)
+curl -X POST http://localhost:8000/api/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-3.5-turbo",
+    "messages": [
+      {"role": "user", "content": "Hello, how are you?"}
+    ]
+  }'
+
+# Test chat history
+curl -X POST http://localhost:8000/api/v1/chat-history/chats \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Test Chat"}'
+
+# List available models
+curl http://localhost:8000/api/v1/models
+```
+
+#### 🏭 Production (Full Authentication Flow)
 
 1. Register a user:
    ```bash
@@ -268,7 +396,7 @@ FastAPI automatically generates interactive API documentation:
    curl -X POST http://localhost:8000/api/v1/auth/keys \
      -H "Authorization: Bearer YOUR_JWT_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{}'
+     -d '{"name": "My API Key"}'
    ```
 
 4. Store a private key:
@@ -309,6 +437,41 @@ This implementation is based on the [FastAPI Implementation Plan](fastapi_implem
 6. **Security Requirements:** Confirm if there are any specific compliance or advanced security requirements.
 
 The current implementation uses placeholder/mock data for model information and chat completions until the proxy-router integration is finalized.
+
+## 🔄 Development Workflow
+
+### Daily Development
+```bash
+# Start local environment (one-time per session)
+./scripts/test_local.sh
+
+# Make code changes (hot reload active - changes apply instantly!)
+# Test in Swagger UI: http://localhost:8000/docs
+
+# Stop environment when done
+# Ctrl+C or: docker compose -f docker-compose.local.yml down
+```
+
+### Key Features for Development
+- ✅ **Hot Reload** - Code changes apply instantly
+- ✅ **No Authentication** - Test all endpoints immediately
+- ✅ **Fresh Database** - Clean state every restart
+- ✅ **Auto-Migration** - Database schema always current
+- ✅ **Comprehensive Testing** - All endpoints accessible via Swagger UI
+
+### Testing Different Scenarios
+```bash
+# Test chat functionality
+curl -X POST http://localhost:8000/api/v1/chat-history/chats \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Development Test"}'
+
+# Test model service
+curl http://localhost:8000/api/v1/models
+
+# Test health checks
+curl http://localhost:8000/health
+```
 
 ## Development and Contributing
 

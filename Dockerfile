@@ -3,6 +3,13 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
+# Install system dependencies for building Python packages
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install poetry
 RUN pip install --upgrade pip && \
     pip install poetry==1.8.2 # Use a specific version for reproducibility
@@ -22,6 +29,12 @@ RUN poetry config virtualenvs.create false && \
 FROM python:3.11-slim
 
 WORKDIR /app
+
+# Install runtime dependencies (including postgresql-client for pg_isready)
+RUN apt-get update && apt-get install -y \
+    postgresql-client \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Build arguments for version information
 ARG BUILD_VERSION="0.0.0-dev"
