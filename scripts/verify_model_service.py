@@ -128,7 +128,8 @@ class ModelServiceVerifier:
                     "sample_models": [
                         {
                             "id": model.get("id", "unknown"),
-                            "blockchainID": model.get("blockchainID", "unknown")
+                            "blockchainID": model.get("blockchainID", "unknown"),
+                            "modelType": model.get("modelType", "UNKNOWN")
                         }
                         for model in models_list[:5]
                     ],

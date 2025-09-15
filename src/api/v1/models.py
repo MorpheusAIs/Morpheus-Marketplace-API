@@ -36,15 +36,17 @@ async def list_models():
             blockchain_id = model.get("Id", "")
             created_timestamp = model.get("CreatedAt", int(time.time()))
             
-            # Get model tags
+            # Get model tags and type
             tags = model.get("Tags", [])
+            model_type = model.get("ModelType", "UNKNOWN")
             
             # Create simplified OpenAI-compatible model
             openai_model = {
                 "id": model_name,
                 "blockchainID": blockchain_id,
                 "created": created_timestamp,
-                "tags": tags
+                "tags": tags,
+                "modelType": model_type
             }
             
             models.append(openai_model)
@@ -114,15 +116,17 @@ async def list_all_models():
                 blockchain_id = model.get("Id", "")
                 created_timestamp = model.get("CreatedAt", int(time.time()))
                 
-                # Get model tags
+                # Get model tags and type
                 tags = model.get("Tags", [])
+                model_type = model.get("ModelType", "UNKNOWN")
                 
                 # Create simplified OpenAI-compatible model
                 openai_model = {
                     "id": model_name,
                     "blockchainID": blockchain_id,
                     "created": created_timestamp,
-                    "tags": tags
+                    "tags": tags,
+                    "modelType": model_type
                 }
                 
                 models.append(openai_model)

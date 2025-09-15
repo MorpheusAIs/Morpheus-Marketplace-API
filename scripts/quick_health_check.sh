@@ -105,8 +105,8 @@ import json, sys
 try:
     data = json.load(sys.stdin)
     models = data.get('data', [])
-    names = [m.get('id', 'unknown') for m in models[:5]]
-    print(', '.join(names))
+    names_with_types = [f\"{m.get('id', 'unknown')} ({m.get('modelType', 'UNKNOWN')})\" for m in models[:5]]
+    print(', '.join(names_with_types))
 except:
     print('N/A')
 ")
