@@ -2,7 +2,8 @@
 Chat history management endpoints.
 Provides REST API for managing chat conversations and messages.
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Security
+from fastapi.security import HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -10,7 +11,7 @@ from datetime import datetime
 
 from src.db.database import get_db
 from src.db.models import User, MessageRole
-from src.dependencies import get_api_key_user, get_current_user, CurrentUser
+from src.dependencies import get_api_key_user, get_current_user, CurrentUser, api_key_header
 from src.crud import chat as chat_crud
 
 
@@ -80,7 +81,8 @@ class ChatDetailResponse(BaseModel):
 
 
 # Chat endpoints
-@router.post("/chats", response_model=ChatResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/chats", response_model=ChatResponse, status_code=status.HTTP_201_CREATED,
+            security=[{"APIKeyAuth": []}])
 async def create_chat(
     chat_data: ChatCreate,
     db: AsyncSession = Depends(get_db),
@@ -97,7 +99,8 @@ async def create_chat(
     )
 
 
-@router.get("/chats", response_model=List[ChatResponse])
+@router.get("/chats", response_model=List[ChatResponse],
+           security=[{"APIKeyAuth": []}])
 async def get_user_chats(
     skip: int = 0,
     limit: int = 50,
@@ -122,7 +125,8 @@ async def get_user_chats(
     return chat_responses
 
 
-@router.get("/chats/{chat_id}", response_model=ChatDetailResponse)
+@router.get("/chats/{chat_id}", response_model=ChatDetailResponse,
+           security=[{"APIKeyAuth": []}])
 async def get_chat(
     chat_id: str,
     db: AsyncSession = Depends(get_db),
@@ -155,7 +159,8 @@ async def get_chat(
     )
 
 
-@router.put("/chats/{chat_id}", response_model=ChatResponse)
+@router.put("/chats/{chat_id}", response_model=ChatResponse,
+           security=[{"APIKeyAuth": []}])
 async def update_chat(
     chat_id: str,
     chat_data: ChatUpdate,
@@ -175,7 +180,8 @@ async def update_chat(
     )
 
 
-@router.delete("/chats/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/chats/{chat_id}", status_code=status.HTTP_204_NO_CONTENT,
+              security=[{"APIKeyAuth": []}])
 async def delete_chat(
     chat_id: str,
     archive_only: bool = True,
@@ -193,7 +199,8 @@ async def delete_chat(
 
 
 # Message endpoints
-@router.post("/chats/{chat_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/chats/{chat_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED,
+            security=[{"APIKeyAuth": []}])
 async def create_message(
     chat_id: str,
     message_data: MessageCreate,
@@ -231,7 +238,8 @@ async def create_message(
     )
 
 
-@router.get("/chats/{chat_id}/messages", response_model=List[MessageResponse])
+@router.get("/chats/{chat_id}/messages", response_model=List[MessageResponse],
+           security=[{"APIKeyAuth": []}])
 async def get_chat_messages(
     chat_id: str,
     skip: int = 0,
@@ -255,7 +263,8 @@ async def get_chat_messages(
     ]
 
 
-@router.delete("/messages/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/messages/{message_id}", status_code=status.HTTP_204_NO_CONTENT,
+              security=[{"APIKeyAuth": []}])
 async def delete_message(
     message_id: str,
     db: AsyncSession = Depends(get_db),
