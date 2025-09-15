@@ -142,7 +142,7 @@ Failed to initialize direct model service: [error details]
 # Get list of available models
 curl https://api.dev.mor.org/api/v1/models
 
-# Should return models from DirectModelService
+# Should return models from DirectModelService with ModelType field
 {
   "object": "list",
   "data": [
@@ -150,11 +150,36 @@ curl https://api.dev.mor.org/api/v1/models
       "id": "venice-uncensored",
       "blockchainID": "0xb603e5c973fae19c86079a068abdc5c119c276e6117fb418a2248f6efd95612d",
       "created": 1234567890,
-      "tags": ["uncensored", "chat"]
+      "tags": ["uncensored", "chat"],
+      "modelType": "UNKNOWN"
+    },
+    {
+      "id": "text-embedding-bge-m3",
+      "blockchainID": "0x34cd811e3e4710103080f363bb698a933a4cf13c5ab834e2c7652cfdd537bd96",
+      "created": 1753982834,
+      "tags": ["Embeddings", "Titan", "LMR"],
+      "modelType": "EMBEDDING"
+    },
+    {
+      "id": "Whisper-1",
+      "blockchainID": "0xcb7f0bcc6a8997d0163e3fcac4eca181ba0a4037caa1eb89bf437c66858c9826",
+      "created": 1748544095,
+      "tags": ["btbf", "transcribe", "s2t", "speech"],
+      "modelType": "STT"
     }
   ]
 }
 ```
+
+#### Model Types
+
+The API now includes a `modelType` field for each model:
+
+- **`LLM`**: Large Language Models (chat, text generation)
+- **`EMBEDDING`**: Text embedding models
+- **`TTS`**: Text-to-Speech models  
+- **`STT`**: Speech-to-Text models
+- **`UNKNOWN`**: Models without a specific type classification
 
 ### Test Model Resolution via Chat Completions
 

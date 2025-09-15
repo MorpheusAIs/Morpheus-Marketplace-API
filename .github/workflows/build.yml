@@ -4,6 +4,7 @@ name: CI-CD
 # Branch Strategy:
 #   • dev: Build and test only (no deployment)
 #   • test: Build, test, and deploy to AWS DEV environment
+#   • cicd/*: Build, test, and deploy to AWS DEV environment (for fast cycle testing)
 #   • main: Build, test, create release, and deploy to AWS PRD environment
 #
 # Key Features:
@@ -125,7 +126,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/cicd/'))) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev')) ||
         (github.event_name == 'workflow_dispatch') 
       )
     runs-on: ubuntu-latest
@@ -218,7 +219,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || startsWith(github.ref, 'refs/heads/cicd/'))) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
         (github.event_name == 'workflow_dispatch' && github.event.inputs.create_deployment == 'true')
       )
     needs:
@@ -249,7 +250,7 @@ jobs:
           BUILDCOMMIT=${{ github.sha }}
           
           # Determine environment for tagging
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV_TAG="dev-latest"
             echo "🚀 Building for development environment"
           elif [ "${{ github.ref_name }}" == "main" ]; then
@@ -261,7 +262,7 @@ jobs:
           fi
           
           # Use single platform for test builds and feature branches, multi-platform for main
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             PLATFORMS="linux/amd64"
             echo "🚀 Building single platform (amd64) for faster deployment"
           else
@@ -297,7 +298,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || startsWith(github.ref, 'refs/heads/cicd/'))) ||
         (github.event_name == 'workflow_dispatch' && github.event.inputs.create_deployment == 'true')
       )
     needs:
@@ -346,7 +347,7 @@ jobs:
           BUILDTAG=${{ needs.Generate-Tag.outputs.tag_name }}
           
           # Determine environment and database
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
             DB_HOST="db.dev.mor.org"
           elif [ "${{ github.ref_name }}" == "main" ]; then
@@ -374,14 +375,88 @@ jobs:
           
           # Create backup point (get current revision before migration)
           echo "📋 Recording current database state before migration..."
-          CURRENT_REVISION=$(poetry run alembic current --verbose 2>/dev/null | grep "Current revision" | awk '{print $NF}' || echo "none")
-          echo "PRE_MIGRATION_REVISION=$CURRENT_REVISION" >> $GITHUB_ENV
-          echo "Current revision before migration: $CURRENT_REVISION"
+          CURRENT_REVISION=$(poetry run alembic current 2>/dev/null | head -n 1 | tr -d '[:space:]' || echo "none")
+          
+          # Validate revision format (should be a hex string or "none")
+          if [[ "$CURRENT_REVISION" =~ ^[a-f0-9]{12}$ ]] || [ "$CURRENT_REVISION" = "none" ]; then
+            echo "PRE_MIGRATION_REVISION=$CURRENT_REVISION" >> $GITHUB_ENV
+            echo "Current revision before migration: $CURRENT_REVISION"
+          else
+            echo "⚠️ Invalid revision format detected: '$CURRENT_REVISION'"
+            echo "PRE_MIGRATION_REVISION=none" >> $GITHUB_ENV
+            echo "Current revision before migration: none (invalid format detected)"
+          fi
           
           # Check if there are pending migrations
           echo "🔍 Checking for pending migrations..."
           PENDING_MIGRATIONS=$(poetry run alembic heads)
           echo "Target revision: $PENDING_MIGRATIONS"
+          
+          # Ensure database state aligns with migration files
+          echo "🧹 Aligning database state with migration files..."
+          poetry run python -c "
+          import asyncio
+          import sys
+          import os
+          sys.path.insert(0, os.path.abspath('.'))
+          
+          async def align_database_state():
+              try:
+                  from sqlalchemy.ext.asyncio import create_async_engine
+                  from sqlalchemy import text
+                  
+                  engine = create_async_engine(os.getenv('DATABASE_URL'))
+                  async with engine.begin() as conn:
+                      # Check if alembic_version table exists
+                      result = await conn.execute(text(
+                          \"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='alembic_version')\"
+                      ))
+                      table_exists = result.scalar()
+                      
+                      if table_exists:
+                          # Get current version
+                          result = await conn.execute(text('SELECT version_num FROM alembic_version'))
+                          current_version = result.scalar()
+                          print(f'Current alembic version: {current_version}')
+                          
+                          # Check if chat tables already exist
+                          chat_table_exists = await conn.execute(text(
+                              \"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='chats')\"
+                          ))
+                          chats_exist = chat_table_exists.scalar()
+                          print(f'Chat tables exist in database: {chats_exist}')
+                          
+                          # Handle problematic migration references
+                          if current_version == 'fix_message_role_enum':
+                              print(f'🧹 Removing dangling migration reference: {current_version}')
+                              if chats_exist:
+                                  print(f'📋 Chat tables exist - marking add_chat_tables as completed')
+                                  await conn.execute(text(\"UPDATE alembic_version SET version_num = 'add_chat_tables'\"))
+                                  print(f'✅ Set alembic version to add_chat_tables')
+                              else:
+                                  print(f'📋 Chat tables do not exist - resetting to pre-chat state')
+                                  await conn.execute(text(\"UPDATE alembic_version SET version_num = '6f8a4e1b9d43'\"))
+                                  print(f'✅ Reset alembic version to 6f8a4e1b9d43')
+                          # Handle state mismatch where tables exist but migration thinks they don't
+                          elif current_version == '6f8a4e1b9d43' and chats_exist:
+                              print(f'🔄 State mismatch detected: chat tables exist but alembic version is pre-chat')
+                              print(f'📋 Marking add_chat_tables as completed to match database state')
+                              await conn.execute(text(\"UPDATE alembic_version SET version_num = 'add_chat_tables'\"))
+                              print(f'✅ Aligned alembic version to add_chat_tables')
+                          else:
+                              print(f'✅ Database state appears aligned with migration version')
+                      else:
+                          print('No alembic_version table found - this is a fresh database')
+                  
+                  await engine.dispose()
+                  return True
+              except Exception as e:
+                  print(f'Error during state alignment: {e}')
+                  return False
+          
+          result = asyncio.run(align_database_state())
+          sys.exit(0 if result else 1)
+          " || echo "⚠️ State alignment failed, continuing with migrations..."
           
           # Run migrations
           echo "🚀 Applying database migrations..."
@@ -389,7 +464,7 @@ jobs:
           
           # Verify migration success
           echo "✅ Verifying migration success..."
-          NEW_REVISION=$(poetry run alembic current --verbose 2>/dev/null | grep "Current revision" | awk '{print $NF}' || echo "none")
+          NEW_REVISION=$(poetry run alembic current 2>/dev/null | head -n 1 | tr -d '[:space:]' || echo "none")
           echo "NEW_REVISION=$NEW_REVISION" >> $GITHUB_ENV
           echo "New revision after migration: $NEW_REVISION"
           
@@ -434,7 +509,7 @@ jobs:
           BUILDIMAGE=${{ needs.Generate-Tag.outputs.image_name }}
           
           # Determine environment based on branch
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
@@ -550,10 +625,13 @@ jobs:
       - name: Wait for ECS Deployment
         run: |
           # Determine environment
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
+          else
+            echo "❌ Unsupported branch for deployment: ${{ github.ref_name }}"
+            exit 1
           fi
           
           CLUSTER_NAME="ecs-${ENV}-morpheus-engine"
@@ -592,10 +670,13 @@ jobs:
           BUILDTAG=${{ needs.Generate-Tag.outputs.tag_name }}
           
           # Determine environment and health endpoint
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             HEALTH_ENDPOINT="https://api.dev.mor.org/health"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             HEALTH_ENDPOINT="https://api.mor.org/health"
+          else
+            echo "❌ Unsupported branch for health check: ${{ github.ref_name }}"
+            exit 1
           fi
           
           echo "🔍 Waiting 2 minutes for application startup before health check verification..."
@@ -686,7 +767,7 @@ jobs:
           fi
           
           # Determine environment and database
-          if [ "${{ github.ref_name }}" == "test" ]; then
+          if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
             DB_HOST="db.dev.mor.org"
           elif [ "${{ github.ref_name }}" == "main" ]; then
@@ -723,11 +804,16 @@ jobs:
           
           # Perform the rollback
           echo "📅 Rolling back database to revision: ${{ env.PRE_MIGRATION_REVISION }}"
-          if poetry run alembic downgrade "${{ env.PRE_MIGRATION_REVISION }}"; then
+          
+          # Skip rollback if no valid pre-migration revision
+          if [ "${{ env.PRE_MIGRATION_REVISION }}" = "none" ]; then
+            echo "⚠️ No valid pre-migration revision available - skipping rollback"
+            echo "Database may be in initial state or revision detection failed"
+          elif poetry run alembic downgrade "${{ env.PRE_MIGRATION_REVISION }}"; then
             echo "✅ Database rollback command completed"
             
             # Verify rollback success
-            ROLLED_BACK_REV=$(poetry run alembic current --verbose 2>/dev/null | grep "Current revision" | awk '{print $NF}' || echo "none")
+            ROLLED_BACK_REV=$(poetry run alembic current 2>/dev/null | head -n 1 | tr -d '[:space:]' || echo "none")
             echo "📋 Revision after rollback: $ROLLED_BACK_REV"
             
             if [ "$ROLLED_BACK_REV" == "${{ env.PRE_MIGRATION_REVISION }}" ]; then
