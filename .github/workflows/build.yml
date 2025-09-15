@@ -375,9 +375,17 @@ jobs:
           
           # Create backup point (get current revision before migration)
           echo "📋 Recording current database state before migration..."
-          CURRENT_REVISION=$(poetry run alembic current --verbose 2>/dev/null | grep "Current revision" | awk '{print $NF}' || echo "none")
-          echo "PRE_MIGRATION_REVISION=$CURRENT_REVISION" >> $GITHUB_ENV
-          echo "Current revision before migration: $CURRENT_REVISION"
+          CURRENT_REVISION=$(poetry run alembic current 2>/dev/null | head -n 1 | tr -d '[:space:]' || echo "none")
+          
+          # Validate revision format (should be a hex string or "none")
+          if [[ "$CURRENT_REVISION" =~ ^[a-f0-9]{12}$ ]] || [ "$CURRENT_REVISION" = "none" ]; then
+            echo "PRE_MIGRATION_REVISION=$CURRENT_REVISION" >> $GITHUB_ENV
+            echo "Current revision before migration: $CURRENT_REVISION"
+          else
+            echo "⚠️ Invalid revision format detected: '$CURRENT_REVISION'"
+            echo "PRE_MIGRATION_REVISION=none" >> $GITHUB_ENV
+            echo "Current revision before migration: none (invalid format detected)"
+          fi
           
           # Check if there are pending migrations
           echo "🔍 Checking for pending migrations..."
@@ -390,7 +398,7 @@ jobs:
           
           # Verify migration success
           echo "✅ Verifying migration success..."
-          NEW_REVISION=$(poetry run alembic current --verbose 2>/dev/null | grep "Current revision" | awk '{print $NF}' || echo "none")
+          NEW_REVISION=$(poetry run alembic current 2>/dev/null | head -n 1 | tr -d '[:space:]' || echo "none")
           echo "NEW_REVISION=$NEW_REVISION" >> $GITHUB_ENV
           echo "New revision after migration: $NEW_REVISION"
           
@@ -730,11 +738,16 @@ jobs:
           
           # Perform the rollback
           echo "📅 Rolling back database to revision: ${{ env.PRE_MIGRATION_REVISION }}"
-          if poetry run alembic downgrade "${{ env.PRE_MIGRATION_REVISION }}"; then
+          
+          # Skip rollback if no valid pre-migration revision
+          if [ "${{ env.PRE_MIGRATION_REVISION }}" = "none" ]; then
+            echo "⚠️ No valid pre-migration revision available - skipping rollback"
+            echo "Database may be in initial state or revision detection failed"
+          elif poetry run alembic downgrade "${{ env.PRE_MIGRATION_REVISION }}"; then
             echo "✅ Database rollback command completed"
             
             # Verify rollback success
-            ROLLED_BACK_REV=$(poetry run alembic current --verbose 2>/dev/null | grep "Current revision" | awk '{print $NF}' || echo "none")
+            ROLLED_BACK_REV=$(poetry run alembic current 2>/dev/null | head -n 1 | tr -d '[:space:]' || echo "none")
             echo "📋 Revision after rollback: $ROLLED_BACK_REV"
             
             if [ "$ROLLED_BACK_REV" == "${{ env.PRE_MIGRATION_REVISION }}" ]; then
