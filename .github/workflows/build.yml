@@ -392,6 +392,55 @@ jobs:
           PENDING_MIGRATIONS=$(poetry run alembic heads)
           echo "Target revision: $PENDING_MIGRATIONS"
           
+          # Clean up any dangling migration references that might exist
+          echo "🧹 Cleaning up any dangling migration references..."
+          poetry run python -c "
+          import asyncio
+          import sys
+          import os
+          sys.path.insert(0, os.path.abspath('.'))
+          
+          async def cleanup_dangling_migrations():
+              try:
+                  from sqlalchemy.ext.asyncio import create_async_engine
+                  from sqlalchemy import text
+                  
+                  engine = create_async_engine(os.getenv('DATABASE_URL'))
+                  async with engine.begin() as conn:
+                      # Check if alembic_version table exists
+                      result = await conn.execute(text(
+                          \"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='alembic_version')\"
+                      ))
+                      table_exists = result.scalar()
+                      
+                      if table_exists:
+                          # Get current version
+                          result = await conn.execute(text('SELECT version_num FROM alembic_version'))
+                          current_version = result.scalar()
+                          print(f'Current alembic version: {current_version}')
+                          
+                          # Clean up known problematic migrations
+                          problematic_migrations = ['fix_message_role_enum']
+                          for migration in problematic_migrations:
+                              if current_version == migration:
+                                  print(f'🧹 Removing dangling migration reference: {migration}')
+                                  # Reset to a known good state (latest valid migration before the problematic one)
+                                  await conn.execute(text(\"UPDATE alembic_version SET version_num = '6f8a4e1b9d43'\"))
+                                  print(f'✅ Reset alembic version to 6f8a4e1b9d43 (replace_local_auth_with_cognito)')
+                                  break
+                      else:
+                          print('No alembic_version table found - this is a fresh database')
+                  
+                  await engine.dispose()
+                  return True
+              except Exception as e:
+                  print(f'Error during cleanup: {e}')
+                  return False
+          
+          result = asyncio.run(cleanup_dangling_migrations())
+          sys.exit(0 if result else 1)
+          " || echo "⚠️ Migration cleanup failed, continuing with migrations..."
+          
           # Run migrations
           echo "🚀 Applying database migrations..."
           poetry run alembic upgrade head
