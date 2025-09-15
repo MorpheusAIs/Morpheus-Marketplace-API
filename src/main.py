@@ -238,58 +238,34 @@ async def startup_event():
     logger.info(f"🏷️ Container ID: {CONTAINER_ID}")
     logger.info(f"📦 Version: {APP_VERSION}")
     
-    # Only perform database and external service checks in one worker to avoid contention
-    # Use worker PID to determine which worker should do the initialization
+    # All workers perform lightweight checks - no complex coordination needed
     worker_pid = os.getpid()
     logger.info(f"🔧 Worker PID: {worker_pid}")
     
-    # Only do heavy initialization in ONE worker to prevent resource contention
-    # Use a more selective approach - only the worker with the lowest PID does initialization
     try:
-        # Get all worker PIDs from the process group to find the first one
-        import psutil
-        try:
-            current_process = psutil.Process(worker_pid)
-            parent_pid = current_process.ppid()
-            parent = psutil.Process(parent_pid)
-            worker_pids = [child.pid for child in parent.children() if child.pid != parent_pid]
-            is_first_worker = worker_pid == min(worker_pids) if worker_pids else True
-        except:
-            # Fallback to simple modulo approach if psutil fails
-            is_first_worker = worker_pid % 8 == 0  # Even more selective - 1 in 8 workers
+        # Lightweight database version check (fast, all workers can do this)
+        logger.info("🗃️ Checking database version compatibility...")
+        await check_database_version()
         
-        if is_first_worker:
-            logger.info("🗃️ This worker selected for database and service initialization...")
-            
-            # Add timeout wrapper for all initialization tasks
-            async def initialization_with_timeout():
-                # Verify database migrations are up to date
-                logger.info("🗃️ Checking database migrations...")
-                await verify_database_migrations()
-                
-                # Initialize direct model service (no background tasks needed)
-                logger.info("🤖 Initializing direct model service...")
-                try:
-                    # Test initial fetch to ensure service is working
-                    models = await direct_model_service.get_model_mapping()
-                    logger.info(f"✅ Direct model service initialized with {len(models)} models")
-                except Exception as e:
-                    logger.error(f"❌ Failed to initialize direct model service: {e}")
-                    logger.warning("Continuing startup - model service will retry on first request")
-            
-            # Run initialization with a 20-second timeout to prevent worker timeout
-            try:
-                await asyncio.wait_for(initialization_with_timeout(), timeout=20.0)
-                logger.info("✅ Worker initialization completed within timeout")
-            except asyncio.TimeoutError:
-                logger.error("❌ Worker initialization timed out after 20 seconds")
-                logger.warning("Continuing startup - services will initialize on first request")
-        else:
-            logger.info("⏩ Skipping database/service initialization in this worker to avoid contention")
-            # Add a longer delay to stagger worker startup and reduce resource pressure
-            await asyncio.sleep(1.0 + (worker_pid % 4) * 0.5)  # 1-3 second staggered delay
+        # Initialize direct model service (all workers can do this - it's cached)
+        logger.info("🤖 Initializing direct model service...")
+        try:
+            # Test initial fetch to ensure service is working
+            models = await direct_model_service.get_model_mapping()
+            logger.info(f"✅ Direct model service initialized with {len(models)} models")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize direct model service: {e}")
+            logger.warning("Continuing startup - model service will retry on first request")
+        
+        # Small staggered delay to prevent all workers hitting external services simultaneously
+        await asyncio.sleep(0.1 * (worker_pid % 4))  # 0-300ms staggered delay
+        
     except Exception as e:
         logger.error(f"❌ Error during worker initialization: {e}")
+        # For database version mismatches, we want to fail fast
+        if "Database version mismatch" in str(e):
+            logger.error("🚨 Database version incompatible - failing startup")
+            raise e
         logger.warning("Continuing startup with minimal initialization")
     
     # Make sure all routers use our fixed route class
@@ -320,12 +296,14 @@ async def shutdown_event():
     logger.info("✅ Direct model service requires no cleanup (stateless)")
     logger.info("🏁 Application shutdown complete")
 
-async def verify_database_migrations():
+async def check_database_version():
     """
-    Verify that database migrations are up to date.
+    Lightweight check to verify database schema version matches expectations.
+    This ensures the application doesn't start with an incompatible database schema.
+    CI/CD should handle migrations - this just verifies they completed successfully.
     """
     try:
-        logger.info("Starting database migration check")
+        logger.info("🔍 Checking database version compatibility...")
         
         # Import what we need to check migration revisions
         from alembic.script import ScriptDirectory
@@ -339,9 +317,9 @@ async def verify_database_migrations():
         config = Config(alembic_cfg_path)
         script_dir = ScriptDirectory.from_config(config)
         
-        # Get the current head revision from the script directory
-        head_revision = script_dir.get_current_head()
-        logger.info(f"Latest migration head: {head_revision}")
+        # Get the expected revision (what this app version expects)
+        expected_revision = script_dir.get_current_head()
+        logger.info(f"📋 Expected database version: {expected_revision}")
         
         # Connect to database and check current revision
         async with engine.begin() as conn:
@@ -352,32 +330,35 @@ async def verify_database_migrations():
             table_exists = result.scalar()
             
             if not table_exists:
-                logger.warning("Alembic version table doesn't exist - database may need initialization")
-                return
+                error_msg = "❌ Alembic version table doesn't exist - database not initialized or CI/CD migration failed"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
             
             # Get current database revision
             result = await conn.execute(text("SELECT version_num FROM alembic_version"))
             current_revision = result.scalar()
             
             if current_revision is None:
-                logger.warning("No migration version found in database")
-                return
+                error_msg = "❌ No migration version found in database - CI/CD migration may have failed"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
                 
-            logger.info(f"Current database revision: {current_revision}")
+            logger.info(f"🗄️ Current database version: {current_revision}")
             
-            # Compare revisions
-            if current_revision == head_revision:
-                logger.info("✅ Database migrations are up to date")
+            # Compare revisions - must match exactly
+            if current_revision == expected_revision:
+                logger.info("✅ Database version matches expected version")
             else:
-                logger.warning(f"⚠️ Database migration mismatch - DB: {current_revision}, Latest: {head_revision}")
-                logger.info("Database may need migration, but continuing startup...")
+                error_msg = f"❌ Database version mismatch! Expected '{expected_revision}' but got '{current_revision}'. CI/CD migration may not have completed successfully. Please check the deployment pipeline."
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
                 
     except Exception as e:
-        logger.error(f"Error checking migrations: {str(e)}")
-        logger.warning("Migration check failed, but continuing startup...")
-        # Don't raise the exception to prevent startup failure
+        logger.error(f"❌ Database version check failed: {str(e)}")
+        # Fail fast if database version is incompatible
+        raise RuntimeError(f"Database version check failed: {str(e)}")
     finally:
-        logger.info("Migration check completed")
+        logger.info("Database version check completed")
 
 # Update router route classes
 def update_router_route_class(router: APIRouter, route_class=FixedDependencyAPIRoute):
