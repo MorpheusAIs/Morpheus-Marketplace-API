@@ -80,8 +80,7 @@ class ChatDetailResponse(BaseModel):
 
 
 # Chat endpoints
-@router.post("/chats", response_model=ChatResponse, status_code=status.HTTP_201_CREATED,
-            security=[{"APIKeyAuth": []}])
+@router.post("/chats", response_model=ChatResponse, status_code=status.HTTP_201_CREATED)
 async def create_chat(
     chat_data: ChatCreate,
     db: AsyncSession = Depends(get_db),
@@ -98,8 +97,7 @@ async def create_chat(
     )
 
 
-@router.get("/chats", response_model=List[ChatResponse],
-           security=[{"APIKeyAuth": []}])
+@router.get("/chats", response_model=List[ChatResponse])
 async def get_user_chats(
     skip: int = 0,
     limit: int = 50,
@@ -124,8 +122,7 @@ async def get_user_chats(
     return chat_responses
 
 
-@router.get("/chats/{chat_id}", response_model=ChatDetailResponse,
-           security=[{"APIKeyAuth": []}])
+@router.get("/chats/{chat_id}", response_model=ChatDetailResponse)
 async def get_chat(
     chat_id: str,
     db: AsyncSession = Depends(get_db),
@@ -158,8 +155,7 @@ async def get_chat(
     )
 
 
-@router.put("/chats/{chat_id}", response_model=ChatResponse,
-           security=[{"APIKeyAuth": []}])
+@router.put("/chats/{chat_id}", response_model=ChatResponse)
 async def update_chat(
     chat_id: str,
     chat_data: ChatUpdate,
@@ -179,8 +175,7 @@ async def update_chat(
     )
 
 
-@router.delete("/chats/{chat_id}", status_code=status.HTTP_204_NO_CONTENT,
-              security=[{"APIKeyAuth": []}])
+@router.delete("/chats/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_chat(
     chat_id: str,
     archive_only: bool = True,
@@ -198,8 +193,7 @@ async def delete_chat(
 
 
 # Message endpoints
-@router.post("/chats/{chat_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED,
-            security=[{"APIKeyAuth": []}])
+@router.post("/chats/{chat_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
 async def create_message(
     chat_id: str,
     message_data: MessageCreate,
@@ -237,8 +231,7 @@ async def create_message(
     )
 
 
-@router.get("/chats/{chat_id}/messages", response_model=List[MessageResponse],
-           security=[{"APIKeyAuth": []}])
+@router.get("/chats/{chat_id}/messages", response_model=List[MessageResponse])
 async def get_chat_messages(
     chat_id: str,
     skip: int = 0,
@@ -262,8 +255,7 @@ async def get_chat_messages(
     ]
 
 
-@router.delete("/messages/{message_id}", status_code=status.HTTP_204_NO_CONTENT,
-              security=[{"APIKeyAuth": []}])
+@router.delete("/messages/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_message(
     message_id: str,
     db: AsyncSession = Depends(get_db),
