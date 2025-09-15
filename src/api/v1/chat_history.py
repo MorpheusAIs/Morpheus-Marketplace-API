@@ -2,8 +2,7 @@
 Chat history management endpoints.
 Provides REST API for managing chat conversations and messages.
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Security
-from fastapi.security import HTTPBearer
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -11,7 +10,7 @@ from datetime import datetime
 
 from src.db.database import get_db
 from src.db.models import User, MessageRole
-from src.dependencies import get_api_key_user, get_current_user, CurrentUser, api_key_header
+from src.dependencies import get_api_key_user, get_current_user, CurrentUser
 from src.crud import chat as chat_crud
 
 

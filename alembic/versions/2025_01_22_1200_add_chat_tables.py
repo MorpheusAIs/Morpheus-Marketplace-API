@@ -34,7 +34,7 @@ def upgrade():
     op.create_table('messages',
         sa.Column('id', sa.String(), nullable=False),
         sa.Column('chat_id', sa.String(), nullable=False),
-        sa.Column('role', postgresql.ENUM('user', 'assistant', name='messagerole'), nullable=False),
+        sa.Column('role', postgresql.ENUM('user', 'assistant', name='message_role'), nullable=False),
         sa.Column('content', sa.Text(), nullable=False),
         sa.Column('sequence', sa.Integer(), nullable=False),
         sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
