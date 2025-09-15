@@ -16,8 +16,7 @@ import uuid
 import socket
 import platform
 
-from src.api.v1 import models, chat, session, auth, automation
-from src.api.v1.chat_history import chat_history_router
+from src.api.v1 import models, chat, session, auth, automation, chat_history
 from src.core.config import settings
 from src.core.version import get_version, get_version_info
 from src.api.v1.custom_route import FixedDependencyAPIRoute
@@ -239,23 +238,42 @@ async def startup_event():
     logger.info(f"🏷️ Container ID: {CONTAINER_ID}")
     logger.info(f"📦 Version: {APP_VERSION}")
     
-    # Verify database migrations are up to date
-    logger.info("🗃️ Checking database migrations...")
-    await verify_database_migrations()
+    # Only perform database and external service checks in one worker to avoid contention
+    # Use worker PID to determine which worker should do the initialization
+    worker_pid = os.getpid()
+    logger.info(f"🔧 Worker PID: {worker_pid}")
     
-    # Initialize direct model service (no background tasks needed)
-    logger.info("🤖 Initializing direct model service...")
+    # Only do heavy initialization in the first worker (lowest PID)
+    # This prevents all workers from hitting the database and external APIs simultaneously
     try:
-        # Test initial fetch to ensure service is working
-        models = await direct_model_service.get_model_mapping()
-        logger.info(f"✅ Direct model service initialized with {len(models)} models")
+        # Check if we should skip initialization (let other workers start faster)
+        if worker_pid % 4 == 0:  # Only 1 in 4 workers does full initialization
+            logger.info("🗃️ This worker will perform database and service initialization...")
+            
+            # Verify database migrations are up to date
+            logger.info("🗃️ Checking database migrations...")
+            await verify_database_migrations()
+            
+            # Initialize direct model service (no background tasks needed)
+            logger.info("🤖 Initializing direct model service...")
+            try:
+                # Test initial fetch to ensure service is working
+                models = await direct_model_service.get_model_mapping()
+                logger.info(f"✅ Direct model service initialized with {len(models)} models")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize direct model service: {e}")
+                logger.warning("Continuing startup - model service will retry on first request")
+        else:
+            logger.info("⏩ Skipping database/service initialization in this worker to avoid contention")
+            # Add a small delay to stagger worker startup
+            await asyncio.sleep(0.5)
     except Exception as e:
-        logger.error(f"❌ Failed to initialize direct model service: {e}")
-        logger.warning("Continuing startup - model service will retry on first request")
+        logger.error(f"❌ Error during worker initialization: {e}")
+        logger.warning("Continuing startup with minimal initialization")
     
     # Make sure all routers use our fixed route class
     try:
-        for router in [auth, models, chat, session, automation, chat_history_router]:
+        for router in [auth, models, chat, session, automation, chat_history]:
             update_router_route_class(router, FixedDependencyAPIRoute)
         logger.info("✅ All routers configured with FixedDependencyAPIRoute")
     except Exception as e:
@@ -363,7 +381,7 @@ update_router_route_class(models)
 update_router_route_class(chat)
 update_router_route_class(session)
 update_router_route_class(automation)
-update_router_route_class(chat_history_router)
+update_router_route_class(chat_history)
 
 # Include routers
 app.include_router(auth, prefix=f"{settings.API_V1_STR}/auth")
@@ -371,7 +389,7 @@ app.include_router(models, prefix=f"{settings.API_V1_STR}")  # Mount at /api/v1 
 app.include_router(chat, prefix=f"{settings.API_V1_STR}/chat")
 app.include_router(session, prefix=f"{settings.API_V1_STR}/session")
 app.include_router(automation, prefix=f"{settings.API_V1_STR}/automation")
-app.include_router(chat_history_router, prefix=f"{settings.API_V1_STR}/chat-history")
+app.include_router(chat_history, prefix=f"{settings.API_V1_STR}/chat-history")
 
 
 
