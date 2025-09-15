@@ -1,0 +1,54 @@
+# Local Testing Docker Compose
+# This allows local API testing with external PostgreSQL and Cognito
+# Usage: docker-compose -f docker-compose.local.yml up --build
+
+services:
+  api-local:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.local # Local testing environment variables
+    ports:
+      - "8000:8000"
+    environment:
+      # Override with external database (dev environment)
+      DATABASE_URL: ${DATABASE_URL}
+      PROXY_ROUTER_URL: ${PROXY_ROUTER_URL:-http://router.dev.mor.org:8082}
+      
+      # Use external Cognito (dev environment)
+      AWS_COGNITO_USER_POOL_ID: ${AWS_COGNITO_USER_POOL_ID}
+      AWS_COGNITO_CLIENT_ID: ${AWS_COGNITO_CLIENT_ID}
+      AWS_COGNITO_CLIENT_SECRET: ${AWS_COGNITO_CLIENT_SECRET}
+      
+      # Model service
+      ACTIVE_MODELS_URL: ${ACTIVE_MODELS_URL:-https://active.dev.mor.org/active_models.json}
+      DEFAULT_FALLBACK_MODEL: ${DEFAULT_FALLBACK_MODEL:-mistral-31-24b}
+      
+      # JWT settings
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      
+      # AWS settings for dev environment
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      
+    volumes:
+      # Mount source for hot-reloading during development
+      - ./src:/app/src
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./tests:/app/tests
+      - ./scripts:/app/scripts
+    
+    # Override command for development with hot-reload
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+# No local database - uses external dev database
+# No Redis - uses in-memory caching

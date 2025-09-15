@@ -1,6 +1,6 @@
 # Morpheus API Gateway - FastAPI Implementation
 
-A robust API Gateway connecting Web2 clients to the Morpheus-Lumerin AI Marketplace using FastAPI, PostgreSQL, Redis, and secure key management practices.
+A robust API Gateway connecting Web2 clients to the Morpheus-Lumerin AI Marketplace using FastAPI, PostgreSQL, and secure key management practices.
 
 ## Overview
 
@@ -14,7 +14,7 @@ The gateway provides OpenAI-compatible endpoints that connect to the Morpheus bl
 - **Data Validation:** Pydantic
 - **Database ORM:** SQLAlchemy with Alembic for migrations
 - **Database:** PostgreSQL
-- **Caching/Key Storage:** Redis
+- **Caching:** In-memory with DirectModelService
 - **Asynchronous HTTP Client:** `httpx` (for communicating with the proxy-router)
 - **JWT Handling:** `python-jose`
 - **Password Hashing:** `passlib[bcrypt]`
@@ -57,7 +57,7 @@ morpheus_api_python/
 │   │   ├── openai.py         # Schemas for OpenAI compatibility
 │   │   └── __init__.py
 │   ├── services/             # Business logic layer
-│   │   ├── redis_client.py   # Redis interactions (caching)
+│   │   ├── direct_model_service.py   # In-memory model caching
 │   │   ├── model_mapper.py   # Mapping OpenAI model names <-> Blockchain IDs
 │   │   ├── init_cache.py     # Cache initialization
 │   │   └── __init__.py
@@ -78,7 +78,6 @@ morpheus_api_python/
 - Python 3.11+
 - Docker and Docker Compose
 - PostgreSQL (if running locally)
-- Redis (if running locally)
 - AWS Account with KMS access (for production)
 
 ### Installation
@@ -118,9 +117,8 @@ POSTGRES_PASSWORD=secure_password_here
 POSTGRES_DB=morpheus_db
 DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}
 
-# Redis
-REDIS_PASSWORD=secure_redis_password_here
-REDIS_URL=redis://:${REDIS_PASSWORD}@localhost:6379/0
+# Model Service (uses in-memory caching)
+ACTIVE_MODELS_URL=https://active.dev.mor.org/active_models.json
 
 # JWT
 JWT_SECRET_KEY=generate_this_with_openssl_rand_-hex_32
@@ -175,21 +173,9 @@ Roll back migrations:
 alembic downgrade -1  # Roll back one migration
 ```
 
-## Redis Setup
+## Model Service
 
-### Local Redis Setup
-
-Start Redis with password protection:
-
-```bash
-docker run --name morpheus-redis -p 6379:6379 redis:7-alpine --requirepass your_redis_password
-```
-
-### Testing Redis Connection
-
-```bash
-redis-cli -h localhost -p 6379 -a your_redis_password ping
-```
+The API uses an in-memory caching system for model data fetched from CloudFront. No external caching service is required.
 
 ## AWS KMS Setup (Production)
 
@@ -219,7 +205,7 @@ redis-cli -h localhost -p 6379 -a your_redis_password ping
 
 ### Local Development
 
-1. Start Redis and PostgreSQL (see above)
+1. Start PostgreSQL (see above)
 
 2. Run the FastAPI application:
    ```bash
@@ -308,7 +294,7 @@ FastAPI automatically generates interactive API documentation:
 
 ## Health Checks
 
-- `GET /health` - Check API and Redis health
+- `GET /health` - Check API and model service health
 - `GET /` - Basic API information
 
 ## Open Questions and TODOs
