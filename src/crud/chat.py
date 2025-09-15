@@ -45,7 +45,7 @@ async def get_user_chats(db: AsyncSession, user_id: int, skip: int = 0, limit: i
         .offset(skip)
         .limit(limit)
     )
-    return result.scalars().all()
+    return list(result.scalars())
 
 
 async def update_chat_title(db: AsyncSession, chat_id: str, user_id: int, title: str) -> Optional[Chat]:

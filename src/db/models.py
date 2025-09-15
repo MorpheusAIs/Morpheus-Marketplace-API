@@ -150,7 +150,7 @@ class Message(Base):
     
     id = Column(String, primary_key=True)  # UUID string
     chat_id = Column(String, ForeignKey("chats.id", ondelete="CASCADE"), nullable=False)
-    role = Column(Enum(MessageRole, name='message_role'), nullable=False)
+    role = Column(Enum(MessageRole, name='messagerole'), nullable=False)  # Match actual database enum name
     content = Column(TEXT, nullable=False)
     sequence = Column(Integer, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
