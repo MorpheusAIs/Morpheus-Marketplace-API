@@ -424,9 +424,21 @@ jobs:
                           for migration in problematic_migrations:
                               if current_version == migration:
                                   print(f'🧹 Removing dangling migration reference: {migration}')
-                                  # Reset to a known good state (latest valid migration before the problematic one)
-                                  await conn.execute(text(\"UPDATE alembic_version SET version_num = '6f8a4e1b9d43'\"))
-                                  print(f'✅ Reset alembic version to 6f8a4e1b9d43 (replace_local_auth_with_cognito)')
+                                  
+                                  # Check if chat tables already exist
+                                  chat_table_exists = await conn.execute(text(
+                                      \"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='chats')\"
+                                  ))
+                                  chats_exist = chat_table_exists.scalar()
+                                  
+                                  if chats_exist:
+                                      print(f'📋 Chat tables already exist - marking add_chat_tables as completed')
+                                      await conn.execute(text(\"UPDATE alembic_version SET version_num = 'add_chat_tables'\"))
+                                      print(f'✅ Set alembic version to add_chat_tables (current state)')
+                                  else:
+                                      print(f'📋 Chat tables do not exist - resetting to pre-chat state')
+                                      await conn.execute(text(\"UPDATE alembic_version SET version_num = '6f8a4e1b9d43'\"))
+                                      print(f'✅ Reset alembic version to 6f8a4e1b9d43 (replace_local_auth_with_cognito)')
                                   break
                       else:
                           print('No alembic_version table found - this is a fresh database')
