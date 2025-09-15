@@ -392,15 +392,15 @@ jobs:
           PENDING_MIGRATIONS=$(poetry run alembic heads)
           echo "Target revision: $PENDING_MIGRATIONS"
           
-          # Clean up any dangling migration references that might exist
-          echo "🧹 Cleaning up any dangling migration references..."
+          # Ensure database state aligns with migration files
+          echo "🧹 Aligning database state with migration files..."
           poetry run python -c "
           import asyncio
           import sys
           import os
           sys.path.insert(0, os.path.abspath('.'))
           
-          async def cleanup_dangling_migrations():
+          async def align_database_state():
               try:
                   from sqlalchemy.ext.asyncio import create_async_engine
                   from sqlalchemy import text
@@ -419,39 +419,44 @@ jobs:
                           current_version = result.scalar()
                           print(f'Current alembic version: {current_version}')
                           
-                          # Clean up known problematic migrations
-                          problematic_migrations = ['fix_message_role_enum']
-                          for migration in problematic_migrations:
-                              if current_version == migration:
-                                  print(f'🧹 Removing dangling migration reference: {migration}')
-                                  
-                                  # Check if chat tables already exist
-                                  chat_table_exists = await conn.execute(text(
-                                      \"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='chats')\"
-                                  ))
-                                  chats_exist = chat_table_exists.scalar()
-                                  
-                                  if chats_exist:
-                                      print(f'📋 Chat tables already exist - marking add_chat_tables as completed')
-                                      await conn.execute(text(\"UPDATE alembic_version SET version_num = 'add_chat_tables'\"))
-                                      print(f'✅ Set alembic version to add_chat_tables (current state)')
-                                  else:
-                                      print(f'📋 Chat tables do not exist - resetting to pre-chat state')
-                                      await conn.execute(text(\"UPDATE alembic_version SET version_num = '6f8a4e1b9d43'\"))
-                                      print(f'✅ Reset alembic version to 6f8a4e1b9d43 (replace_local_auth_with_cognito)')
-                                  break
+                          # Check if chat tables already exist
+                          chat_table_exists = await conn.execute(text(
+                              \"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='chats')\"
+                          ))
+                          chats_exist = chat_table_exists.scalar()
+                          print(f'Chat tables exist in database: {chats_exist}')
+                          
+                          # Handle problematic migration references
+                          if current_version == 'fix_message_role_enum':
+                              print(f'🧹 Removing dangling migration reference: {current_version}')
+                              if chats_exist:
+                                  print(f'📋 Chat tables exist - marking add_chat_tables as completed')
+                                  await conn.execute(text(\"UPDATE alembic_version SET version_num = 'add_chat_tables'\"))
+                                  print(f'✅ Set alembic version to add_chat_tables')
+                              else:
+                                  print(f'📋 Chat tables do not exist - resetting to pre-chat state')
+                                  await conn.execute(text(\"UPDATE alembic_version SET version_num = '6f8a4e1b9d43'\"))
+                                  print(f'✅ Reset alembic version to 6f8a4e1b9d43')
+                          # Handle state mismatch where tables exist but migration thinks they don't
+                          elif current_version == '6f8a4e1b9d43' and chats_exist:
+                              print(f'🔄 State mismatch detected: chat tables exist but alembic version is pre-chat')
+                              print(f'📋 Marking add_chat_tables as completed to match database state')
+                              await conn.execute(text(\"UPDATE alembic_version SET version_num = 'add_chat_tables'\"))
+                              print(f'✅ Aligned alembic version to add_chat_tables')
+                          else:
+                              print(f'✅ Database state appears aligned with migration version')
                       else:
                           print('No alembic_version table found - this is a fresh database')
                   
                   await engine.dispose()
                   return True
               except Exception as e:
-                  print(f'Error during cleanup: {e}')
+                  print(f'Error during state alignment: {e}')
                   return False
           
-          result = asyncio.run(cleanup_dangling_migrations())
+          result = asyncio.run(align_database_state())
           sys.exit(0 if result else 1)
-          " || echo "⚠️ Migration cleanup failed, continuing with migrations..."
+          " || echo "⚠️ State alignment failed, continuing with migrations..."
           
           # Run migrations
           echo "🚀 Applying database migrations..."
