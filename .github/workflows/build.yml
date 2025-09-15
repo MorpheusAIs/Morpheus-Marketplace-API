@@ -547,7 +547,7 @@ jobs:
           echo "📦 Image: $BUILDIMAGE:$BUILDTAG"
           echo "📋 Task Definition: $NEW_TASK_ARN"
 
-      - name: Wait for ECS Service Stabilization
+      - name: Wait for ECS Deployment
         run: |
           # Determine environment
           if [ "${{ github.ref_name }}" == "test" ]; then
@@ -559,58 +559,33 @@ jobs:
           CLUSTER_NAME="ecs-${ENV}-morpheus-engine"
           SERVICE_NAME="svc-${ENV}-api-service"
           
-          # Wait for deployment to stabilize with better monitoring
-          echo "⏳ Waiting for service to stabilize (up to 15 minutes)..."
+          echo "⏳ Waiting for ECS deployment to start (3 minutes)..."
           echo "📊 Monitoring service status..."
           
-          # Start monitoring in background
-          (
-            for i in {1..30}; do
-              sleep 30
-              echo "🔍 Check $i/30: Service status at $(date)"
-              aws ecs describe-services \
-                --cluster "$CLUSTER_NAME" \
-                --services "$SERVICE_NAME" \
-                --query 'services[0].{Status:status,Running:runningCount,Pending:pendingCount,Desired:desiredCount}' \
-                --output table || echo "Failed to get service status"
-              
-              # Check task status
-              TASK_ARNS=$(aws ecs list-tasks --cluster "$CLUSTER_NAME" --service-name "$SERVICE_NAME" --query 'taskArns' --output text)
-              if [ -n "$TASK_ARNS" ] && [ "$TASK_ARNS" != "None" ]; then
-                echo "📋 Task details:"
-                aws ecs describe-tasks \
-                  --cluster "$CLUSTER_NAME" \
-                  --tasks $TASK_ARNS \
-                  --query 'tasks[0].{LastStatus:lastStatus,HealthStatus:healthStatus,StoppedReason:stoppedReason}' \
-                  --output table 2>/dev/null || echo "No task details available"
-              fi
-              echo "---"
-            done
-          ) &
-          MONITOR_PID=$!
-          
-          # Wait for stabilization
-          aws ecs wait services-stable \
-            --cluster "$CLUSTER_NAME" \
-            --services "$SERVICE_NAME" \
-            --cli-read-timeout 900 \
-            --cli-connect-timeout 60
-          
-          STABILIZATION_STATUS=$?
-          
-          # Stop monitoring
-          kill $MONITOR_PID 2>/dev/null || true
-          
-          if [ $STABILIZATION_STATUS -eq 0 ]; then
-            echo "✅ ECS service stabilized successfully"
-          else
-            echo "⚠️ ECS stabilization wait timed out, checking final status..."
+          # Monitor deployment progress for 3 minutes
+          for i in {1..6}; do
+            sleep 30
+            echo "🔍 Check $i/6: Service status at $(date)"
             aws ecs describe-services \
               --cluster "$CLUSTER_NAME" \
               --services "$SERVICE_NAME" \
-              --query 'services[0]' \
-              --output json | jq '.deployments[] | {status, taskDefinition, runningCount, pendingCount, failedTasks}'
-          fi
+              --query 'services[0].{Status:status,Running:runningCount,Pending:pendingCount,Desired:desiredCount}' \
+              --output table || echo "Failed to get service status"
+            
+            # Check task status
+            TASK_ARNS=$(aws ecs list-tasks --cluster "$CLUSTER_NAME" --service-name "$SERVICE_NAME" --query 'taskArns' --output text)
+            if [ -n "$TASK_ARNS" ] && [ "$TASK_ARNS" != "None" ]; then
+              echo "📋 Task details:"
+              aws ecs describe-tasks \
+                --cluster "$CLUSTER_NAME" \
+                --tasks $TASK_ARNS \
+                --query 'tasks[0].{LastStatus:lastStatus,HealthStatus:healthStatus,StoppedReason:stoppedReason}' \
+                --output table 2>/dev/null || echo "No task details available"
+            fi
+            echo "---"
+          done
+          
+          echo "✅ Initial deployment monitoring completed - proceeding to health verification"
 
       - name: Health Check Verification
         run: |
@@ -623,12 +598,12 @@ jobs:
             HEALTH_ENDPOINT="https://api.mor.org/health"
           fi
           
-          echo "🔍 Waiting 5 minutes before health check verification..."
-          sleep 300  # 5-minute wait
+          echo "🔍 Waiting 2 minutes for application startup before health check verification..."
+          sleep 120  # 2-minute wait
           
           echo "🔍 Verifying deployment at: $HEALTH_ENDPOINT"
           
-          MAX_RETRIES=20
+          MAX_RETRIES=30
           RETRY_COUNT=0
           VERSION_VERIFIED=false
           
@@ -670,8 +645,8 @@ jobs:
             
             RETRY_COUNT=$((RETRY_COUNT + 1))
             if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-              echo "⏳ Waiting 15 seconds before retry..."
-              sleep 15
+              echo "⏳ Waiting 10 seconds before retry..."
+              sleep 10
             fi
           done
           
