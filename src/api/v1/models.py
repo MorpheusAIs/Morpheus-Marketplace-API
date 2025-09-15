@@ -9,6 +9,7 @@ import json
 from ...schemas import openai as openai_schemas
 from ...services.model_mapper import model_mapper
 from ...core.config import settings
+from ...core.direct_model_service import direct_model_service
 
 router = APIRouter(tags=["Models"])
 
@@ -25,40 +26,30 @@ async def list_models():
     Only returns active models with available providers.
     """
     try:
-        # Fetch from the cached active models URL
-        active_models_url = "https://active.mor.org/active_models.json"
+        # Use DirectModelService to get active models
+        active_models = await direct_model_service.get_raw_models_data()
         
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                active_models_url,
-                timeout=10.0
-            )
-            response.raise_for_status()
+        # Convert blockchain models to OpenAI format with required fields
+        models = []
+        for model in active_models:
+            model_name = model.get("Name", "unknown-model")
+            blockchain_id = model.get("Id", "")
+            created_timestamp = model.get("CreatedAt", int(time.time()))
             
-            data = response.json()
-            active_models = data.get("models", [])
+            # Get model tags
+            tags = model.get("Tags", [])
             
-            # Convert blockchain models to OpenAI format with required fields
-            models = []
-            for model in active_models:
-                model_name = model.get("Name", "unknown-model")
-                blockchain_id = model.get("Id", "")
-                created_timestamp = model.get("CreatedAt", int(time.time()))
-                
-                # Get model tags
-                tags = model.get("Tags", [])
-                
-                # Create simplified OpenAI-compatible model
-                openai_model = {
-                    "id": model_name,
-                    "blockchainID": blockchain_id,
-                    "created": created_timestamp,
-                    "tags": tags
-                }
-                
-                models.append(openai_model)
+            # Create simplified OpenAI-compatible model
+            openai_model = {
+                "id": model_name,
+                "blockchainID": blockchain_id,
+                "created": created_timestamp,
+                "tags": tags
+            }
             
-            return {"object": "list", "data": models}
+            models.append(openai_model)
+        
+        return {"object": "list", "data": models}
     except httpx.HTTPStatusError as e:
         # Handle HTTP errors and return detailed error messages
         import logging

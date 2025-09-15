@@ -1,0 +1,121 @@
+{
+  "widgets": [
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [ "AWS/ECS", "CPUUtilization", "ServiceName", "morpheus-api-service", "ClusterName", "morpheus-cluster" ],
+          [ ".", "MemoryUtilization", ".", ".", ".", "." ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-2",
+        "title": "ECS Service Resources",
+        "period": 300
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [ "AWS/ApplicationELB", "RequestCount", "LoadBalancer", "app/morpheus-api-alb/1234567890123456" ],
+          [ ".", "TargetResponseTime", ".", "." ],
+          [ ".", "HTTPCode_Target_2XX_Count", ".", "." ],
+          [ ".", "HTTPCode_Target_4XX_Count", ".", "." ],
+          [ ".", "HTTPCode_Target_5XX_Count", ".", "." ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-2",
+        "title": "API Gateway Metrics",
+        "period": 300
+      }
+    },
+    {
+      "type": "log",
+      "x": 0,
+      "y": 6,
+      "width": 24,
+      "height": 6,
+      "properties": {
+        "query": "SOURCE '/aws/ecs/morpheus-api-dev' | fields @timestamp, @message\n| filter @message like /DirectModelService|MODEL_DEBUG|Successfully refreshed|Error fetching models/\n| sort @timestamp desc\n| limit 100",
+        "region": "us-east-2",
+        "title": "Direct Model Service Logs",
+        "view": "table"
+      }
+    },
+    {
+      "type": "log",
+      "x": 0,
+      "y": 12,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "query": "SOURCE '/aws/ecs/morpheus-api-dev' | fields @timestamp, @message\n| filter @message like /Successfully refreshed \\d+ models/\n| stats count() by bin(5m)\n| sort @timestamp desc",
+        "region": "us-east-2",
+        "title": "Model Fetch Success Rate",
+        "view": "bar"
+      }
+    },
+    {
+      "type": "log",
+      "x": 12,
+      "y": 12,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "query": "SOURCE '/aws/ecs/morpheus-api-dev' | fields @timestamp, @message\n| filter @message like /Models data unchanged/\n| stats count() by bin(5m)\n| sort @timestamp desc",
+        "region": "us-east-2",
+        "title": "Cache Hit Rate",
+        "view": "bar"
+      }
+    },
+    {
+      "type": "log",
+      "x": 0,
+      "y": 18,
+      "width": 24,
+      "height": 6,
+      "properties": {
+        "query": "SOURCE '/aws/ecs/morpheus-api-dev' | fields @timestamp, @message\n| filter @message like /Error|ERROR|error.*model/\n| sort @timestamp desc\n| limit 50",
+        "region": "us-east-2",
+        "title": "Model Service Errors",
+        "view": "table"
+      }
+    },
+    {
+      "type": "log",
+      "x": 0,
+      "y": 24,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "query": "SOURCE '/aws/ecs/morpheus-api-dev' | fields @timestamp, @message\n| filter @message like /Found mapping:/\n| parse @message /Found mapping: (?<model_name>\\S+) -> (?<blockchain_id>0x[a-fA-F0-9]+)/\n| stats count() by model_name\n| sort count desc\n| limit 20",
+        "region": "us-east-2",
+        "title": "Top Resolved Models",
+        "view": "table"
+      }
+    },
+    {
+      "type": "log",
+      "x": 12,
+      "y": 24,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "query": "SOURCE '/aws/ecs/morpheus-api-dev' | fields @timestamp, @message\n| filter @message like /GET \\/health/\n| stats count() by bin(5m)\n| sort @timestamp desc",
+        "region": "us-east-2",
+        "title": "Health Check Frequency",
+        "view": "bar"
+      }
+    }
+  ]
+}
