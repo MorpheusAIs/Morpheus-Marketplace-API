@@ -23,7 +23,7 @@ from src.api.v1.custom_route import FixedDependencyAPIRoute
 from src.db.models import Session as DbSession
 from src.services import session_service
 from src.db.database import engine, get_db
-from src.core.model_sync import model_sync_service
+from src.core.direct_model_service import direct_model_service
 
 # Define log directory
 log_dir = 'logs'
@@ -234,7 +234,7 @@ async def startup_event():
     APP_START_TIME = datetime.utcnow()
     
     logger.info("🔄 Starting Morpheus API Gateway startup sequence...")
-    logger.info(f"📊 Configuration: MODEL_SYNC_ON_STARTUP={settings.MODEL_SYNC_ON_STARTUP}, MODEL_SYNC_ENABLED={settings.MODEL_SYNC_ENABLED}")
+    logger.info(f"📊 Configuration: Direct model fetching from {settings.ACTIVE_MODELS_URL}")
     logger.info(f"🏷️ Container ID: {CONTAINER_ID}")
     logger.info(f"📦 Version: {APP_VERSION}")
     
@@ -242,32 +242,15 @@ async def startup_event():
     logger.info("🗃️ Checking database migrations...")
     await verify_database_migrations()
     
-    # Sync models on startup if enabled
-    logger.info("🤖 Initializing model synchronization...")
-    if settings.MODEL_SYNC_ON_STARTUP and settings.MODEL_SYNC_ENABLED:
-        logger.info("📥 Starting model synchronization from active.mor.org...")
-        try:
-            sync_success = await model_sync_service.perform_sync()
-            if sync_success:
-                logger.info("✅ Model sync completed successfully during startup")
-            else:
-                logger.warning("⚠️ Model sync failed during startup, but continuing with existing models")
-        except Exception as e:
-            logger.error(f"❌ Model sync failed during startup: {e}")
-            logger.warning("Continuing startup with existing models.json file")
-    else:
-        logger.info("📴 Model sync on startup is disabled")
-    
-    # Start background model sync task if enabled
-    if settings.MODEL_SYNC_ENABLED:
-        try:
-            await model_sync_service.start_background_sync()
-            logger.info("✅ Background model sync started successfully")
-        except Exception as e:
-            logger.error(f"❌ Failed to start background model sync: {e}")
-            logger.warning("Continuing startup without background model sync...")
-    else:
-        logger.info("Background model sync is disabled")
+    # Initialize direct model service (no background tasks needed)
+    logger.info("🤖 Initializing direct model service...")
+    try:
+        # Test initial fetch to ensure service is working
+        models = await direct_model_service.get_model_mapping()
+        logger.info(f"✅ Direct model service initialized with {len(models)} models")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize direct model service: {e}")
+        logger.warning("Continuing startup - model service will retry on first request")
     
     # Make sure all routers use our fixed route class
     try:
@@ -294,14 +277,7 @@ async def shutdown_event():
     Perform cleanup during application shutdown.
     """
     logger.info("🛑 Application shutdown initiated...")
-    
-    # Stop the background model sync task
-    try:
-        await model_sync_service.stop_background_sync()
-        logger.info("✅ Background model sync stopped successfully")
-    except Exception as e:
-        logger.error(f"❌ Error stopping background model sync: {e}")
-    
+    logger.info("✅ Direct model service requires no cleanup (stateless)")
     logger.info("🏁 Application shutdown complete")
 
 async def verify_database_migrations():
@@ -434,6 +410,22 @@ async def health_check():
     except Exception as e:
         db_status = f"unhealthy: {str(e)}"
     
+    # Check model service health
+    model_service_status = "healthy"
+    model_count = 0
+    model_cache_info = {}
+    try:
+        # Test model service connectivity
+        models = await direct_model_service.get_model_mapping()
+        model_count = len(models)
+        model_cache_info = direct_model_service.get_cache_stats()
+        
+        if model_count == 0:
+            model_service_status = "warning: no models available"
+        
+    except Exception as e:
+        model_service_status = f"unhealthy: {str(e)}"
+    
     # Calculate uptime
     uptime_seconds = None
     uptime_human = None
@@ -471,6 +463,13 @@ async def health_check():
         "timestamp": current_time.isoformat(),
         "version": APP_VERSION,
         "database": db_status,
+        "model_service": {
+            "status": model_service_status,
+            "model_count": model_count,
+            "cache_info": model_cache_info,
+            "active_models_url": settings.ACTIVE_MODELS_URL,
+            "default_fallback_model": settings.DEFAULT_FALLBACK_MODEL
+        },
         "container": {
             "id": CONTAINER_ID,
             "system": system_info,
@@ -484,6 +483,67 @@ async def health_check():
     }
     
     return response
+
+@app.get("/health/models", include_in_schema=True)
+async def model_health_check():
+    """
+    Detailed model service health check for monitoring and debugging.
+    
+    Returns comprehensive information about the model fetching service,
+    cache status, and available models for operational monitoring.
+    """
+    try:
+        # Get model service statistics
+        model_mapping = await direct_model_service.get_model_mapping()
+        blockchain_ids = await direct_model_service.get_blockchain_ids()
+        raw_models = await direct_model_service.get_raw_models_data()
+        cache_stats = direct_model_service.get_cache_stats()
+        
+        # Test model resolution for common models
+        test_results = {}
+        test_models = ["venice-uncensored", "mistral-31-24b", "gpt-4", "default"]
+        for test_model in test_models:
+            try:
+                resolved_id = await direct_model_service.resolve_model_id(test_model)
+                test_results[test_model] = {
+                    "status": "resolved" if resolved_id else "not_found",
+                    "blockchain_id": resolved_id
+                }
+            except Exception as e:
+                test_results[test_model] = {
+                    "status": "error",
+                    "error": str(e)
+                }
+        
+        return {
+            "status": "healthy",
+            "timestamp": datetime.utcnow().isoformat(),
+            "service_config": {
+                "active_models_url": settings.ACTIVE_MODELS_URL,
+                "default_fallback_model": settings.DEFAULT_FALLBACK_MODEL,
+                "cache_duration_seconds": cache_stats.get("cache_duration", "unknown")
+            },
+            "cache_stats": cache_stats,
+            "model_counts": {
+                "total_models": len(raw_models),
+                "active_mappings": len(model_mapping),
+                "blockchain_ids": len(blockchain_ids)
+            },
+            "test_results": test_results,
+            "available_models": sorted(list(model_mapping.keys()))[:20],  # First 20 models
+            "sample_blockchain_ids": sorted(list(blockchain_ids))[:10]  # First 10 IDs
+        }
+        
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "timestamp": datetime.utcnow().isoformat(),
+            "error": str(e),
+            "service_config": {
+                "active_models_url": settings.ACTIVE_MODELS_URL,
+                "default_fallback_model": settings.DEFAULT_FALLBACK_MODEL
+            }
+        }
 
 # Custom docs endpoints using standard APIRoute
 @app.get("/docs/oauth2-redirect", include_in_schema=False)

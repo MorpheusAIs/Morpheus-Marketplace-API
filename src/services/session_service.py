@@ -44,7 +44,7 @@ async def create_automated_session(
     try:
         # Get the target model using the model router
         logger.info(f"[SESSION_DEBUG] About to resolve target model from: {requested_model}")
-        target_model = model_router.get_target_model(requested_model)
+        target_model = await model_router.get_target_model(requested_model)
         logger.info(f"[SESSION_DEBUG] Resolved target model: {target_model}")
         
         # If api_key_id provided and db is available, deactivate any existing sessions
@@ -404,7 +404,7 @@ async def switch_model(
     
     # Convert the new model to its ID form for comparison
     try:
-        new_model_id = model_router.get_target_model(new_model)
+        new_model_id = await model_router.get_target_model(new_model)
         logger.info(f"Resolved new model '{new_model}' to ID: {new_model_id}")
     except Exception as e:
         logger.error(f"Error resolving new model '{new_model}' to ID: {e}")
