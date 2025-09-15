@@ -2,7 +2,7 @@ from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, status, Security
-from fastapi.security import HTTPBearer, APIKeyHeader
+from fastapi.security import HTTPBearer, APIKeyHeader, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 from botocore.exceptions import ClientError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +32,12 @@ oauth2_scheme = HTTPBearer(
     description="JWT Bearer token authentication"
 )
 
+# Define optional bearer token scheme for local testing
+oauth2_scheme_optional = HTTPBearer(
+    auto_error=False,
+    description="JWT Bearer token authentication (optional for local testing)"
+)
+
 # Define API key scheme for API key authentication  
 api_key_header = APIKeyHeader(
     name="Authorization", 
@@ -43,12 +49,28 @@ cognito_client = boto3.client('cognito-idp', region_name=settings.AWS_REGION)
 
 async def get_current_user(
     db: AsyncSession = Depends(get_db),
-    token: str = Depends(oauth2_scheme)
+    token: Optional[HTTPAuthorizationCredentials] = Depends(oauth2_scheme_optional)
 ) -> User:
     """
     Validate Cognito JWT token and return the associated user.
     Creates user record if first time login.
+    
+    In local testing mode, bypasses Cognito and returns test user.
     """
+    # Local testing bypass
+    from src.core.local_testing import is_local_testing_mode, get_or_create_test_user
+    if is_local_testing_mode():
+        logging.info("🧪 Using local testing mode - bypassing Cognito authentication")
+        return await get_or_create_test_user(db)
+    
+    # Check if token is provided
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -191,6 +213,8 @@ async def get_api_key_user(
     
     The API key is expected in the format: "Bearer sk-xxxxxx" or just "sk-xxxxxx"
     
+    In local testing mode, bypasses API key validation and returns test user.
+    
     Args:
         db: Database session
         api_key: API key from Authorization header
@@ -201,6 +225,12 @@ async def get_api_key_user(
     Raises:
         HTTPException: If API key is invalid or missing
     """
+    # Local testing bypass
+    from src.core.local_testing import is_local_testing_mode, get_or_create_test_user
+    if is_local_testing_mode():
+        logging.info("🧪 Using local testing mode - bypassing API key validation")
+        return await get_or_create_test_user(db)
+    
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

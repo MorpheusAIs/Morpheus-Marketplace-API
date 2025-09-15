@@ -1,0 +1,76 @@
+# Self-Contained Local Testing Setup
+# Includes local PostgreSQL and bypasses Cognito for true local development
+# Usage: docker-compose -f docker-compose.local.yml up --build
+
+services:
+  # Local PostgreSQL Database (ephemeral)
+  db-local:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: morpheus_local
+      POSTGRES_PASSWORD: local_dev_password
+      POSTGRES_DB: morpheus_local_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_local_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U morpheus_local -d morpheus_local_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Local API with mock authentication
+  api-local:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.local
+    ports:
+      - "8000:8000"
+    depends_on:
+      db-local:
+        condition: service_healthy
+    environment:
+      # Local database
+      DATABASE_URL: postgresql+asyncpg://morpheus_local:local_dev_password@db-local:5432/morpheus_local_db
+      
+      # Bypass Cognito for local testing
+      BYPASS_COGNITO_AUTH: "true"
+      LOCAL_TESTING_MODE: "true"
+      
+      # Model service
+      ACTIVE_MODELS_URL: ${ACTIVE_MODELS_URL:-https://active.dev.mor.org/active_models.json}
+      DEFAULT_FALLBACK_MODEL: ${DEFAULT_FALLBACK_MODEL:-mistral-31-24b}
+      
+      # Proxy router (can use dev or mock)
+      PROXY_ROUTER_URL: ${PROXY_ROUTER_URL:-http://router.dev.mor.org:8082}
+      
+      # JWT settings (local values)
+      JWT_SECRET_KEY: local-testing-secret-key-not-for-production
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      
+      # AWS settings (not needed for local, but prevents errors)
+      AWS_DEFAULT_REGION: us-east-1
+      
+    volumes:
+      # Mount source for hot-reloading
+      - ./src:/app/src
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./tests:/app/tests
+      - ./scripts:/app/scripts
+    
+    # Use startup script that handles migrations and verification
+    command: ./scripts/start_local_dev.sh
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  postgres_local_data:

@@ -17,43 +17,17 @@ from src.crud import chat as chat_crud
 router = APIRouter()
 
 
-# Dependency to get current user from either API key or Cognito JWT
-async def get_current_user_flexible(
-    request: Request,
-    db: AsyncSession = Depends(get_db)
+# Dependency to get current user from API key authentication only
+# This ensures consistency with chat completions endpoint which also uses API key
+async def get_current_user_api_key_only(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_api_key_user)
 ) -> User:
     """
-    Get current user from either Cognito JWT or API key authentication.
-    Tries Cognito JWT first, then API key as fallback.
+    Get current user from API key authentication only.
+    This ensures chat history operations use the same auth as chat completions.
     """
-    from src.dependencies import jwt_bearer, api_key_header
-    
-    try:
-        # Try Cognito JWT authentication first
-        token = await jwt_bearer(request)
-        if token:
-            user = await get_current_user(db=db, token=token)
-            if user:
-                return user
-    except Exception:
-        pass  # Continue to API key authentication
-    
-    try:
-        # Try API key authentication as fallback
-        api_key = await api_key_header(request)
-        if api_key:
-            user = await get_api_key_user(db=db, api_key=api_key)
-            if user:
-                return user
-    except Exception:
-        pass  # Continue to error
-    
-    # If both methods fail, raise authentication error
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Authentication required: provide either Bearer JWT token or API key",
-        headers={"WWW-Authenticate": "Bearer"}
-    )
+    return user
 
 
 # Pydantic models for request/response
@@ -110,7 +84,7 @@ class ChatDetailResponse(BaseModel):
 async def create_chat(
     chat_data: ChatCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user_flexible)
+    current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Create a new chat conversation."""
     chat = await chat_crud.create_chat(db, current_user.id, chat_data.title)
@@ -128,15 +102,16 @@ async def get_user_chats(
     skip: int = 0,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user_flexible)
+    current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Get all chats for the current user."""
     chats = await chat_crud.get_user_chats(db, current_user.id, skip, limit)
     
-    # Convert to response format with message count
+    # Convert to response format with message count (avoid lazy loading)
     chat_responses = []
     for chat in chats:
-        message_count = len(chat.messages) if hasattr(chat, 'messages') else 0
+        # Get message count with a separate query to avoid lazy loading issues
+        message_count = await chat_crud.get_chat_message_count(db, chat.id)
         chat_responses.append(ChatResponse(
             id=chat.id,
             title=chat.title,
@@ -152,7 +127,7 @@ async def get_user_chats(
 async def get_chat(
     chat_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user_flexible)
+    current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Get a specific chat with all messages."""
     chat = await chat_crud.get_chat_by_id(db, chat_id, current_user.id)
@@ -186,7 +161,7 @@ async def update_chat(
     chat_id: str,
     chat_data: ChatUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user_flexible)
+    current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Update chat title."""
     chat = await chat_crud.update_chat_title(db, chat_id, current_user.id, chat_data.title)
@@ -206,7 +181,7 @@ async def delete_chat(
     chat_id: str,
     archive_only: bool = True,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user_flexible)
+    current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Delete or archive a chat."""
     if archive_only:
@@ -224,7 +199,7 @@ async def create_message(
     chat_id: str,
     message_data: MessageCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user_flexible)
+    current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Add a message to a chat."""
     # Verify chat exists and user owns it
@@ -263,7 +238,7 @@ async def get_chat_messages(
     skip: int = 0,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user_flexible)
+    current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Get messages for a specific chat."""
     messages = await chat_crud.get_chat_messages(db, chat_id, current_user.id, skip, limit)
@@ -285,7 +260,7 @@ async def get_chat_messages(
 async def delete_message(
     message_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user_flexible)
+    current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Delete a specific message."""
     success = await chat_crud.delete_message(db, message_id, current_user.id)
