@@ -77,11 +77,14 @@ class Settings(BaseSettings):
     # Delegation
     GATEWAY_DELEGATE_ADDRESS: str = "0xGatewayDelegateAccountAddressPlaceholder" # Placeholder
     
-    # Model Sync Settings
-    MODEL_SYNC_ON_STARTUP: bool = Field(default=os.getenv("MODEL_SYNC_ON_STARTUP", "True").lower() == "true")
-    MODEL_SYNC_INTERVAL_HOURS: int = Field(default=int(os.getenv("MODEL_SYNC_INTERVAL_HOURS", "1")))
-    MODEL_SYNC_ENABLED: bool = Field(default=os.getenv("MODEL_SYNC_ENABLED", "True").lower() == "true")
+    # Direct Model Fetching Settings (replaces model sync)
     ACTIVE_MODELS_URL: str = Field(default=os.getenv("ACTIVE_MODELS_URL", "https://active.dev.mor.org/active_models.json"))
+    DEFAULT_FALLBACK_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_MODEL", "mistral-31-24b"))
+    
+    # Legacy Model Sync Settings (deprecated - kept for compatibility)
+    MODEL_SYNC_ON_STARTUP: bool = Field(default=False)  # Disabled by default
+    MODEL_SYNC_INTERVAL_HOURS: int = Field(default=int(os.getenv("MODEL_SYNC_INTERVAL_HOURS", "1")))
+    MODEL_SYNC_ENABLED: bool = Field(default=False)  # Disabled by default
     
 
 
