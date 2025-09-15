@@ -107,10 +107,11 @@ async def get_user_chats(
     """Get all chats for the current user."""
     chats = await chat_crud.get_user_chats(db, current_user.id, skip, limit)
     
-    # Convert to response format with message count
+    # Convert to response format with message count (avoid lazy loading)
     chat_responses = []
     for chat in chats:
-        message_count = len(chat.messages) if hasattr(chat, 'messages') else 0
+        # Get message count with a separate query to avoid lazy loading issues
+        message_count = await chat_crud.get_chat_message_count(db, chat.id)
         chat_responses.append(ChatResponse(
             id=chat.id,
             title=chat.title,

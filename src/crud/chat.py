@@ -2,7 +2,7 @@
 CRUD operations for chat and message management.
 """
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, update, delete, func
 from sqlalchemy.orm import selectinload
 from typing import List, Optional
 import uuid
@@ -46,6 +46,15 @@ async def get_user_chats(db: AsyncSession, user_id: int, skip: int = 0, limit: i
         .limit(limit)
     )
     return list(result.scalars())
+
+
+async def get_chat_message_count(db: AsyncSession, chat_id: str) -> int:
+    """Get the number of messages in a chat."""
+    result = await db.execute(
+        select(func.count(Message.id))
+        .where(Message.chat_id == chat_id)
+    )
+    return result.scalar() or 0
 
 
 async def update_chat_title(db: AsyncSession, chat_id: str, user_id: int, title: str) -> Optional[Chat]:
