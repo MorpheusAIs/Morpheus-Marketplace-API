@@ -136,19 +136,7 @@ async def _handle_automated_session_creation(
         # Return None to fall back to manual session handling
         return None
 
-@router.post("/completions", response_model=None, responses={
-    200: {
-        "description": "Chat completion response",
-        "content": {
-            "text/event-stream": {
-                "schema": {"type": "string"}
-            },
-            "application/json": {
-                "schema": openai_schemas.ChatCompletionResponse.schema()
-            }
-        }
-    }
-})
+@router.post("/completions")
 async def create_chat_completion(
     request_data: ChatCompletionRequest,
     request: Request,
@@ -253,7 +241,7 @@ async def create_chat_completion(
                     # Convert the requested model name to model ID for proper comparison
                     logger.info(f"Converting requested model '{requested_model}' to model ID for comparison")
                     try:
-                        requested_model_id = model_router.get_target_model(requested_model)
+                        requested_model_id = await model_router.get_target_model(requested_model)
                         logger.info(f"Requested model '{requested_model}' resolved to ID: {requested_model_id}")
                         
                         # First check if the session is expired before comparing models

@@ -1,8 +1,9 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, LargeBinary, JSON, UniqueConstraint, Index, TEXT
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, LargeBinary, JSON, UniqueConstraint, Index, TEXT, Enum
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from sqlalchemy.sql import func
+import enum
 
 Base = declarative_base()
 
@@ -11,9 +12,9 @@ class User(Base):
     __tablename__ = "users"
     
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String)
-    email = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
+    cognito_user_id = Column(String, unique=True, index=True, nullable=False)  # Cognito 'sub' claim
+    email = Column(String, unique=True, index=True, nullable=False)  # From Cognito token
+    name = Column(String, nullable=True)  # From Cognito token (given_name/family_name)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -24,6 +25,7 @@ class User(Base):
     private_key = relationship("UserPrivateKey", back_populates="user", uselist=False, cascade="all, delete-orphan")
     automation_settings = relationship("UserAutomationSettings", back_populates="user", uselist=False, cascade="all, delete-orphan")
     delegations = relationship("Delegation", back_populates="user", cascade="all, delete-orphan")
+    chats = relationship("Chat", back_populates="user", cascade="all, delete-orphan")
 
 
 # APIKey model (if not already defined)
@@ -112,4 +114,52 @@ class Session(Base):
     
     @property
     def is_expired(self):
-        return datetime.utcnow() > self.expires_at 
+        return datetime.utcnow() > self.expires_at
+
+
+# Enum for message roles
+class MessageRole(enum.Enum):
+    user = "user"
+    assistant = "assistant"
+
+
+# Chat model for conversation history
+class Chat(Base):
+    __tablename__ = "chats"
+    
+    id = Column(String, primary_key=True)  # UUID string
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    title = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_archived = Column(Boolean, default=False)
+    
+    # Relationships
+    user = relationship("User", back_populates="chats")
+    messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")
+    
+    # Index for efficient queries
+    __table_args__ = (
+        Index('ix_chats_user_id_updated_at', 'user_id', 'updated_at'),
+    )
+
+
+# Message model for individual chat messages
+class Message(Base):
+    __tablename__ = "messages"
+    
+    id = Column(String, primary_key=True)  # UUID string
+    chat_id = Column(String, ForeignKey("chats.id", ondelete="CASCADE"), nullable=False)
+    role = Column(Enum(MessageRole, name='message_role'), nullable=False)  # Match migration-created enum name
+    content = Column(TEXT, nullable=False)
+    sequence = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    tokens = Column(Integer, nullable=True)  # Token count for billing/analytics
+    
+    # Relationships
+    chat = relationship("Chat", back_populates="messages")
+    
+    # Index for efficient queries
+    __table_args__ = (
+        Index('ix_messages_chat_id_sequence', 'chat_id', 'sequence'),
+    ) 
