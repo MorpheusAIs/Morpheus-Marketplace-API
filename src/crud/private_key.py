@@ -190,4 +190,19 @@ async def get_private_key_with_fallback(db: AsyncSession, user_id: int) -> Tuple
         return sanitize_private_key(settings.FALLBACK_PRIVATE_KEY), True
     
     # No private key and no fallback
-    return None, True 
+    return None, True
+
+
+async def user_has_private_key(db: AsyncSession, user_id: int) -> bool:
+    """
+    Check if a user has a private key stored.
+    
+    Args:
+        db: Database session
+        user_id: ID of the user
+        
+    Returns:
+        True if user has a private key, False otherwise
+    """
+    db_private_key = await get_user_private_key(db, user_id)
+    return db_private_key is not None 

@@ -15,7 +15,7 @@ from src.schemas.user import UserDeletionResponse
 from src.schemas.api_key import APIKeyCreate, APIKeyResponse, APIKeyDB
 from src.schemas import private_key as private_key_schemas
 from src.schemas import delegation as delegation_schemas
-from src.dependencies import CurrentUser
+from src.dependencies import CurrentUser, get_current_user
 from src.db.models import User
 from src.core.config import settings
 from src.services.cognito_service import cognito_service
@@ -30,7 +30,7 @@ router = APIRouter(tags=["Auth"])
 
 @router.get("/me", response_model=dict)
 async def get_current_user_info(
-    current_user: CurrentUser,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     refresh_from_cognito: bool = Query(False, description="Fetch fresh user data from Cognito")
 ):
@@ -81,7 +81,7 @@ async def get_current_user_info(
 @router.post("/keys", response_model=APIKeyResponse)
 async def create_api_key(
     api_key_in: APIKeyCreate,
-    current_user: CurrentUser,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -100,7 +100,7 @@ async def create_api_key(
 
 @router.get("/keys", response_model=List[APIKeyDB])
 async def get_api_keys(
-    current_user: CurrentUser,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -114,7 +114,7 @@ async def get_api_keys(
 @router.delete("/keys/{key_id}", response_model=APIKeyDB)
 async def delete_api_key(
     key_id: int,
-    current_user: CurrentUser,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -137,22 +137,15 @@ async def delete_api_key(
 # Private key management endpoints
 @router.post("/private-key", status_code=status.HTTP_201_CREATED, response_model=dict)
 async def store_private_key(
-    request_body: dict = Body(...),
+    private_key_data: private_key_schemas.PrivateKeyCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Store an encrypted blockchain private key for the authenticated user.
     Replaces any existing key.
     """
-    # Validate request body manually
-    if "private_key" not in request_body:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Private key is required"
-        )
-    
-    private_key = request_body["private_key"]
+    private_key = private_key_data.private_key
     
     try:
         await private_key_crud.create_user_private_key(
@@ -171,19 +164,19 @@ async def store_private_key(
 @router.get("/private-key", response_model=private_key_schemas.PrivateKeyStatus)
 async def get_private_key_status(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Check if a user has a private key registered.
     Does not return the actual key, only status information.
     """
     has_key = await private_key_crud.user_has_private_key(db, current_user.id)
-    return {"has_private_key": has_key}
+    return {"has_key": has_key}
 
 @router.delete("/private-key", status_code=status.HTTP_200_OK, response_model=dict)
 async def delete_private_key(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Delete a user's private key.
@@ -209,7 +202,7 @@ async def delete_private_key(
 async def store_delegation(
     delegation_in: delegation_schemas.DelegationCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Allows an authenticated user to store a signed delegation.
@@ -235,7 +228,7 @@ async def get_user_delegations(
     skip: int = 0,
     limit: int = 10,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Retrieves the user's stored delegations.
@@ -246,7 +239,7 @@ async def get_user_delegations(
 @router.get("/delegation/active", response_model=Optional[delegation_schemas.DelegationRead])
 async def get_active_user_delegation(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Retrieves the user's currently active delegation, if any.
@@ -258,7 +251,7 @@ async def get_active_user_delegation(
 async def delete_delegation(
     delegation_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Deletes a specific delegation for the user.
@@ -276,7 +269,7 @@ async def delete_delegation(
 
 @router.delete("/register", response_model=UserDeletionResponse, status_code=status.HTTP_200_OK)
 async def delete_user_account(
-    current_user: CurrentUser,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
