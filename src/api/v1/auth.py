@@ -15,7 +15,7 @@ from src.schemas.user import UserDeletionResponse
 from src.schemas.api_key import APIKeyCreate, APIKeyResponse, APIKeyDB
 from src.schemas import private_key as private_key_schemas
 from src.schemas import delegation as delegation_schemas
-from src.dependencies import CurrentUser
+from src.dependencies import CurrentUser, get_current_user
 from src.db.models import User
 from src.core.config import settings
 from src.services.cognito_service import cognito_service
