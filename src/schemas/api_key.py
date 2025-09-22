@@ -25,6 +25,7 @@ class APIKeyDB(BaseModel):
     name: Optional[str] = None
     created_at: datetime
     is_active: bool
+    is_default: bool = False
 
     # Configure Pydantic to work with SQLAlchemy
     model_config = ConfigDict(from_attributes=True) 

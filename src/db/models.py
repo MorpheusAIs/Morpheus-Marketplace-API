@@ -40,6 +40,7 @@ class APIKey(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     last_used_at = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True)
+    is_default = Column(Boolean, default=False, index=True)  # User-defined default key
     
     # Relationships
     user = relationship("User", back_populates="api_keys")

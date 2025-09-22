@@ -100,6 +100,101 @@ async def get_user_api_keys(db: AsyncSession, user_id: int) -> List[APIKey]:
     result = await db.execute(select(APIKey).where(APIKey.user_id == user_id))
     return result.scalars().all()
 
+async def get_default_api_key(db: AsyncSession, user_id: int) -> Optional[APIKey]:
+    """
+    Get the user's default API key. If no default is set, returns the first (oldest) active API key.
+    
+    Args:
+        db: Database session
+        user_id: User ID
+        
+    Returns:
+        Default APIKey object if found, None otherwise
+    """
+    # First, try to get the user-defined default key
+    result = await db.execute(
+        select(APIKey)
+        .options(joinedload(APIKey.user))
+        .where(APIKey.user_id == user_id)
+        .where(APIKey.is_active == True)
+        .where(APIKey.is_default == True)
+        .limit(1)
+    )
+    default_key = result.scalars().first()
+    
+    if default_key:
+        return default_key
+    
+    # If no default is set, fall back to the first (oldest) active key
+    result = await db.execute(
+        select(APIKey)
+        .options(joinedload(APIKey.user))
+        .where(APIKey.user_id == user_id)
+        .where(APIKey.is_active == True)
+        .order_by(APIKey.created_at.asc())
+        .limit(1)
+    )
+    return result.scalars().first()
+
+async def get_first_active_api_key(db: AsyncSession, user_id: int) -> Optional[APIKey]:
+    """
+    Get the first (oldest) active API key for a user.
+    
+    Args:
+        db: Database session
+        user_id: User ID
+        
+    Returns:
+        First active APIKey object if found, None otherwise
+    """
+    result = await db.execute(
+        select(APIKey)
+        .options(joinedload(APIKey.user))
+        .where(APIKey.user_id == user_id)
+        .where(APIKey.is_active == True)
+        .order_by(APIKey.created_at.asc())
+        .limit(1)
+    )
+    return result.scalars().first()
+
+async def set_default_api_key(db: AsyncSession, api_key_id: int, user_id: int) -> Optional[APIKey]:
+    """
+    Set an API key as the user's default. Clears any existing default.
+    
+    Args:
+        db: Database session
+        api_key_id: API key ID to set as default
+        user_id: User ID for security check
+        
+    Returns:
+        Updated APIKey object if successful, None otherwise
+    """
+    # First, clear any existing default for this user
+    await db.execute(
+        update(APIKey)
+        .where(APIKey.user_id == user_id)
+        .where(APIKey.is_default == True)
+        .values(is_default=False)
+    )
+    
+    # Set the new default
+    result = await db.execute(
+        update(APIKey)
+        .where(APIKey.id == api_key_id)
+        .where(APIKey.user_id == user_id)
+        .where(APIKey.is_active == True)
+        .values(is_default=True)
+        .returning(APIKey)
+    )
+    
+    updated_key = result.scalars().first()
+    if updated_key:
+        await db.commit()
+        await db.refresh(updated_key)
+        return updated_key
+    
+    return None
+
 async def deactivate_api_key(db: AsyncSession, api_key_id: int, user_id: Optional[int] = None) -> Optional[APIKey]:
     """
     Deactivate an API key.

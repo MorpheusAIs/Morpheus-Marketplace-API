@@ -111,6 +111,55 @@ async def get_api_keys(
     api_keys = await api_key_crud.get_user_api_keys(db, current_user.id)
     return api_keys
 
+@router.get("/keys/first", response_model=Optional[APIKeyDB])
+async def get_first_api_key(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get the first (oldest) active API key for the current user.
+    This is used for automatic API key selection on login.
+    
+    Requires JWT Bearer authentication with the token received from the login endpoint.
+    """
+    first_api_key = await api_key_crud.get_first_active_api_key(db, current_user.id)
+    return first_api_key
+
+@router.get("/keys/default", response_model=Optional[APIKeyDB])
+async def get_default_api_key(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get the user's default API key. If no default is set, returns the first (oldest) active API key.
+    This respects user preference for default key selection.
+    
+    Requires JWT Bearer authentication with the token received from the login endpoint.
+    """
+    default_api_key = await api_key_crud.get_default_api_key(db, current_user.id)
+    return default_api_key
+
+@router.put("/keys/{key_id}/default", response_model=APIKeyDB)
+async def set_default_api_key(
+    key_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Set an API key as the user's default. Clears any existing default.
+    
+    Requires JWT Bearer authentication with the token received from the login endpoint.
+    """
+    updated_key = await api_key_crud.set_default_api_key(db, key_id, current_user.id)
+    
+    if not updated_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API key not found or not owned by user"
+        )
+    
+    return updated_key
+
 @router.delete("/keys/{key_id}", response_model=APIKeyDB)
 async def delete_api_key(
     key_id: int,
