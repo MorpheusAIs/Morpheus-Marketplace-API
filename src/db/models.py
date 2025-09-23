@@ -34,7 +34,9 @@ class APIKey(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     key_prefix = Column(String, index=True)
-    hashed_key = Column(String)
+    hashed_key = Column(String)  # Keep for backward compatibility and verification
+    encrypted_key = Column(TEXT, nullable=True)  # New encrypted storage
+    encryption_version = Column(Integer, default=1, index=True)  # For future algorithm updates
     user_id = Column(Integer, ForeignKey("users.id"))
     name = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

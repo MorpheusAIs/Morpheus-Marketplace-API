@@ -139,6 +139,35 @@ async def get_default_api_key(
     default_api_key = await api_key_crud.get_default_api_key(db, current_user.id)
     return default_api_key
 
+@router.get("/keys/default/decrypted")
+async def get_default_api_key_decrypted(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get the user's default API key with the full decrypted key for auto-selection.
+    
+    This endpoint returns the full API key to enable seamless Chat/Test access.
+    The key is decrypted using the user's Cognito data for security.
+    
+    Requires JWT Bearer authentication with the token received from the login endpoint.
+    """
+    result = await api_key_crud.get_decrypted_default_api_key(db, current_user.id)
+    
+    if not result:
+        return {"error": "No default API key found"}
+    
+    api_key_obj, decrypted_key = result
+    
+    return {
+        "id": api_key_obj.id,
+        "key_prefix": api_key_obj.key_prefix,
+        "name": api_key_obj.name,
+        "is_default": api_key_obj.is_default,
+        "created_at": api_key_obj.created_at,
+        "full_key": decrypted_key  # The decrypted full API key
+    }
+
 @router.put("/keys/{key_id}/default", response_model=APIKeyDB)
 async def set_default_api_key(
     key_id: int,
