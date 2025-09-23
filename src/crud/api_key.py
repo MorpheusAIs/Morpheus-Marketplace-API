@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from src.core.security import generate_api_key, get_api_key_hash
+from src.core.encryption import APIKeyEncryption
 from src.db.models import APIKey, User
 from src.schemas.api_key import APIKeyCreate
 
@@ -58,16 +59,29 @@ async def create_api_key(db: AsyncSession, user_id: int, api_key_in: APIKeyCreat
     Returns:
         Tuple of (APIKey object, plain text API key)
     """
+    # Get user info for encryption
+    user_result = await db.execute(select(User).where(User.id == user_id))
+    user = user_result.scalar_one_or_none()
+    if not user:
+        raise ValueError(f"User {user_id} not found")
+    
     # Generate a new API key
     full_key, key_prefix = generate_api_key()
     
-    # Hash the API key
+    # Hash the API key (keep for backward compatibility)
     hashed_key = get_api_key_hash(full_key)
+    
+    # Encrypt the API key using Cognito user data
+    encrypted_key = APIKeyEncryption.encrypt_api_key(
+        full_key, user.cognito_user_id, user.email
+    )
     
     # Create API key object with required fields
     api_key_data = {
         "key_prefix": key_prefix,
         "hashed_key": hashed_key,
+        "encrypted_key": encrypted_key,
+        "encryption_version": 1,
         "user_id": user_id,
         "is_active": True
     }
@@ -275,4 +289,61 @@ async def delete_all_user_api_keys(db: AsyncSession, user_id: int) -> int:
     )
     await db.commit()
     
-    return count 
+    return count
+
+async def get_decrypted_api_key(db: AsyncSession, api_key_id: int, user_id: int) -> Optional[str]:
+    """
+    Get the decrypted full API key for a user.
+    
+    Args:
+        db: Database session
+        api_key_id: API key ID
+        user_id: User ID (for security)
+        
+    Returns:
+        Decrypted API key or None if not found/decryption fails
+    """
+    # Get API key with user info
+    result = await db.execute(
+        select(APIKey)
+        .options(joinedload(APIKey.user))
+        .where(APIKey.id == api_key_id, APIKey.user_id == user_id, APIKey.is_active == True)
+    )
+    api_key = result.scalar_one_or_none()
+    
+    if not api_key or not api_key.encrypted_key:
+        return None
+    
+    # Decrypt using user's Cognito data
+    decrypted_key = APIKeyEncryption.decrypt_api_key(
+        api_key.encrypted_key,
+        api_key.user.cognito_user_id,
+        api_key.user.email
+    )
+    
+    return decrypted_key
+
+async def get_decrypted_default_api_key(db: AsyncSession, user_id: int) -> Optional[tuple[APIKey, str]]:
+    """
+    Get the user's default API key with decrypted full key.
+    
+    Args:
+        db: Database session
+        user_id: User ID
+        
+    Returns:
+        Tuple of (APIKey object, decrypted full key) or None if not found
+    """
+    # Get default API key or first active key
+    default_api_key = await get_default_api_key(db, user_id)
+    
+    if not default_api_key:
+        return None
+    
+    # Decrypt the full key
+    decrypted_key = await get_decrypted_api_key(db, default_api_key.id, user_id)
+    
+    if not decrypted_key:
+        return None
+    
+    return default_api_key, decrypted_key 
