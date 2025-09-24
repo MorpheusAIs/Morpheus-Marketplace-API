@@ -182,8 +182,8 @@ async def update_user_from_cognito(
         
     except Exception as e:
         # Log error but don't fail - return the original user
-        from ..core.structured_logger import create_component_logger
-        user_log = create_component_logger("USER")
+        from ..core.structured_logger import AUTH_LOG
+        user_log = AUTH_LOG.named("USER")
         user_log.with_fields(
             event_type="cognito_update",
             user_id=db_user.id,

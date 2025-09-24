@@ -27,16 +27,16 @@ from src.core.direct_model_service import direct_model_service
 
 # Initialize Zap-compatible logging (like Morpheus-Lumerin-Node)
 from src.core.logging_config import setup_zap_compatible_logging
-from src.core.structured_logger import APP_LOG, SESSION_LOG, MODEL_LOG, DATABASE_LOG
+from src.core.structured_logger import APP_LOG, CORE_LOG, DATABASE_LOG, MODELS_LOG
 
 # Setup Zap-compatible logging system
 setup_zap_compatible_logging()
 
-# Create component loggers (like Lumerin Node pattern)
+# Create component loggers (simplified 6-category hierarchy)
 app_log = APP_LOG
-session_log = SESSION_LOG  
-model_log = MODEL_LOG
+core_log = CORE_LOG
 database_log = DATABASE_LOG
+models_log = MODELS_LOG
 
 # Global variables for container diagnostics
 APP_START_TIME = None
@@ -178,7 +178,7 @@ async def cleanup_expired_sessions():
     from sqlalchemy.ext.asyncio import AsyncSession
     import traceback
     
-    cleanup_log = session_log.named("CLEANUP")
+    cleanup_log = database_log.named("CLEANUP")
     cleanup_log.info("Starting expired session cleanup task")
     
     while True:
@@ -276,12 +276,12 @@ async def startup_event():
         #     app_log.info("Skipping database version check in this worker to prevent connection contention")
         
         # Initialize direct model service with memory-conscious approach
-        model_log.info("Initializing direct model service...")
+        models_log.info("Initializing direct model service...")
         try:
             # Stagger model fetching to reduce concurrent requests (shorter delays to avoid timeout)
             stagger_delay = (worker_pid % 4) * 0.5  # 0, 0.5, 1.0, 1.5 second delays
             if stagger_delay > 0:
-                model_log.with_fields(
+                models_log.with_fields(
                     stagger_delay=stagger_delay,
                     worker_pid=worker_pid
                 ).infof("Staggering model fetch by %.1fs to reduce concurrent requests", stagger_delay)
@@ -289,9 +289,9 @@ async def startup_event():
             
             # Test initial fetch to ensure service is working
             models = await direct_model_service.get_model_mapping()
-            model_log.model_event("initialization_complete", model_count=len(models))
+            models_log.model_event("initialization_complete", model_count=len(models))
         except Exception as e:
-            model_log.with_fields(error=str(e)).error("Failed to initialize direct model service")
+            models_log.with_fields(error=str(e)).error("Failed to initialize direct model service")
             app_log.warn("Continuing startup - model service will retry on first request")
         
     except Exception as e:

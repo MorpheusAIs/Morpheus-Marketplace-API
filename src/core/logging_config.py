@@ -15,9 +15,9 @@ class ZapCompatibleJSONFormatter(logging.Formatter):
     """JSON formatter compatible with Zap logger structure from Morpheus-Lumerin-Node"""
     
     def format(self, record: logging.LogRecord) -> str:
-        # Zap-compatible structure (clean, no emojis)
+        # Zap-compatible structure (match proxy-router format with uppercase levels)
         log_entry = {
-            "level": record.levelname.lower(),  # zap uses lowercase levels
+            "level": record.levelname.upper(),  # match proxy-router uppercase levels
             "ts": datetime.utcnow().isoformat() + "Z",  # zap timestamp format
             "caller": f"{record.module}:{record.lineno}",
             "logger": record.name,
@@ -61,7 +61,7 @@ def setup_zap_compatible_logging():
     
     # Environment variables (matching Lumerin Node)
     use_json = os.getenv('LOG_JSON', 'true').lower() == 'true'
-    log_level = os.getenv('LOG_LEVEL_APP', 'INFO').upper()
+    log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
     log_color = os.getenv('LOG_COLOR', 'false').lower() == 'true'
     log_is_prod = os.getenv('LOG_IS_PROD', 'false').lower() == 'true'
     
@@ -93,4 +93,4 @@ def setup_zap_compatible_logging():
 def get_component_log_level(component: str) -> str:
     """Get component-specific log level (like Lumerin Node)"""
     env_var = f"LOG_LEVEL_{component.upper()}"
-    return os.getenv(env_var, os.getenv('LOG_LEVEL_APP', 'INFO')).upper()
+    return os.getenv(env_var, os.getenv('LOG_LEVEL', 'INFO')).upper()

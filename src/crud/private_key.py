@@ -9,10 +9,10 @@ from ..db.models import UserPrivateKey
 from ..core.key_vault import key_vault
 from ..core.config import settings
 from ..schemas import private_key as schemas
-from ..core.structured_logger import create_component_logger
+from ..core.structured_logger import AUTH_LOG
 
-# Setup structured logging
-private_key_log = create_component_logger("PRIVATE_KEY")
+# Setup structured logging (Auth category)
+private_key_log = AUTH_LOG.named("PRIVATE_KEY")
 
 
 def sanitize_private_key(private_key: str) -> str:

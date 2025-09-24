@@ -17,10 +17,10 @@ from ...crud import session as session_crud
 from ...crud import api_key as api_key_crud
 from ...crud import private_key as private_key_crud
 from ...services.proxy_router import execute_proxy_router_operation, handle_proxy_error
-from ...core.structured_logger import create_component_logger
+from ...core.structured_logger import API_LOG
 
-# Setup structured logging
-session_api_log = create_component_logger("SESSION_API")
+# Setup structured logging (API endpoints category)
+session_api_log = API_LOG.named("SESSION_API")
 from ...services import session_service
 from ...core.model_routing import model_router
 
@@ -197,8 +197,6 @@ async def create_bid_session(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Setup detailed logging
-    logging.basicConfig(level=logging.DEBUG)
     
     # We need to extract the API key prefix, but we know it's already loaded
     # Using the API key returned from the dependency is safer than depending on user.api_keys
@@ -428,8 +426,6 @@ async def create_model_session(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Setup detailed logging
-    logging.basicConfig(level=logging.DEBUG)
     
     # We need to extract the API key prefix, but we know it's already loaded
     # Using the API key returned from the dependency is safer than depending on user.api_keys

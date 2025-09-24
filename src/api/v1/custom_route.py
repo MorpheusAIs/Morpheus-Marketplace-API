@@ -14,10 +14,10 @@ from starlette.responses import Response
 import inspect
 import traceback
 from typing import Any, Callable, Dict, List, Optional, Set, Type
-from ...core.structured_logger import create_component_logger
+from ...core.structured_logger import CORE_LOG
 
-# Setup structured logging
-custom_route_log = create_component_logger("CUSTOM_ROUTE")
+# Setup structured logging (Core infrastructure category)
+custom_route_log = CORE_LOG.named("CUSTOM_ROUTE")
 
 class FixedDependencyAPIRoute(APIRoute):
     """

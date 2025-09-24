@@ -13,7 +13,7 @@ from ..crud import session as session_crud
 from ..crud import private_key as private_key_crud
 from .proxy_router import execute_proxy_router_operation
 from ..core.model_routing import model_router
-from ..core.structured_logger import SESSION_LOG
+from ..core.structured_logger import PROXY_LOG
 
 async def create_automated_session(
     db: AsyncSession = None,
@@ -35,7 +35,7 @@ async def create_automated_session(
     Returns:
         Session: The created session object
     """
-    session_log = SESSION_LOG.named("CREATE").with_fields(
+    session_log = PROXY_LOG.named("CREATE").with_fields(
         api_key_id=api_key_id,
         user_id=user_id,
         requested_model=requested_model,
@@ -533,7 +533,7 @@ async def synchronize_sessions(db: AsyncSession):
     Args:
         db: Database session
     """
-    sync_log = SESSION_LOG.named("SYNC")
+    sync_log = PROXY_LOG.named("SYNC")
     sync_log.with_fields(
         event_type="session_sync",
         action="starting"

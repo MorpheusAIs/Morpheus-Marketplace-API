@@ -10,10 +10,10 @@ from ...schemas import openai as openai_schemas
 from ...services.model_mapper import model_mapper
 from ...core.config import settings
 from ...core.direct_model_service import direct_model_service
-from ...core.structured_logger import create_component_logger
+from ...core.structured_logger import API_LOG
 
-# Setup structured logging
-models_log = create_component_logger("MODELS")
+# Setup structured logging (API endpoints category)
+models_api_log = API_LOG.named("MODELS_API")
 
 router = APIRouter(tags=["Models"])
 
@@ -58,7 +58,7 @@ async def list_models():
         return {"object": "list", "data": models}
     except httpx.HTTPStatusError as e:
         # Handle HTTP errors and return detailed error messages
-        models_log.with_fields(
+        models_api_log.with_fields(
             event_type="http_error",
             endpoint="active_models",
             status_code=e.response.status_code if hasattr(e, 'response') else None,
@@ -84,7 +84,7 @@ async def list_models():
         )
     except Exception as e:
         # Handle other errors
-        models_log.with_fields(
+        models_api_log.with_fields(
             event_type="general_error",
             endpoint="active_models",
             error=str(e)
@@ -145,7 +145,7 @@ async def list_all_models():
             return {"object": "list", "data": models}
     except httpx.HTTPStatusError as e:
         # Handle HTTP errors and return detailed error messages
-        models_log.with_fields(
+        models_api_log.with_fields(
             event_type="http_error",
             endpoint="all_models",
             status_code=e.response.status_code if hasattr(e, 'response') else None,
@@ -171,7 +171,7 @@ async def list_all_models():
         )
     except Exception as e:
         # Handle other errors
-        models_log.with_fields(
+        models_api_log.with_fields(
             event_type="general_error",
             endpoint="all_models",
             error=str(e)
@@ -206,7 +206,7 @@ async def get_rated_bids(
             return response.json()
     except httpx.HTTPStatusError as e:
         # Handle HTTP errors with detailed information
-        models_log.with_fields(
+        models_api_log.with_fields(
             event_type="http_error",
             endpoint="rated_bids",
             status_code=e.response.status_code if hasattr(e, 'response') else None,
@@ -232,7 +232,7 @@ async def get_rated_bids(
         )
     except Exception as e:
         # Handle other errors
-        models_log.with_fields(
+        models_api_log.with_fields(
             event_type="general_error",
             endpoint="rated_bids",
             error=str(e)

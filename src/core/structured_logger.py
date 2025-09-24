@@ -149,10 +149,11 @@ def create_component_logger(component_name: str) -> ZapCompatibleLogger:
     return ZapCompatibleLogger(component_name.upper(), component_name.lower())
 
 
-# Pre-configured component loggers
-APP_LOG = create_component_logger("APP")
-SESSION_LOG = create_component_logger("SESSION") 
-MODEL_LOG = create_component_logger("MODEL")
-PROXY_LOG = create_component_logger("PROXY")
-AUTH_LOG = create_component_logger("AUTH")
-DATABASE_LOG = create_component_logger("DATABASE")
+# Pre-configured component loggers (6 categories)
+APP_LOG = create_component_logger("APP")        # Application-wide default
+CORE_LOG = create_component_logger("CORE")      # Infrastructure (Uvicorn, FastAPI, HTTP, dependencies, local testing)
+AUTH_LOG = create_component_logger("AUTH")      # Authentication (Cognito, JWT, API keys, private keys)  
+DATABASE_LOG = create_component_logger("DATABASE") # All database operations
+PROXY_LOG = create_component_logger("PROXY")    # Upstream calls to proxy-router API endpoints
+MODELS_LOG = create_component_logger("MODELS")  # Model fetching, caching, routing
+API_LOG = create_component_logger("API")        # Local API endpoints (chat, embeddings, models, sessions)

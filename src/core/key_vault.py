@@ -21,10 +21,10 @@ from cryptography.hazmat.backends import default_backend
 import secrets
 
 from src.core.config import settings
-from .structured_logger import create_component_logger
+from .structured_logger import AUTH_LOG
 
-# Setup structured logging
-key_vault_log = create_component_logger("KEY_VAULT")
+# Setup structured logging (Auth category)
+key_vault_log = AUTH_LOG.named("KEY_VAULT")
 
 class KeyVault:
     """

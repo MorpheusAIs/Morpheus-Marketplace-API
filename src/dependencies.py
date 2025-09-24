@@ -24,10 +24,10 @@ from src.db.database import get_db
 from src.db.models import User, APIKey
 from src.schemas.token import TokenPayload
 from src.services.cognito_service import cognito_service
-from src.core.structured_logger import create_component_logger
+from src.core.structured_logger import CORE_LOG
 
-# Setup structured logging
-dependencies_log = create_component_logger("DEPENDENCIES")
+# Setup structured logging (Core infrastructure category)
+dependencies_log = CORE_LOG.named("DEPENDENCIES")
 
 # Define bearer token scheme for JWT authentication
 oauth2_scheme = HTTPBearer(

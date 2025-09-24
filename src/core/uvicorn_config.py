@@ -5,11 +5,11 @@ Configures Uvicorn's access logs and error logs to use our Zap-compatible format
 
 import logging
 from typing import Dict, Any
-from src.core.structured_logger import create_component_logger
+from src.core.structured_logger import CORE_LOG
 
-# Create structured loggers for Uvicorn
-uvicorn_log = create_component_logger("UVICORN")
-access_log = create_component_logger("ACCESS")
+# Create structured loggers for Uvicorn (Core infrastructure category)
+uvicorn_log = CORE_LOG.named("UVICORN")
+access_log = CORE_LOG.named("ACCESS")
 
 class StructuredUvicornFormatter(logging.Formatter):
     """Custom formatter for Uvicorn logs to use structured JSON format"""

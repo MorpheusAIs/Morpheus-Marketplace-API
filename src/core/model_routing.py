@@ -1,10 +1,10 @@
 from typing import Dict, Optional
 from .direct_model_service import direct_model_service
 from .config import settings
-from .structured_logger import create_component_logger
+from .structured_logger import MODELS_LOG
 
-# Configure structured logger
-model_router_log = create_component_logger("MODEL_ROUTER")
+# Configure structured logger (Models category)
+model_router_log = MODELS_LOG.named("MODEL_ROUTER")
 
 # Get default model from settings
 DEFAULT_MODEL = getattr(settings, 'DEFAULT_FALLBACK_MODEL', "mistral-31-24b")

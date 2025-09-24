@@ -22,10 +22,10 @@ import base64
 from pydantic import BaseModel, Field
 
 from ...dependencies import get_api_key_user, api_key_header
-from ...core.structured_logger import create_component_logger
+from ...core.structured_logger import API_LOG
 
-# Setup structured logging
-chat_log = create_component_logger("CHAT")
+# Setup structured logging (API endpoints category)
+chat_log = API_LOG.named("CHAT")
 from ...db.database import get_db
 from ...db.models import User, APIKey
 from ...schemas import openai as openai_schemas

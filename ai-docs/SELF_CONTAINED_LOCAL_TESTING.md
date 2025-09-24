@@ -110,9 +110,18 @@ DEFAULT_FALLBACK_MODEL=mistral-31-24b
 # Proxy Router (can use dev or mock)
 PROXY_ROUTER_URL=http://router.dev.mor.org:8082
 
-# Development Settings
-LOG_LEVEL=DEBUG
+# Development Settings  
+LOG_LEVEL=DEBUG              # Master log level (controls all components)
+LOG_JSON=false
+LOG_IS_PROD=false
 ENVIRONMENT=local
+
+# Component-specific logging examples for development (6-category hierarchy)
+# LOG_LEVEL_PROXY=DEBUG        # Debug session creation/proxy communication
+# LOG_LEVEL_MODELS=DEBUG       # Debug model fetching and caching  
+# LOG_LEVEL_API=DEBUG          # Debug chat completion and API endpoints
+# LOG_LEVEL_AUTH=WARN          # Reduce auth noise to warnings only
+# LOG_LEVEL_CORE=WARN          # Reduce infrastructure noise
 ```
 
 ### Database Configuration

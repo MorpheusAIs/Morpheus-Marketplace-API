@@ -9,10 +9,10 @@ from typing import Optional, Dict, Any
 from botocore.exceptions import ClientError, NoCredentialsError
 
 from src.core.config import settings
-from ..core.structured_logger import create_component_logger
+from ..core.structured_logger import AUTH_LOG
 
-# Setup structured logging
-cognito_log = create_component_logger("COGNITO")
+# Setup structured logging (Auth category)
+cognito_log = AUTH_LOG.named("COGNITO")
 
 class CognitoUserService:
     """Service for managing Cognito users"""

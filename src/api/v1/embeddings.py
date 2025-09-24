@@ -17,10 +17,10 @@ from ...core.model_routing import async_model_router
 from ...services import session_service
 from ...db.database import get_db
 from ...dependencies import get_api_key_user
-from ...core.structured_logger import create_component_logger
+from ...core.structured_logger import API_LOG
 
-# Setup structured logging
-embeddings_log = create_component_logger("EMBEDDINGS")
+# Setup structured logging (API endpoints category)
+embeddings_log = API_LOG.named("EMBEDDINGS")
 from ...db.models import User
 
 router = APIRouter(tags=["Embeddings"])

@@ -5,10 +5,10 @@ import uuid
 
 from ..schemas import openai as openai_schemas
 from ..core.config import settings
-from ..core.structured_logger import create_component_logger
+from ..core.structured_logger import MODELS_LOG
 
-# Setup structured logging
-model_mapper_log = create_component_logger("MODEL_MAPPER")
+# Setup structured logging (Models category)
+model_mapper_log = MODELS_LOG.named("MODEL_MAPPER")
 
 # Blockchain model endpoint
 BLOCKCHAIN_MODELS_ENDPOINT = f"{settings.PROXY_ROUTER_URL}/blockchain/models"

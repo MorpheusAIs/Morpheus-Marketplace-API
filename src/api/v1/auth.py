@@ -425,8 +425,8 @@ async def delete_user_account(
         raise
     except Exception as e:
         # Log the error properly
-        from ...core.structured_logger import create_component_logger
-        auth_log = create_component_logger("AUTH")
+        from ...core.structured_logger import AUTH_LOG
+        auth_log = AUTH_LOG.named("AUTH")
         auth_log.with_fields(
             event_type="user_deletion",
             user_id=user_id,

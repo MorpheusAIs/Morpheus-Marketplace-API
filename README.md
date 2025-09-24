@@ -171,6 +171,15 @@ JWT_SECRET_KEY=generate_this_with_openssl_rand_-hex_32
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 REFRESH_TOKEN_EXPIRE_DAYS=7
 
+# Logging Configuration (Zap-compatible structured logging)
+LOG_LEVEL=INFO                        # Master log level: DEBUG, INFO, WARNING, ERROR (controls all components)
+LOG_JSON=true                         # Enable JSON structured logging (recommended for production)
+LOG_IS_PROD=false                     # Production mode logging (affects performance)
+
+# Component-Specific Log Levels (override LOG_LEVEL for granular control)
+# Example: LOG_LEVEL_PROXY=DEBUG      # Enable debug logging for proxy communication only
+# Available components: CORE, AUTH, DATABASE, PROXY, MODELS, API
+
 # AWS KMS (for production)
 KMS_PROVIDER=aws
 KMS_MASTER_KEY_ID=your_kms_key_id_or_arn
@@ -471,6 +480,91 @@ curl http://localhost:8000/api/v1/models
 
 # Test health checks
 curl http://localhost:8000/health
+```
+
+## Logging Configuration
+
+The Morpheus API Gateway uses **Zap-compatible structured logging** that mirrors the patterns used in the Morpheus-Lumerin-Node proxy-router. This provides consistent, production-ready logging with granular control over different components.
+
+### **🎛️ Logging Levels**
+
+Use **uppercase** log levels: `DEBUG`, `INFO`, `WARNING`, `ERROR`
+
+### **🔧 Environment Variables**
+
+**Primary Controls:**
+- `LOG_LEVEL=INFO` - Master log level (controls all components by default)
+- `LOG_JSON=true` - Enable structured JSON logging (recommended for production)
+- `LOG_IS_PROD=false` - Production mode (affects log format and performance)
+
+### **🎯 Component-Specific Logging**
+
+Override the application default for specific functional areas using `LOG_LEVEL_{COMPONENT}`:
+
+**Simplified 6-Category Hierarchy:**
+```bash
+LOG_LEVEL=INFO               # Master control (all components inherit this)
+LOG_LEVEL_CORE=WARN          # Infrastructure (Uvicorn, FastAPI, HTTP, dependencies, local testing)
+LOG_LEVEL_AUTH=INFO          # Authentication (Cognito, JWT, API keys, private keys)
+LOG_LEVEL_DATABASE=ERROR     # All database operations
+LOG_LEVEL_PROXY=INFO         # Upstream calls to proxy-router API endpoints
+LOG_LEVEL_MODELS=INFO        # Model fetching, caching, routing
+LOG_LEVEL_API=DEBUG          # Local API endpoints (chat, embeddings, models, sessions)
+```
+
+### **📊 Log Format**
+
+**JSON Format (LOG_JSON=true):**
+```json
+{
+  "level": "INFO",
+  "ts": "2025-09-24T13:49:18.973832Z",
+  "caller": "session_service:45",
+  "logger": "SESSION",
+  "msg": "Creating automated session for API key 123",
+  "session_id": "abc-123",
+  "user_id": 456,
+  "event_type": "session_creation"
+}
+```
+
+**Console Format (LOG_JSON=false):**
+```
+2025-09-24T13:49:18	INFO	SESSION	Creating automated session for API key 123
+```
+
+### **🚀 Production Recommendations**
+
+```bash
+# Production settings
+LOG_LEVEL=INFO               # Master control
+LOG_JSON=true
+LOG_IS_PROD=true
+
+# Reduce noise from infrastructure
+LOG_LEVEL_CORE=WARN          # Reduce HTTP/FastAPI noise
+LOG_LEVEL_AUTH=WARN          # Only auth errors
+
+# Monitor critical business logic
+LOG_LEVEL_PROXY=INFO         # Monitor proxy communication
+LOG_LEVEL_API=INFO           # Monitor API endpoints
+LOG_LEVEL_MODELS=INFO        # Monitor model service
+LOG_LEVEL_DATABASE=ERROR     # Only database errors
+```
+
+### **🛠️ Development/Debugging**
+
+```bash
+# Development settings
+LOG_LEVEL=DEBUG              # Master control
+LOG_JSON=false
+LOG_IS_PROD=false
+
+# Debug specific functional areas
+LOG_LEVEL_PROXY=DEBUG        # Verbose session/proxy debugging
+LOG_LEVEL_MODELS=DEBUG       # Model fetching and caching
+LOG_LEVEL_API=DEBUG          # Chat completion and API flow
+LOG_LEVEL_CORE=WARN          # Reduce infrastructure noise
 ```
 
 ## Development and Contributing

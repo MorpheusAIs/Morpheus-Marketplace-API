@@ -5,10 +5,10 @@ Determines the appropriate API endpoint and UI behavior based on model tags and 
 
 from enum import Enum
 from typing import List, Dict, Optional, Set
-from .structured_logger import create_component_logger
+from .structured_logger import MODELS_LOG
 
-# Setup structured logging
-model_types_log = create_component_logger("MODEL_TYPES")
+# Setup structured logging (Models category)
+model_types_log = MODELS_LOG.named("MODEL_TYPES")
 
 class ModelType(Enum):
     """Enumeration of supported model types"""

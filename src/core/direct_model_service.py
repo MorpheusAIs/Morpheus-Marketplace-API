@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 import httpx
 
 from src.core.config import settings
-from src.core.structured_logger import MODEL_LOG
+from src.core.structured_logger import MODELS_LOG
 
 class DirectModelService:
     """
@@ -39,7 +39,7 @@ class DirectModelService:
         self._raw_models_data: List[Dict] = []
         
         # Create service-specific logger (like Lumerin Node pattern)
-        self.log = MODEL_LOG.named("DIRECT_MODEL_SERVICE").with_fields(
+        self.log = MODELS_LOG.named("DIRECT_MODEL_SERVICE").with_fields(
             component="direct_model_service",
             cache_duration=cache_duration_seconds
         )
