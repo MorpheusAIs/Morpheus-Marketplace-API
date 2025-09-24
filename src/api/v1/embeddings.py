@@ -5,7 +5,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Dict, Any, Union, Optional
 import httpx
 import json
-import logging
 import asyncio
 import time
 from datetime import datetime, timezone
@@ -18,6 +17,10 @@ from ...core.model_routing import async_model_router
 from ...services import session_service
 from ...db.database import get_db
 from ...dependencies import get_api_key_user
+from ...core.structured_logger import create_component_logger
+
+# Setup structured logging
+embeddings_log = create_component_logger("EMBEDDINGS")
 from ...db.models import User
 
 router = APIRouter(tags=["Embeddings"])
@@ -25,7 +28,6 @@ router = APIRouter(tags=["Embeddings"])
 # Authentication credentials for proxy-router
 AUTH = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
 
-logger = logging.getLogger(__name__)
 
 class EmbeddingRequest(openai_schemas.BaseModel):
     """Request model for embeddings endpoint"""
@@ -55,7 +57,12 @@ class EmbeddingResponse(openai_schemas.BaseModel):
 
 async def _handle_automated_session_creation(db: AsyncSession, user: User, db_api_key, requested_model: str) -> str:
     """Handle automated session creation for embeddings"""
-    logger.info(f"Creating automated session for embeddings model: {requested_model}")
+    embeddings_log.with_fields(
+        event_type="session_creation",
+        requested_model=requested_model,
+        user_id=user.id,
+        api_key_id=api_key.id
+    ).infof("Creating automated session for embeddings model: %s", requested_model)
     
     try:
         # Create automated session
@@ -67,17 +74,27 @@ async def _handle_automated_session_creation(db: AsyncSession, user: User, db_ap
         )
         
         session_id = new_session.id
-        logger.info(f"Created new embeddings session: {session_id}")
+        embeddings_log.with_fields(
+            event_type="session_creation",
+            session_id=session_id,
+            status="success"
+        ).infof("Created new embeddings session: %s", session_id)
         
         # Add a small delay to ensure the session is fully registered
-        logger.info("Adding a brief delay to ensure session is fully registered")
+        embeddings_log.with_fields(
+            event_type="session_delay",
+            session_id=session_id
+        ).info("Adding a brief delay to ensure session is fully registered")
         await asyncio.sleep(1.0)  # 1 second delay
         
         return session_id
         
     except Exception as e:
-        logger.error(f"Error creating automated embeddings session: {e}")
-        logger.exception(e)
+        embeddings_log.with_fields(
+            event_type="session_creation",
+            status="failed",
+            error=str(e)
+        ).errorf("Error creating automated embeddings session: %s", e)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Failed to create embeddings session: {e}"
@@ -96,7 +113,12 @@ async def create_embeddings(
     This endpoint creates embeddings using the Morpheus Network providers.
     It automatically manages sessions and routes requests to the appropriate embedding model.
     """
-    logger.info(f"Embeddings request received for model: {request_data.model}")
+    embeddings_log.with_fields(
+        event_type="embeddings_request",
+        requested_model=request_data.model,
+        user_id=user.id,
+        input_count=len(request_data.input) if isinstance(request_data.input, list) else 1
+    ).infof("Embeddings request received for model: %s", request_data.model)
     
     try:
         # Get API key from user (same pattern as chat endpoint)
@@ -115,12 +137,25 @@ async def create_embeddings(
             )
         
         # Resolve the model to blockchain ID
-        logger.info(f"Resolving model '{request_data.model}' to blockchain ID")
+        embeddings_log.with_fields(
+            event_type="model_resolution",
+            requested_model=request_data.model
+        ).infof("Resolving model '%s' to blockchain ID", request_data.model)
         try:
             target_model_id = await async_model_router.get_target_model(request_data.model)
-            logger.info(f"Resolved model '{request_data.model}' to ID: {target_model_id}")
+            embeddings_log.with_fields(
+                event_type="model_resolution",
+                requested_model=request_data.model,
+                resolved_id=target_model_id,
+                status="success"
+            ).infof("Resolved model '%s' to ID: %s", request_data.model, target_model_id)
         except Exception as e:
-            logger.error(f"Error resolving model '{request_data.model}': {e}")
+            embeddings_log.with_fields(
+                event_type="model_resolution",
+                requested_model=request_data.model,
+                status="failed",
+                error=str(e)
+            ).errorf("Error resolving model '%s': %s", request_data.model, e)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid model '{request_data.model}': {e}"
@@ -132,20 +167,39 @@ async def create_embeddings(
         
         if session and not session.is_expired:
             # Check if the session model matches the requested model
-            logger.info(f"Found existing session {session.id} with model: {session.model}")
+            embeddings_log.with_fields(
+                event_type="session_reuse",
+                session_id=session.id,
+                session_model=session.model
+            ).infof("Found existing session %s with model: %s", session.id, session.model)
             
             if session.model == target_model_id:
                 session_id = session.id
-                logger.info(f"Using existing session {session_id} (model match)")
+                embeddings_log.with_fields(
+                    event_type="session_reuse",
+                    session_id=session_id,
+                    status="model_match"
+                ).infof("Using existing session %s (model match)", session_id)
             else:
-                logger.info(f"Session model mismatch. Session: {session.model}, Requested: {target_model_id}")
+                embeddings_log.with_fields(
+                    event_type="session_mismatch",
+                    session_id=session.id,
+                    session_model=session.model,
+                    requested_model=target_model_id
+                ).infof("Session model mismatch. Session: %s, Requested: %s", session.model, target_model_id)
                 # Create new session for different model
                 session_id = await _handle_automated_session_creation(db, user, db_api_key, request_data.model)
         else:
             if session:
-                logger.info(f"Session {session.id} is expired, creating new session")
+                embeddings_log.with_fields(
+                    event_type="session_expired",
+                    session_id=session.id
+                ).infof("Session %s is expired, creating new session", session.id)
             else:
-                logger.info("No existing session found, creating new session")
+                embeddings_log.with_fields(
+                    event_type="session_creation_needed",
+                    reason="no_existing_session"
+                ).info("No existing session found, creating new session")
             
             # Create new session
             session_id = await _handle_automated_session_creation(db, user, db_api_key, request_data.model)
@@ -173,9 +227,12 @@ async def create_embeddings(
             "Accept": "application/json"
         }
         
-        logger.info(f"Forwarding embeddings request to proxy-router: {endpoint}")
-        logger.info(f"Session ID: {session_id}")
-        logger.info(f"Model ID: {target_model_id}")
+        embeddings_log.with_fields(
+            event_type="proxy_request",
+            endpoint=endpoint,
+            session_id=session_id,
+            model_id=target_model_id
+        ).infof("Forwarding embeddings request to proxy-router: %s", endpoint)
         
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -187,7 +244,11 @@ async def create_embeddings(
                 timeout=60.0
             )
             
-            logger.info(f"Proxy-router response status: {response.status_code}")
+            embeddings_log.with_fields(
+                event_type="proxy_response",
+                status_code=response.status_code,
+                session_id=session_id
+            ).infof("Proxy-router response status: %d", response.status_code)
             
             if response.status_code == 200:
                 response_data = response.json()
@@ -196,10 +257,19 @@ async def create_embeddings(
                 if "model" in response_data:
                     response_data["model"] = request_data.model
                 
-                logger.info(f"Successfully processed embeddings request")
+                embeddings_log.with_fields(
+                    event_type="embeddings_success",
+                    session_id=session_id,
+                    model_id=target_model_id
+                ).info("Successfully processed embeddings request")
                 return JSONResponse(content=response_data)
             else:
-                logger.error(f"Proxy-router error: {response.status_code} - {response.text}")
+                embeddings_log.with_fields(
+                    event_type="proxy_error",
+                    status_code=response.status_code,
+                    session_id=session_id,
+                    error_text=response.text[:200]  # Limit error text length
+                ).errorf("Proxy-router error: %d - %s", response.status_code, response.text)
                 
                 # Try to parse error response
                 try:
@@ -216,8 +286,12 @@ async def create_embeddings(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Unexpected error in embeddings endpoint: {e}")
-        logger.exception(e)
+        embeddings_log.with_fields(
+            event_type="embeddings_error",
+            error=str(e),
+            session_id=session_id if 'session_id' in locals() else None,
+            model=request_data.model if 'request_data' in locals() else None
+        ).errorf("Unexpected error in embeddings endpoint: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}"

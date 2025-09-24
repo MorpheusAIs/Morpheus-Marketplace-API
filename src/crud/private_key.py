@@ -1,5 +1,4 @@
 import json
-import logging
 import re
 from typing import Optional, Dict, Tuple
 from datetime import datetime
@@ -10,9 +9,10 @@ from ..db.models import UserPrivateKey
 from ..core.key_vault import key_vault
 from ..core.config import settings
 from ..schemas import private_key as schemas
+from ..core.structured_logger import create_component_logger
 
-# Setup logging
-logger = logging.getLogger(__name__)
+# Setup structured logging
+private_key_log = create_component_logger("PRIVATE_KEY")
 
 
 def sanitize_private_key(private_key: str) -> str:
@@ -37,17 +37,28 @@ def sanitize_private_key(private_key: str) -> str:
         
     # Ensure it's a valid hex string
     if not all(c in "0123456789abcdefABCDEF" for c in private_key):
-        logger.warning("Private key contains non-hex characters")
+        private_key_log.with_fields(
+            event_type="key_validation",
+            issue="non_hex_characters"
+        ).warn("Private key contains non-hex characters")
         # Filter out non-hex characters
         private_key = ''.join(c for c in private_key if c in "0123456789abcdefABCDEF")
     
     # Ethereum private keys should be 64 characters (32 bytes) in hex
     if len(private_key) < 64:
-        logger.warning(f"Private key is too short ({len(private_key)} chars), padding with zeros")
+        private_key_log.with_fields(
+            event_type="key_validation",
+            issue="too_short",
+            length=len(private_key)
+        ).warnf("Private key is too short (%d chars), padding with zeros", len(private_key))
         # Pad with leading zeros if too short
         private_key = private_key.zfill(64)
     elif len(private_key) > 64:
-        logger.warning(f"Private key is too long ({len(private_key)} chars), truncating to 64 chars")
+        private_key_log.with_fields(
+            event_type="key_validation", 
+            issue="too_long",
+            length=len(private_key)
+        ).warnf("Private key is too long (%d chars), truncating to 64 chars", len(private_key))
         # Truncate if too long
         private_key = private_key[:64]
         
@@ -159,7 +170,11 @@ async def get_decrypted_private_key(db: AsyncSession, user_id: int) -> Optional[
         return sanitize_private_key(decrypted_key)
     except Exception as e:
         # Log the error (in a real application)
-        logger.error(f"Error decrypting private key: {e}")
+        private_key_log.with_fields(
+            event_type="key_decryption",
+            error=str(e),
+            user_id=user_id
+        ).error("Error decrypting private key")
         return None
 
 
@@ -185,7 +200,11 @@ async def get_private_key_with_fallback(db: AsyncSession, user_id: int) -> Tuple
     
     # Otherwise, use the fallback key
     if settings.FALLBACK_PRIVATE_KEY:
-        logger.warning(f"Private key not set for user {user_id}, using fallback key (FOR DEBUGGING ONLY)")
+        private_key_log.with_fields(
+            event_type="key_fallback",
+            user_id=user_id,
+            warning="using_fallback_key"
+        ).warnf("Private key not set for user %d, using fallback key (FOR DEBUGGING ONLY)", user_id)
         # Sanitize the fallback key to ensure it's in the correct format
         return sanitize_private_key(settings.FALLBACK_PRIVATE_KEY), True
     

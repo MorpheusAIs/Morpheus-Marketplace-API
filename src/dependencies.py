@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import select
 from sqlalchemy.future import select as future_select
 import time
-import logging
 from datetime import datetime, timedelta
 import boto3
 from jose import jwt, jwk
@@ -25,6 +24,10 @@ from src.db.database import get_db
 from src.db.models import User, APIKey
 from src.schemas.token import TokenPayload
 from src.services.cognito_service import cognito_service
+from src.core.structured_logger import create_component_logger
+
+# Setup structured logging
+dependencies_log = create_component_logger("DEPENDENCIES")
 
 # Define bearer token scheme for JWT authentication
 oauth2_scheme = HTTPBearer(
@@ -60,7 +63,11 @@ async def get_current_user(
     # Local testing bypass
     from src.core.local_testing import is_local_testing_mode, get_or_create_test_user
     if is_local_testing_mode():
-        logging.info("🧪 Using local testing mode - bypassing Cognito authentication")
+        dependencies_log.with_fields(
+            event_type="authentication_bypass",
+            mode="local_testing",
+            security_warning=True
+        ).info("Using local testing mode - bypassing Cognito authentication")
         return await get_or_create_test_user(db)
     
     # Check if token is provided
@@ -79,24 +86,35 @@ async def get_current_user(
     
     try:
         # Add debug logging for JWT validation
-        logging.info(f"🔍 JWT Validation Debug:")
-        logging.info(f"   Token (first 20 chars): {token.credentials[:20]}...")
-        logging.info(f"   Expected audience: {settings.COGNITO_CLIENT_ID}")
-        logging.info(f"   Expected issuer: https://cognito-idp.{settings.COGNITO_REGION}.amazonaws.com/{settings.COGNITO_USER_POOL_ID}")
+        dependencies_log.with_fields(
+            event_type="jwt_validation_debug",
+            token_preview=token.credentials[:20] + "...",
+            expected_audience=settings.COGNITO_CLIENT_ID,
+            expected_issuer=f"https://cognito-idp.{settings.COGNITO_REGION}.amazonaws.com/{settings.COGNITO_USER_POOL_ID}"
+        ).info("JWT Validation Debug")
         
         # Fetch JWKS from Cognito
         jwks_url = settings.COGNITO_JWKS_URL
-        logging.info(f"   JWKS URL: {jwks_url}")
+        dependencies_log.with_fields(
+            event_type="jwt_validation_debug",
+            jwks_url=jwks_url
+        ).infof("JWKS URL: %s", jwks_url)
         jwks_response = requests.get(jwks_url)
         jwks_response.raise_for_status()
         jwks = jwks_response.json()
         
         # Get the key ID from token header
         header = jwt.get_unverified_header(token.credentials)
-        logging.info(f"   Token header: {header}")
+        dependencies_log.with_fields(
+            event_type="jwt_validation_debug",
+            token_header=header
+        ).infof("Token header: %s", header)
         kid = header.get('kid')
         if not kid:
-            logging.error("❌ No 'kid' found in token header")
+            dependencies_log.with_fields(
+                event_type="jwt_validation_error",
+                error="no_kid_in_header"
+            ).error("No 'kid' found in token header")
             raise credentials_exception
             
         # Find the matching key
@@ -125,21 +143,32 @@ async def get_current_user(
         # Manually validate client_id since Cognito uses that instead of audience
         token_client_id = payload.get('client_id')
         if token_client_id != settings.COGNITO_CLIENT_ID:
-            logging.error(f"❌ Client ID mismatch: expected {settings.COGNITO_CLIENT_ID}, got {token_client_id}")
+            dependencies_log.with_fields(
+                event_type="jwt_validation_error",
+                error="client_id_mismatch",
+                expected_client_id=settings.COGNITO_CLIENT_ID,
+                actual_client_id=token_client_id
+            ).errorf("Client ID mismatch: expected %s, got %s", settings.COGNITO_CLIENT_ID, token_client_id)
             raise credentials_exception
         
-        logging.info(f"✅ JWT decode successful!")
-        logging.info(f"   Payload audience (aud): {payload.get('aud')}")
-        logging.info(f"   Payload issuer (iss): {payload.get('iss')}")
-        logging.info(f"   Payload subject (sub): {payload.get('sub')}")
-        logging.info(f"   Payload email: {payload.get('email')}")
+        dependencies_log.with_fields(
+            event_type="jwt_decode_success",
+            payload_audience=payload.get('aud'),
+            payload_issuer=payload.get('iss'),
+            payload_subject=payload.get('sub'),
+            payload_email=payload.get('email')
+        ).info("JWT decode successful!")
         
         # Extract user information from token
         cognito_user_id = payload.get('sub')
         token_email = payload.get('email')
         
         if not cognito_user_id:
-            logging.error(f"❌ Missing cognito_user_id (sub): {cognito_user_id}")
+            dependencies_log.with_fields(
+                event_type="jwt_validation_error",
+                error="missing_cognito_user_id",
+                cognito_user_id=cognito_user_id
+            ).errorf("Missing cognito_user_id (sub): %s", cognito_user_id)
             raise credentials_exception
             
         # Get or create local user record
@@ -154,7 +183,11 @@ async def get_current_user(
                 'is_active': True
             }
             user = await user_crud.create_user_from_cognito(db, user_data)
-            logging.info(f"✅ Created new user with email: {user_data['email']}")
+            dependencies_log.with_fields(
+                event_type="user_creation",
+                email=user_data['email'],
+                cognito_user_id=cognito_user_id
+            ).infof("Created new user with email: %s", user_data['email'])
             
         else:
             # Check if existing user has placeholder data and update with real email
@@ -166,29 +199,49 @@ async def get_current_user(
                 update_data['email'] = token_email
                 update_data['name'] = token_email  # Also update name to match email
                 needs_update = True
-                logging.info(f"📧 Updating placeholder email with real email: {token_email}")
+                dependencies_log.with_fields(
+                    event_type="user_email_update",
+                    old_email=user.email,
+                    new_email=token_email
+                ).infof("Updating placeholder email with real email: %s", token_email)
             
             # If we have updates, apply them
             if needs_update:
                 user = await user_crud.update_user(db, db_user=user, user_in=update_data)
-                logging.info(f"✅ Updated user with real email from JWT token")
+                dependencies_log.with_fields(
+                    event_type="user_email_update",
+                    status="success",
+                    user_id=user.id
+                ).info("Updated user with real email from JWT token")
         
         return user
         
     except requests.RequestException as e:
-        logging.error(f"❌ Could not fetch Cognito JWKS: {str(e)}")
+        dependencies_log.with_fields(
+            event_type="jwks_fetch_error",
+            error=str(e),
+            jwks_url=jwks_url if 'jwks_url' in locals() else None
+        ).errorf("Could not fetch Cognito JWKS: %s", str(e))
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not fetch Cognito JWKS"
         )
     except JWTError as e:
-        logging.error(f"❌ JWT validation error: {str(e)}")
-        logging.error(f"   This usually means: token expired, wrong audience, wrong issuer, or invalid signature")
+        dependencies_log.with_fields(
+            event_type="jwt_validation_error",
+            error=str(e)
+        ).errorf("JWT validation error: %s", str(e))
+        dependencies_log.with_fields(
+            event_type="jwt_validation_help"
+        ).error("This usually means: token expired, wrong audience, wrong issuer, or invalid signature")
         raise credentials_exception
     except Exception as e:
-        logging.error(f"❌ Unexpected error in get_current_user: {str(e)}")
+        dependencies_log.with_fields(
+            event_type="authentication_error",
+            error=str(e),
+            traceback=traceback.format_exc()
+        ).errorf("Unexpected error in get_current_user: %s", str(e))
         import traceback
-        logging.error(f"   Traceback: {traceback.format_exc()}")
         
         # Provide more specific error details for debugging
         error_detail = f"Authentication error: {str(e)}"
@@ -228,7 +281,11 @@ async def get_api_key_user(
     # Local testing bypass
     from src.core.local_testing import is_local_testing_mode, get_or_create_test_user
     if is_local_testing_mode():
-        logging.info("🧪 Using local testing mode - bypassing API key validation")
+        dependencies_log.with_fields(
+            event_type="api_key_bypass",
+            mode="local_testing",
+            security_warning=True
+        ).info("Using local testing mode - bypassing API key validation")
         return await get_or_create_test_user(db)
     
     if not api_key:
@@ -264,7 +321,11 @@ async def get_api_key_user(
         
         if not db_api_key:
             # Log the key prefix for debugging
-            logging.error(f"Could not find API key with prefix: {key_prefix}")
+            dependencies_log.with_fields(
+                event_type="api_key_not_found",
+                key_prefix=key_prefix,
+                function="get_api_key_user"
+            ).errorf("Could not find API key with prefix: %s", key_prefix)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid API key",
@@ -273,7 +334,11 @@ async def get_api_key_user(
         
         # Validate the full API key against the stored hash
         if not verify_api_key(api_key, db_api_key.hashed_key):
-            logging.error(f"API key hash validation failed for prefix: {key_prefix}")
+            dependencies_log.with_fields(
+                event_type="api_key_validation_failed",
+                key_prefix=key_prefix,
+                function="get_api_key_user"
+            ).errorf("API key hash validation failed for prefix: %s", key_prefix)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid API key",
@@ -301,7 +366,10 @@ async def get_api_key_user(
         
     except Exception as e:
         # Log the error
-        logging.error(f"Error in get_api_key_user: {str(e)}")
+        dependencies_log.with_fields(
+            event_type="api_key_user_error",
+            error=str(e)
+        ).errorf("Error in get_api_key_user: %s", str(e))
         
         # Re-raise HTTP exceptions
         if isinstance(e, HTTPException):
@@ -364,7 +432,11 @@ async def get_current_api_key(
         
         if not db_api_key:
             # Log the key prefix for debugging
-            logging.error(f"Could not find API key with prefix: {key_prefix}")
+            dependencies_log.with_fields(
+                event_type="api_key_not_found",
+                key_prefix=key_prefix,
+                function="get_current_api_key"
+            ).errorf("Could not find API key with prefix: %s", key_prefix)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid API key",
@@ -373,7 +445,11 @@ async def get_current_api_key(
         
         # Validate the full API key against the stored hash
         if not verify_api_key(api_key_str, db_api_key.hashed_key):
-            logging.error(f"API key hash validation failed for prefix: {key_prefix}")
+            dependencies_log.with_fields(
+                event_type="api_key_validation_failed",
+                key_prefix=key_prefix,
+                function="get_current_api_key"
+            ).errorf("API key hash validation failed for prefix: %s", key_prefix)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid API key",
@@ -387,7 +463,11 @@ async def get_current_api_key(
         
     except Exception as e:
         # Log the error
-        logging.error(f"Error in get_current_api_key: {str(e)}")
+        dependencies_log.with_fields(
+            event_type="api_key_error",
+            error=str(e),
+            function="get_current_api_key"
+        ).errorf("Error in get_current_api_key: %s", str(e))
         
         # Re-raise HTTP exceptions
         if isinstance(e, HTTPException):

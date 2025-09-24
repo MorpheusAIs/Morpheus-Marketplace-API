@@ -10,6 +10,10 @@ from ...schemas import openai as openai_schemas
 from ...services.model_mapper import model_mapper
 from ...core.config import settings
 from ...core.direct_model_service import direct_model_service
+from ...core.structured_logger import create_component_logger
+
+# Setup structured logging
+models_log = create_component_logger("MODELS")
 
 router = APIRouter(tags=["Models"])
 
@@ -54,8 +58,12 @@ async def list_models():
         return {"object": "list", "data": models}
     except httpx.HTTPStatusError as e:
         # Handle HTTP errors and return detailed error messages
-        import logging
-        logging.error(f"HTTP error getting active models: {e}")
+        models_log.with_fields(
+            event_type="http_error",
+            endpoint="active_models",
+            status_code=e.response.status_code if hasattr(e, 'response') else None,
+            error=str(e)
+        ).error("HTTP error getting active models")
         try:
             error_detail = e.response.json()
             if isinstance(error_detail, dict):
@@ -76,8 +84,11 @@ async def list_models():
         )
     except Exception as e:
         # Handle other errors
-        import logging
-        logging.error(f"Error getting active models: {e}")
+        models_log.with_fields(
+            event_type="general_error",
+            endpoint="active_models",
+            error=str(e)
+        ).error("Error getting active models")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching active models: {str(e)}"
@@ -134,8 +145,12 @@ async def list_all_models():
             return {"object": "list", "data": models}
     except httpx.HTTPStatusError as e:
         # Handle HTTP errors and return detailed error messages
-        import logging
-        logging.error(f"HTTP error getting all models: {e}")
+        models_log.with_fields(
+            event_type="http_error",
+            endpoint="all_models",
+            status_code=e.response.status_code if hasattr(e, 'response') else None,
+            error=str(e)
+        ).error("HTTP error getting all models")
         try:
             error_detail = e.response.json()
             if isinstance(error_detail, dict):
@@ -156,8 +171,11 @@ async def list_all_models():
         )
     except Exception as e:
         # Handle other errors
-        import logging
-        logging.error(f"Error getting all models: {e}")
+        models_log.with_fields(
+            event_type="general_error",
+            endpoint="all_models",
+            error=str(e)
+        ).error("Error getting all models")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching all models: {str(e)}"
@@ -188,8 +206,12 @@ async def get_rated_bids(
             return response.json()
     except httpx.HTTPStatusError as e:
         # Handle HTTP errors with detailed information
-        import logging
-        logging.error(f"HTTP error getting rated bids: {e}")
+        models_log.with_fields(
+            event_type="http_error",
+            endpoint="rated_bids",
+            status_code=e.response.status_code if hasattr(e, 'response') else None,
+            error=str(e)
+        ).error("HTTP error getting rated bids")
         try:
             error_detail = e.response.json()
             if isinstance(error_detail, dict):
@@ -210,8 +232,11 @@ async def get_rated_bids(
         )
     except Exception as e:
         # Handle other errors
-        import logging
-        logging.error(f"Error getting rated bids: {e}")
+        models_log.with_fields(
+            event_type="general_error",
+            endpoint="rated_bids",
+            error=str(e)
+        ).error("Error getting rated bids")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching rated bids: {str(e)}"

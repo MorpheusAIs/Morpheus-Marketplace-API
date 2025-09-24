@@ -11,7 +11,6 @@ import os
 import base64
 import json
 from typing import Dict, Tuple, Any, Optional, Union
-import logging
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
@@ -22,9 +21,10 @@ from cryptography.hazmat.backends import default_backend
 import secrets
 
 from src.core.config import settings
+from .structured_logger import create_component_logger
 
-# Configure logging
-logger = logging.getLogger(__name__)
+# Setup structured logging
+key_vault_log = create_component_logger("KEY_VAULT")
 
 class KeyVault:
     """
@@ -56,10 +56,20 @@ class KeyVault:
                         
                 self.kms_client = boto3.client('kms', **kms_kwargs)
                 self.using_kms = True
-                logger.info("AWS KMS integration initialized successfully")
+                key_vault_log.with_fields(
+                    event_type="kms_initialization",
+                    status="success"
+                ).info("AWS KMS integration initialized successfully")
             except (ClientError, NoCredentialsError) as e:
-                logger.error(f"Failed to initialize AWS KMS client: {e}")
-                logger.warning("Falling back to local key management (NOT SECURE FOR PRODUCTION)")
+                key_vault_log.with_fields(
+                    event_type="kms_initialization",
+                    status="failed",
+                    error=str(e)
+                ).errorf("Failed to initialize AWS KMS client: %s", e)
+                key_vault_log.with_fields(
+                    event_type="kms_fallback",
+                    security_warning=True
+                ).warn("Falling back to local key management (NOT SECURE FOR PRODUCTION)")
                 self.using_kms = False
         
         # Fallback to local master key if KMS is not configured or failed
@@ -68,7 +78,11 @@ class KeyVault:
             self.master_key = os.getenv("MASTER_ENCRYPTION_KEY")
             
             if not self.master_key:
-                logger.warning(
+                key_vault_log.with_fields(
+                    event_type="master_key_fallback",
+                    security_warning=True,
+                    fallback_source="settings"
+                ).warn(
                     "MASTER_ENCRYPTION_KEY not found in environment. "
                     "Using fallback from settings (NOT SECURE FOR PRODUCTION)."
                 )
@@ -104,7 +118,11 @@ class KeyVault:
             
             return plaintext_key, encrypted_key
         except ClientError as e:
-            logger.error(f"Error generating data key from KMS: {e}")
+            key_vault_log.with_fields(
+                event_type="kms_data_key_generation",
+                status="failed",
+                error=str(e)
+            ).errorf("Error generating data key from KMS: %s", e)
             raise
     
     def _decrypt_data_key(self, encrypted_key: bytes) -> bytes:
@@ -130,7 +148,11 @@ class KeyVault:
             
             return response['Plaintext']
         except ClientError as e:
-            logger.error(f"Error decrypting data key with KMS: {e}")
+            key_vault_log.with_fields(
+                event_type="kms_data_key_decryption",
+                status="failed",
+                error=str(e)
+            ).errorf("Error decrypting data key with KMS: %s", e)
             raise
     
     def _derive_key(self, salt: bytes, key_material: bytes) -> bytes:
@@ -254,7 +276,12 @@ class KeyVault:
             return decrypted_data.decode()
         except Exception as e:
             if provider == "aws-kms" and not self.using_kms:
-                logger.error("Failed to decrypt KMS-encrypted data with local key. AWS KMS is required.")
+                key_vault_log.with_fields(
+                    event_type="decryption_failure",
+                    encryption_type="kms",
+                    attempted_method="local_key",
+                    error="kms_required"
+                ).error("Failed to decrypt KMS-encrypted data with local key. AWS KMS is required.")
                 raise ValueError("This data was encrypted with AWS KMS and cannot be decrypted locally.") from e
             raise
 

@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, Dict, Any, List, Union
 import json
 import httpx
-import logging
 from datetime import datetime
 import uuid
 import asyncio
@@ -23,6 +22,10 @@ import base64
 from pydantic import BaseModel, Field
 
 from ...dependencies import get_api_key_user, api_key_header
+from ...core.structured_logger import create_component_logger
+
+# Setup structured logging
+chat_log = create_component_logger("CHAT")
 from ...db.database import get_db
 from ...db.models import User, APIKey
 from ...schemas import openai as openai_schemas
@@ -85,11 +88,13 @@ async def _handle_automated_session_creation(
     Returns:
         session_id if a session was created, None otherwise
     """
-    logger = logging.getLogger(__name__)
     
     # Check system-wide feature flag first
     if not settings.AUTOMATION_FEATURE_ENABLED:
-        logger.info("Automation feature is disabled system-wide")
+        chat_log.with_fields(
+            event_type="automation_disabled",
+            scope="system_wide"
+        ).info("Automation feature is disabled system-wide")
         return None
         
     # Check if automation is enabled for the user in their settings
@@ -97,7 +102,12 @@ async def _handle_automated_session_creation(
     
     # If settings don't exist yet, create them with automation enabled by default
     if not automation_settings:
-        logger.info(f"No automation settings found for user {user.id} - creating default settings with automation enabled")
+        chat_log.with_fields(
+            event_type="automation_settings",
+            user_id=user.id,
+            action="create_default",
+            default_enabled=True
+        ).infof("No automation settings found for user %d - creating default settings with automation enabled", user.id)
         automation_settings = await automation_crud.create_automation_settings(
             db=db,
             user_id=user.id,
@@ -106,16 +116,30 @@ async def _handle_automated_session_creation(
         )
     # If settings exist but automation is disabled, log and return None
     elif not automation_settings.is_enabled:
-        logger.info(f"Automation is explicitly disabled for user {user.id}")
+        chat_log.with_fields(
+            event_type="automation_disabled",
+            user_id=user.id,
+            scope="user_specific"
+        ).infof("Automation is explicitly disabled for user %d", user.id)
         return None
     
     # Automation is enabled - create a new session
-    logger.info(f"Automation enabled for user {user.id} - creating new session")
+    chat_log.with_fields(
+        event_type="automation_enabled",
+        user_id=user.id,
+        action="creating_session"
+    ).infof("Automation enabled for user %d - creating new session", user.id)
     
     # Create new session with requested model
     session_duration = automation_settings.session_duration
     try:
-        logger.info(f"Attempting to create automated session for user {user.id} with model {requested_model}, duration {session_duration}")
+        chat_log.with_fields(
+            event_type="session_creation",
+            user_id=user.id,
+            requested_model=requested_model,
+            session_duration=session_duration,
+            automation=True
+        ).infof("Attempting to create automated session for user %d with model %s, duration %d", user.id, requested_model, session_duration)
         new_session = await session_service.create_automated_session(
             db=db,
             api_key_id=db_api_key.id,
@@ -124,15 +148,27 @@ async def _handle_automated_session_creation(
             session_duration=session_duration
         )
         session_id = new_session.id
-        logger.info(f"Created new automated session: {session_id}")
+        chat_log.with_fields(
+            event_type="session_creation",
+            session_id=session_id,
+            status="success",
+            automation=True
+        ).infof("Created new automated session: %s", session_id)
         
         # Add a small delay to ensure the session is fully registered
-        logger.info("Adding a brief delay to ensure session is fully registered")
+        chat_log.with_fields(
+            event_type="session_delay",
+            session_id=session_id
+        ).info("Adding a brief delay to ensure session is fully registered")
         await asyncio.sleep(1.0)  # 1 second delay
         return session_id
     except Exception as e:
-        logger.error(f"Error creating automated session: {e}")
-        logger.exception(e)  # Log full stack trace
+        chat_log.with_fields(
+            event_type="session_creation",
+            status="failed",
+            error=str(e),
+            automation=True
+        ).errorf("Error creating automated session: %s", e)
         # Return None to fall back to manual session handling
         return None
 
@@ -152,12 +188,19 @@ async def create_chat_completion(
     
     Note: Tool calling requires streaming mode and 'text/event-stream' Accept header.
     """
-    logger = logging.getLogger(__name__)
     request_id = str(uuid.uuid4())[:8]  # Generate short request ID for tracing
-    logger.info(f"[REQ-{request_id}] New chat completion request received")
+    chat_log.with_fields(
+        event_type="chat_request",
+        request_id=request_id,
+        user_id=user.id
+    ).infof("[REQ-%s] New chat completion request received", request_id)
     
     original_client_accept_header = request.headers.get("accept", "text/event-stream")
-    logger.info(f"[REQ-{request_id}] Client's original Accept header: {original_client_accept_header}")
+    chat_log.with_fields(
+        event_type="client_headers",
+        request_id=request_id,
+        accept_header=original_client_accept_header
+    ).infof("[REQ-%s] Client's original Accept header: %s", request_id, original_client_accept_header)
     
     # Check if we have a valid user from the API key
     if not user:
@@ -168,7 +211,11 @@ async def create_chat_completion(
         )
     
     # Set up logging for this request
-    logger.info(f"Processing chat completion request for user {user.id}")
+    chat_log.with_fields(
+        event_type="request_processing",
+        request_id=request_id,
+        user_id=user.id
+    ).infof("Processing chat completion request for user %d", user.id)
     
     json_body = request_data.model_dump(exclude_none=True)
     has_tools = "tools" in json_body and json_body["tools"]
@@ -179,7 +226,12 @@ async def create_chat_completion(
     
     # Check for tool requests with streaming disabled
     if has_tools and not should_stream:
-        logger.warning(f"[REQ-{request_id}] Tool calling requested with stream=false - this may cause issues with some models")
+        chat_log.with_fields(
+            event_type="tool_calling_warning",
+            request_id=request_id,
+            has_tools=has_tools,
+            should_stream=should_stream
+        ).warnf("[REQ-%s] Tool calling requested with stream=false - this may cause issues with some models", request_id)
         # We'll respect the client's choice, but log a warning
     
     json_body["stream"] = should_stream
@@ -190,8 +242,15 @@ async def create_chat_completion(
     else:
         accept_header = original_client_accept_header
     
-    logger.info(f"[REQ-{request_id}] Original client Accept: '{original_client_accept_header}', client requested stream: {should_stream}, has_tools: {has_tools}")
-    logger.info(f"[REQ-{request_id}] Configured PROXY request: stream={json_body['stream']}, proxy_accept_header='{accept_header}'")
+    chat_log.with_fields(
+        event_type="request_configuration",
+        request_id=request_id,
+        original_accept=original_client_accept_header,
+        client_stream=should_stream,
+        has_tools=has_tools,
+        proxy_stream=json_body['stream'],
+        proxy_accept_header=accept_header
+    ).infof("[REQ-%s] Request configuration - client stream: %s, proxy stream: %s", request_id, should_stream, json_body['stream'])
 
     # Extract necessary fields that were not part of the core OpenAI payload manipulated above
     session_id = json_body.pop("session_id", None)
@@ -203,18 +262,36 @@ async def create_chat_completion(
         tool_calling_models = ["llama-3.3-70b", "claude-3.5", "claude-3-opus", "gpt-4o", "gpt-4", "mistral-large", "gemini-pro"]
         
         if requested_model and requested_model.lower() not in [m.lower() for m in tool_calling_models]:
-            logger.warning(f"Model {requested_model} may not support tool calling. Consider using one of: {', '.join(tool_calling_models)}")
+            chat_log.with_fields(
+                event_type="model_tool_warning",
+                request_id=request_id,
+                requested_model=requested_model,
+                supported_models=tool_calling_models
+            ).warnf("Model %s may not support tool calling. Consider using one of: %s", requested_model, ', '.join(tool_calling_models))
     
     # Log tool-related parameters if present (for debugging)
     if "tools" in json_body:
-        logger.info(f"Request includes tools: {json.dumps(json_body['tools'])}")
+        chat_log.with_fields(
+            event_type="tools_included",
+            request_id=request_id,
+            tools=json_body['tools']
+        ).infof("Request includes tools: %s", json.dumps(json_body['tools']))
     if "tool_choice" in json_body:
-        logger.info(f"Request includes tool_choice: {json.dumps(json_body['tool_choice'])}")
+        chat_log.with_fields(
+            event_type="tool_choice_included",
+            request_id=request_id,
+            tool_choice=json_body['tool_choice']
+        ).infof("Request includes tool_choice: %s", json.dumps(json_body['tool_choice']))
     
     body = json.dumps(json_body).encode('utf-8')
     
     # Log the original request details
-    logger.info(f"Original request - session_id: {session_id}, model: {requested_model}")
+    chat_log.with_fields(
+        event_type="request_details",
+        request_id=request_id,
+        session_id=session_id,
+        requested_model=requested_model
+    ).infof("Original request - session_id: %s, model: %s", session_id, requested_model)
     
     # Store API key reference at a higher scope for later use in error handling
     db_api_key = None
@@ -222,7 +299,11 @@ async def create_chat_completion(
     # If no session_id from body, try to get from database
     if not session_id and user.api_keys:
         try:
-            logger.info("No session_id in request, attempting to retrieve or create one")
+            chat_log.with_fields(
+                event_type="session_retrieval",
+                request_id=request_id,
+                action="retrieve_or_create"
+            ).info("No session_id in request, attempting to retrieve or create one")
             api_key_prefix = user.api_keys[0].key_prefix
             db_api_key = await api_key_crud.get_api_key_by_prefix(db, api_key_prefix)
             
@@ -239,14 +320,28 @@ async def create_chat_completion(
                 # Only compare models when a specific model is requested
                 if requested_model:
                     # Convert the requested model name to model ID for proper comparison
-                    logger.info(f"Converting requested model '{requested_model}' to model ID for comparison")
+                    chat_log.with_fields(
+                        event_type="model_conversion",
+                        request_id=request_id,
+                        requested_model=requested_model
+                    ).infof("Converting requested model '%s' to model ID for comparison", requested_model)
                     try:
                         requested_model_id = await model_router.get_target_model(requested_model)
-                        logger.info(f"Requested model '{requested_model}' resolved to ID: {requested_model_id}")
+                        chat_log.with_fields(
+                            event_type="model_resolution",
+                            request_id=request_id,
+                            requested_model=requested_model,
+                            resolved_id=requested_model_id
+                        ).infof("Requested model '%s' resolved to ID: %s", requested_model, requested_model_id)
                         
                         # First check if the session is expired before comparing models
                         if session.is_expired:
-                            logger.warning(f"Session {session.id} is expired, creating new session regardless of model match")
+                            chat_log.with_fields(
+                                event_type="session_expired",
+                                request_id=request_id,
+                                session_id=session.id,
+                                action="creating_new"
+                            ).warnf("Session %s is expired, creating new session regardless of model match", session.id)
                             try:
                                 new_session = await session_service.create_automated_session(
                                     db=db,
@@ -255,22 +350,47 @@ async def create_chat_completion(
                                     requested_model=requested_model
                                 )
                                 session_id = new_session.id
-                                logger.info(f"Created new session to replace expired session: {session_id}")
+                                chat_log.with_fields(
+                                    event_type="session_replacement",
+                                    request_id=request_id,
+                                    old_session_id=session.id,
+                                    new_session_id=session_id,
+                                    reason="expired"
+                                ).infof("Created new session to replace expired session: %s", session_id)
                                 
                                 # Add a small delay to ensure the session is fully registered
-                                logger.info("Adding a brief delay to ensure session is fully registered")
+                                chat_log.with_fields(
+                                    event_type="session_delay",
+                                    request_id=request_id,
+                                    session_id=session_id,
+                                    context="expired_session_replacement"
+                                ).info("Adding a brief delay to ensure session is fully registered")
                                 await asyncio.sleep(1.0)  # 1 second delay
                             except Exception as e:
-                                logger.error(f"Error creating new session to replace expired session: {e}")
-                                logger.exception(e)
+                                chat_log.with_fields(
+                                    event_type="session_replacement",
+                                    request_id=request_id,
+                                    status="failed",
+                                    error=str(e)
+                                ).errorf("Error creating new session to replace expired session: %s", e)
                                 raise HTTPException(
                                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                                     detail=f"Failed to create new session to replace expired one: {e}"
                                 )
                         # Compare model IDs (hash to hash) only for non-expired sessions
                         elif session.model != requested_model_id:
-                            logger.info(f"Model change detected. Current: {session.model}, Requested: {requested_model_id}")
-                            logger.info(f"Switching models by closing current session and creating new one")
+                            chat_log.with_fields(
+                                event_type="model_change_detected",
+                                request_id=request_id,
+                                current_model=session.model,
+                                requested_model=requested_model_id,
+                                session_id=session.id
+                            ).infof("Model change detected. Current: %s, Requested: %s", session.model, requested_model_id)
+                            chat_log.with_fields(
+                                event_type="model_switch",
+                                request_id=request_id,
+                                action="closing_and_creating"
+                            ).info("Switching models by closing current session and creating new one")
                             
                             # Switch to the new model
                             try:
@@ -281,17 +401,35 @@ async def create_chat_completion(
                                     new_model=requested_model
                                 )
                                 session_id = new_session.id
-                                logger.info(f"Successfully switched to new model with session: {session_id}")
+                                chat_log.with_fields(
+                                    event_type="model_switch",
+                                    request_id=request_id,
+                                    new_session_id=session_id,
+                                    status="success"
+                                ).infof("Successfully switched to new model with session: %s", session_id)
                                 
                                 # Add a small delay to ensure the session is fully registered
-                                logger.info("Adding a brief delay to ensure session is fully registered")
+                                chat_log.with_fields(
+                                    event_type="session_delay",
+                                    request_id=request_id,
+                                    session_id=session_id,
+                                    context="model_switch"
+                                ).info("Adding a brief delay to ensure session is fully registered")
                                 await asyncio.sleep(1.0)  # 1 second delay
                             except Exception as e:
-                                logger.error(f"Error switching models: {e}")
-                                logger.exception(e)
+                                chat_log.with_fields(
+                                    event_type="model_switch",
+                                    request_id=request_id,
+                                    status="failed",
+                                    error=str(e)
+                                ).errorf("Error switching models: %s", e)
                                 # Create a new session instead of falling back to the expired one
                                 try:
-                                    logger.info(f"Creating new session after switch_model failure")
+                                    chat_log.with_fields(
+                                        event_type="session_creation_fallback",
+                                        request_id=request_id,
+                                        reason="switch_model_failure"
+                                    ).info("Creating new session after switch_model failure")
                                     new_session = await session_service.create_automated_session(
                                         db=db,
                                         api_key_id=db_api_key.id,
@@ -299,10 +437,20 @@ async def create_chat_completion(
                                         requested_model=requested_model
                                     )
                                     session_id = new_session.id
-                                    logger.info(f"Created new replacement session: {session_id}")
+                                    chat_log.with_fields(
+                                        event_type="session_creation_fallback",
+                                        request_id=request_id,
+                                        new_session_id=session_id,
+                                        status="success"
+                                    ).infof("Created new replacement session: %s", session_id)
                                     await asyncio.sleep(1.0)  # Small delay to ensure registration
                                 except Exception as new_err:
-                                    logger.error(f"Failed to create new session after switch failure: {new_err}")
+                                    chat_log.with_fields(
+                                        event_type="session_creation_fallback",
+                                        request_id=request_id,
+                                        status="failed",
+                                        error=str(new_err)
+                                    ).errorf("Failed to create new session after switch failure: %s", new_err)
                                     raise HTTPException(
                                         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                                         detail=f"Failed to create new session after model switch failure: {new_err}"
@@ -310,39 +458,91 @@ async def create_chat_completion(
                         else:
                             # Models match, use existing session
                             session_id = session.id
-                            logger.info(f"Models match (ID: {requested_model_id}), reusing existing session ID: {session_id}")
+                            chat_log.with_fields(
+                                event_type="session_reuse",
+                                request_id=request_id,
+                                session_id=session_id,
+                                model_id=requested_model_id,
+                                reason="models_match"
+                            ).infof("Models match (ID: %s), reusing existing session ID: %s", requested_model_id, session_id)
                     except Exception as e:
-                        logger.error(f"Error resolving model ID for '{requested_model}': {e}")
-                        logger.exception(e)
+                        chat_log.with_fields(
+                            event_type="model_resolution_error",
+                            request_id=request_id,
+                            requested_model=requested_model,
+                            error=str(e)
+                        ).errorf("Error resolving model ID for '%s': %s", requested_model, e)
                         # Fall back to using existing session
                         session_id = session.id
-                        logger.info(f"Using existing session ID due to model resolution error: {session_id}")
+                        chat_log.with_fields(
+                            event_type="session_fallback",
+                            request_id=request_id,
+                            session_id=session_id,
+                            reason="model_resolution_error"
+                        ).infof("Using existing session ID due to model resolution error: %s", session_id)
                 else:
                     # No requested model specified, use existing session
                     session_id = session.id
-                    logger.info(f"No specific model requested, reusing existing session ID: {session_id}")
+                    chat_log.with_fields(
+                        event_type="session_reuse",
+                        request_id=request_id,
+                        session_id=session_id,
+                        reason="no_model_requested"
+                    ).infof("No specific model requested, reusing existing session ID: %s", session_id)
             else:
-                logger.info("No active session found, attempting automated session creation")
+                chat_log.with_fields(
+                    event_type="session_creation_needed",
+                    request_id=request_id,
+                    reason="no_active_session"
+                ).info("No active session found, attempting automated session creation")
                 # No active session - try automated session creation
                 try:
                     # Add detailed debugging
-                    logger.info("=========== SESSION DEBUG START ===========")
-                    logger.info(f"Attempting to create automated session with: API key ID: {db_api_key.id}, User ID: {user.id}, Model: {requested_model}")
-                    logger.info(f"Settings.PROXY_ROUTER_URL: {settings.PROXY_ROUTER_URL}")
+                    chat_log.with_fields(
+                        event_type="session_debug",
+                        request_id=request_id,
+                        api_key_id=db_api_key.id,
+                        user_id=user.id,
+                        requested_model=requested_model,
+                        proxy_router_url=settings.PROXY_ROUTER_URL
+                    ).info("SESSION DEBUG START - Attempting automated session creation")
                     
                     # Test connection to proxy router before session creation
                     try:
                         async with httpx.AsyncClient() as test_client:
                             test_url = f"{settings.PROXY_ROUTER_URL}/healthcheck"
-                            logger.info(f"Testing connection to proxy router at: {test_url}")
+                            chat_log.with_fields(
+                                event_type="proxy_health_check",
+                                request_id=request_id,
+                                test_url=test_url
+                            ).infof("Testing connection to proxy router at: %s", test_url)
                             test_response = await test_client.get(test_url, timeout=5.0)
-                            logger.info(f"Proxy router health check status: {test_response.status_code}")
+                            chat_log.with_fields(
+                                event_type="proxy_health_check",
+                                request_id=request_id,
+                                status_code=test_response.status_code
+                            ).infof("Proxy router health check status: %d", test_response.status_code)
                             if test_response.status_code == 200:
-                                logger.info(f"Proxy router health response: {test_response.text[:100]}")
+                                chat_log.with_fields(
+                                    event_type="proxy_health_check",
+                                    request_id=request_id,
+                                    response_preview=test_response.text[:100]
+                                ).infof("Proxy router health response: %s", test_response.text[:100])
                             else:
-                                logger.error(f"Proxy router appears unhealthy: {test_response.status_code} - {test_response.text[:100]}")
+                                chat_log.with_fields(
+                                    event_type="proxy_health_check",
+                                    request_id=request_id,
+                                    status_code=test_response.status_code,
+                                    response_preview=test_response.text[:100],
+                                    status="unhealthy"
+                                ).errorf("Proxy router appears unhealthy: %d - %s", test_response.status_code, test_response.text[:100])
                     except Exception as health_err:
-                        logger.error(f"Failed to connect to proxy router health endpoint: {str(health_err)}")
+                        chat_log.with_fields(
+                            event_type="proxy_health_check",
+                            request_id=request_id,
+                            status="connection_failed",
+                            error=str(health_err)
+                        ).errorf("Failed to connect to proxy router health endpoint: %s", str(health_err))
                     
                     # Now attempt session creation
                     automated_session = await session_service.create_automated_session(
@@ -352,65 +552,144 @@ async def create_chat_completion(
                         requested_model=requested_model
                     )
                     
-                    logger.info(f"create_automated_session returned: {automated_session}")
+                    chat_log.with_fields(
+                        event_type="session_creation_result",
+                        request_id=request_id,
+                        automated_session=str(automated_session)
+                    ).infof("create_automated_session returned: %s", automated_session)
                     if automated_session:
                         # The Session model uses 'id' attribute, not 'session_id'
                         session_id = automated_session.id
-                        logger.info(f"Successfully created automated session with ID: {session_id}")
+                        chat_log.with_fields(
+                            event_type="session_creation",
+                            request_id=request_id,
+                            session_id=session_id,
+                            status="success",
+                            automation=True
+                        ).infof("Successfully created automated session with ID: %s", session_id)
                         
                         # Add a small delay to ensure the session is fully registered
-                        logger.info("Adding a brief delay to ensure session is fully registered")
+                        chat_log.with_fields(
+                            event_type="session_delay",
+                            request_id=request_id,
+                            session_id=session_id,
+                            context="automated_session_creation"
+                        ).info("Adding a brief delay to ensure session is fully registered")
                         await asyncio.sleep(1.0)  # 1 second delay
                     else:
                         # Session creation returned None - generate detailed log
-                        logger.error("Session service returned None from create_automated_session")
-                        logger.info("Checking if proxy router is available for the requested model")
+                        chat_log.with_fields(
+                            event_type="session_creation",
+                            request_id=request_id,
+                            status="failed",
+                            reason="service_returned_none"
+                        ).error("Session service returned None from create_automated_session")
+                        chat_log.with_fields(
+                            event_type="proxy_availability_check",
+                            request_id=request_id,
+                            requested_model=requested_model
+                        ).info("Checking if proxy router is available for the requested model")
                         
                         try:
                             async with httpx.AsyncClient() as model_client:
                                 model_url = f"{settings.PROXY_ROUTER_URL}/v1/models"
-                                logger.info(f"Checking available models at: {model_url}")
+                                chat_log.with_fields(
+                                    event_type="models_api_check",
+                                    request_id=request_id,
+                                    model_url=model_url
+                                ).infof("Checking available models at: %s", model_url)
                                 model_auth = {
                                     "authorization": f"Basic {base64.b64encode(f'{settings.PROXY_ROUTER_USERNAME}:{settings.PROXY_ROUTER_PASSWORD}'.encode()).decode()}"
                                 }
                                 model_response = await model_client.get(model_url, headers=model_auth, timeout=5.0)
-                                logger.info(f"Models API status: {model_response.status_code}")
+                                chat_log.with_fields(
+                                    event_type="models_api_check",
+                                    request_id=request_id,
+                                    status_code=model_response.status_code
+                                ).infof("Models API status: %d", model_response.status_code)
                                 if model_response.status_code == 200:
                                     models_data = model_response.json()
-                                    logger.info(f"Available models: {json.dumps(models_data)}")
+                                    chat_log.with_fields(
+                                        event_type="models_api_check",
+                                        request_id=request_id,
+                                        models_data=models_data
+                                    ).infof("Available models: %s", json.dumps(models_data))
                                     # Check if requested model is in the list
                                     model_names = [m.get('id', '') for m in models_data.get('data', [])]
                                     if requested_model in model_names:
-                                        logger.info(f"Requested model '{requested_model}' is available in proxy router")
+                                        chat_log.with_fields(
+                                            event_type="model_availability",
+                                            request_id=request_id,
+                                            requested_model=requested_model,
+                                            status="available"
+                                        ).infof("Requested model '%s' is available in proxy router", requested_model)
                                     else:
-                                        logger.error(f"Requested model '{requested_model}' NOT found in available models: {model_names}")
+                                        chat_log.with_fields(
+                                            event_type="model_availability",
+                                            request_id=request_id,
+                                            requested_model=requested_model,
+                                            available_models=model_names,
+                                            status="not_found"
+                                        ).errorf("Requested model '%s' NOT found in available models: %s", requested_model, model_names)
                                 else:
-                                    logger.error(f"Failed to get models: {model_response.text[:200]}")
+                                    chat_log.with_fields(
+                                        event_type="models_api_check",
+                                        request_id=request_id,
+                                        status="failed",
+                                        response_preview=model_response.text[:200]
+                                    ).errorf("Failed to get models: %s", model_response.text[:200])
                         except Exception as model_err:
-                            logger.error(f"Error checking models API: {str(model_err)}")
+                            chat_log.with_fields(
+                                event_type="models_api_check",
+                                request_id=request_id,
+                                status="error",
+                                error=str(model_err)
+                            ).errorf("Error checking models API: %s", str(model_err))
                         
                         # Session creation failed
-                        logger.error("Automated session creation failed.")
+                        chat_log.with_fields(
+                            event_type="session_creation",
+                            request_id=request_id,
+                            status="failed",
+                            automation=True
+                        ).error("Automated session creation failed.")
                         raise HTTPException(
                             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                             detail="Automated session creation failed. The model provider may be unavailable."
                         )
-                    logger.info("=========== SESSION DEBUG END ===========")
+                    chat_log.with_fields(
+                        event_type="session_debug",
+                        request_id=request_id
+                    ).info("SESSION DEBUG END")
                 except Exception as e:
                     # Error in session creation
-                    logger.error(f"Automated session creation error: {str(e)}")
-                    logger.exception(e)  # Log full stack trace
+                    chat_log.with_fields(
+                        event_type="session_creation",
+                        request_id=request_id,
+                        status="error",
+                        error=str(e),
+                        automation=True
+                    ).errorf("Automated session creation error: %s", str(e))
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                         detail=f"An unexpected error occurred during session creation: {e}"
                     )
         except HTTPException as http_exc:
             # Re-raise HTTP exceptions with logging
-            logger.error(f"HTTP exception during session handling: {http_exc.detail}")
+            chat_log.with_fields(
+                event_type="session_handling",
+                request_id=request_id,
+                status="http_exception",
+                error=http_exc.detail
+            ).errorf("HTTP exception during session handling: %s", http_exc.detail)
             raise
         except Exception as e:
-            logger.error(f"Error in session handling: {e}")
-            logger.exception(e)  # Log full stack trace
+            chat_log.with_fields(
+                event_type="session_handling",
+                request_id=request_id,
+                status="error",
+                error=str(e)
+            ).errorf("Error in session handling: %s", e)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Error handling session: {str(e)}"
@@ -418,7 +697,11 @@ async def create_chat_completion(
     
     # If we still don't have a session_id, return an error
     if not session_id:
-        logger.error("No session ID after all attempts")
+        chat_log.with_fields(
+            event_type="session_handling",
+            request_id=request_id,
+            status="no_session_id"
+        ).error("No session ID after all attempts")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No session ID provided in request and no active session found for API key"
@@ -449,7 +732,11 @@ async def create_chat_completion(
         if isinstance(json_body["tool_choice"], dict) and "function" in json_body["tool_choice"]:
             func_obj = json_body["tool_choice"]["function"]
             if isinstance(func_obj, dict) and "tool_choice" in func_obj:
-                logger.warning(f"Found nested tool_choice, fixing structure: {json.dumps(json_body['tool_choice'])}")
+                chat_log.with_fields(
+                    event_type="tool_choice_fix",
+                    request_id=request_id,
+                    original_structure=json_body['tool_choice']
+                ).warnf("Found nested tool_choice, fixing structure: %s", json.dumps(json_body['tool_choice']))
                 try:
                     # Extract correct function name
                     if "name" in func_obj.get("tool_choice", {}).get("function", {}):
@@ -460,9 +747,19 @@ async def create_chat_completion(
                                 "name": func_name
                             }
                         }
-                        logger.info(f"Fixed tool_choice to: {json.dumps(json_body['tool_choice'])}")
+                        chat_log.with_fields(
+                            event_type="tool_choice_fix",
+                            request_id=request_id,
+                            fixed_structure=json_body['tool_choice'],
+                            status="success"
+                        ).infof("Fixed tool_choice to: %s", json.dumps(json_body['tool_choice']))
                 except Exception as e:
-                    logger.error(f"Error fixing tool_choice: {str(e)}")
+                    chat_log.with_fields(
+                        event_type="tool_choice_fix",
+                        request_id=request_id,
+                        status="error",
+                        error=str(e)
+                    ).errorf("Error fixing tool_choice: %s", str(e))
 
     # Additional fix for tool_choice within tools parameters
     if "tools" in json_body:
@@ -472,17 +769,32 @@ async def create_chat_completion(
                 if isinstance(func, dict) and "parameters" in func:
                     params = func["parameters"]
                     if isinstance(params, dict) and "tool_choice" in params:
-                        logger.warning(f"Found tool_choice in tool parameters, removing: {json.dumps(params['tool_choice'])}")
+                        chat_log.with_fields(
+                            event_type="tool_parameter_cleanup",
+                            request_id=request_id,
+                            tool_name=func.get('name'),
+                            removed_param=params['tool_choice']
+                        ).warnf("Found tool_choice in tool parameters, removing: %s", json.dumps(params['tool_choice']))
                         # Remove tool_choice from parameters
                         del json_body["tools"][i]["function"]["parameters"]["tool_choice"]
-                        logger.info(f"Removed tool_choice from tool parameters for tool: {func.get('name')}")
+                        chat_log.with_fields(
+                            event_type="tool_parameter_cleanup",
+                            request_id=request_id,
+                            tool_name=func.get('name'),
+                            status="success"
+                        ).infof("Removed tool_choice from tool parameters for tool: %s", func.get('name'))
 
     # Special handling for message with tool_calls and empty content
     if "messages" in json_body:
         for i, msg in enumerate(json_body["messages"]):
             if isinstance(msg, dict) and msg.get("role") == "assistant" and "tool_calls" in msg:
                 if msg.get("content") == "":
-                    logger.info(f"Setting null content for assistant message with tool_calls at index {i}")
+                    chat_log.with_fields(
+                        event_type="message_cleanup",
+                        request_id=request_id,
+                        message_index=i,
+                        action="set_null_content"
+                    ).infof("Setting null content for assistant message with tool_calls at index %d", i)
                     json_body["messages"][i]["content"] = None
 
     # Log complete request for debugging when tools are used
@@ -492,17 +804,24 @@ async def create_chat_completion(
         has_tool_messages = any(msg.get("role") == "tool" for msg in json_body["messages"] if isinstance(msg, dict))
 
     if has_tools or has_tool_messages:
-        logger.info("===== TOOL CALLING REQUEST =====")
-        logger.info(f"Endpoint: {endpoint}")
-        logger.info(f"Headers: {json.dumps({k: v for k, v in headers.items() if k.lower() != 'authorization'})}")
-        logger.info(f"Request body: {json.dumps(json_body, indent=2)}")
-        logger.info(f"Session ID: {session_id}")
-        logger.info("================================")
+        chat_log.with_fields(
+            event_type="tool_calling_request",
+            request_id=request_id,
+            endpoint=endpoint,
+            headers={k: v for k, v in headers.items() if k.lower() != 'authorization'},
+            request_body=json_body,
+            session_id=session_id
+        ).info("TOOL CALLING REQUEST - Full request details logged")
     
     # Handle streaming only - assume all requests are streaming
     async def stream_generator():
         stream_trace_id = str(uuid.uuid4())[:8]
-        logger.info(f"[STREAM-{stream_trace_id}] Starting stream generator for session: {session_id}")
+        chat_log.with_fields(
+            event_type="stream_start",
+            request_id=request_id,
+            stream_trace_id=stream_trace_id,
+            session_id=session_id
+        ).infof("[STREAM-%s] Starting stream generator for session: %s", stream_trace_id, session_id)
         chunk_count = 0
         req_body_json = None
         
@@ -514,12 +833,29 @@ async def create_chat_completion(
                 has_tool_calls = any("tool_calls" in msg for msg in req_body_json.get("messages", []) if isinstance(msg, dict))
                 
                 if has_tool_msg or has_tool_calls:
-                    logger.info(f"[STREAM-{stream_trace_id}] Request contains tool messages: {has_tool_msg}, tool calls: {has_tool_calls}")
+                    chat_log.with_fields(
+                        event_type="stream_request_analysis",
+                        request_id=request_id,
+                        stream_trace_id=stream_trace_id,
+                        has_tool_messages=has_tool_msg,
+                        has_tool_calls=has_tool_calls
+                    ).infof("[STREAM-%s] Request contains tool messages: %s, tool calls: %s", stream_trace_id, has_tool_msg, has_tool_calls)
             except Exception as parse_err:
-                logger.error(f"[STREAM-{stream_trace_id}] Failed to parse request body: {parse_err}")
+                chat_log.with_fields(
+                    event_type="stream_request_analysis",
+                    request_id=request_id,
+                    stream_trace_id=stream_trace_id,
+                    status="parse_error",
+                    error=str(parse_err)
+                ).errorf("[STREAM-%s] Failed to parse request body: %s", stream_trace_id, parse_err)
             
             # First attempt with existing session
-            logger.info(f"[STREAM-{stream_trace_id}] Making request to proxy router: {endpoint}")
+            chat_log.with_fields(
+                event_type="stream_proxy_request",
+                request_id=request_id,
+                stream_trace_id=stream_trace_id,
+                endpoint=endpoint
+            ).infof("[STREAM-%s] Making request to proxy router: %s", stream_trace_id, endpoint)
             
             # Track if we need to retry due to expired session
             retry_with_new_session = False
@@ -528,25 +864,50 @@ async def create_chat_completion(
             async with httpx.AsyncClient() as client:
                 async with client.stream("POST", endpoint, content=body, headers=headers, timeout=60.0) as response:
                     # Log proxy status
-                    logger.info(f"[STREAM-{stream_trace_id}] Proxy router responded with status: {response.status_code}")
-                    logger.info(f"[STREAM-{stream_trace_id}] Response headers: {dict(response.headers.items())}")
+                    chat_log.with_fields(
+                        event_type="stream_proxy_response",
+                        request_id=request_id,
+                        stream_trace_id=stream_trace_id,
+                        status_code=response.status_code,
+                        response_headers=dict(response.headers.items())
+                    ).infof("[STREAM-%s] Proxy router responded with status: %d", stream_trace_id, response.status_code)
                     
                     if response.status_code != 200:
-                        logger.error(f"[STREAM-{stream_trace_id}] Proxy router error response: {response.status_code}")
+                        chat_log.with_fields(
+                            event_type="stream_proxy_error",
+                            request_id=request_id,
+                            stream_trace_id=stream_trace_id,
+                            status_code=response.status_code
+                        ).errorf("[STREAM-%s] Proxy router error response: %d", stream_trace_id, response.status_code)
                         # Try to read and log the error body
                         try:
                             error_body = await response.aread()
                             error_text = error_body.decode('utf-8', errors='replace')
-                            logger.error(f"[STREAM-{stream_trace_id}] Error body: {error_text}")
+                            chat_log.with_fields(
+                                event_type="stream_proxy_error",
+                                request_id=request_id,
+                                stream_trace_id=stream_trace_id,
+                                error_body=error_text
+                            ).errorf("[STREAM-%s] Error body: %s", stream_trace_id, error_text)
                             
                             # Check if this is a session expired error
                             if 'session expired' in error_text.lower():
-                                logger.warning(f"[STREAM-{stream_trace_id}] Detected session expired error, will create new session and retry")
+                                chat_log.with_fields(
+                                    event_type="stream_session_expired",
+                                    request_id=request_id,
+                                    stream_trace_id=stream_trace_id,
+                                    action="retry_with_new_session"
+                                ).warnf("[STREAM-%s] Detected session expired error, will create new session and retry", stream_trace_id)
                                 retry_with_new_session = True
                                 
                                 if db_api_key and user:
                                     try:
-                                        logger.info(f"[STREAM-{stream_trace_id}] Creating new session to replace expired session")
+                                        chat_log.with_fields(
+                                            event_type="stream_session_replacement",
+                                            request_id=request_id,
+                                            stream_trace_id=stream_trace_id,
+                                            action="creating"
+                                        ).infof("[STREAM-%s] Creating new session to replace expired session", stream_trace_id)
                                         new_session = await session_service.create_automated_session(
                                             db=db,
                                             api_key_id=db_api_key.id,
@@ -554,13 +915,30 @@ async def create_chat_completion(
                                             requested_model=requested_model
                                         )
                                         new_session_id = new_session.id
-                                        logger.info(f"[STREAM-{stream_trace_id}] Created new session: {new_session_id}")
+                                        chat_log.with_fields(
+                                            event_type="stream_session_replacement",
+                                            request_id=request_id,
+                                            stream_trace_id=stream_trace_id,
+                                            new_session_id=new_session_id,
+                                            status="success"
+                                        ).infof("[STREAM-%s] Created new session: %s", stream_trace_id, new_session_id)
                                         
                                         # Add a small delay to ensure the session is fully registered
-                                        logger.info(f"[STREAM-{stream_trace_id}] Adding brief delay to ensure session is registered")
+                                        chat_log.with_fields(
+                                            event_type="stream_session_delay",
+                                            request_id=request_id,
+                                            stream_trace_id=stream_trace_id,
+                                            new_session_id=new_session_id
+                                        ).infof("[STREAM-%s] Adding brief delay to ensure session is registered", stream_trace_id)
                                         await asyncio.sleep(1.0)
                                     except Exception as e:
-                                        logger.error(f"[STREAM-{stream_trace_id}] Failed to create new session: {e}")
+                                        chat_log.with_fields(
+                                            event_type="stream_session_replacement",
+                                            request_id=request_id,
+                                            stream_trace_id=stream_trace_id,
+                                            status="failed",
+                                            error=str(e)
+                                        ).errorf("[STREAM-%s] Failed to create new session: %s", stream_trace_id, e)
                                         retry_with_new_session = False
                             
                             # If not retrying, return error to client
@@ -576,7 +954,12 @@ async def create_chat_completion(
                                 yield f"data: {json.dumps(error_msg)}\n\n".encode('utf-8')
                                 return
                         except Exception as read_err:
-                            logger.error(f"[STREAM-{stream_trace_id}] Error reading error response: {read_err}")
+                            chat_log.with_fields(
+                                event_type="stream_error_handling",
+                                request_id=request_id,
+                                stream_trace_id=stream_trace_id,
+                                error=str(read_err)
+                            ).errorf("[STREAM-%s] Error reading error response: %s", stream_trace_id, read_err)
                             retry_with_new_session = False
                     
                     # If not retrying, process the response normally
@@ -584,7 +967,12 @@ async def create_chat_completion(
                         # Check for empty response (Content-Length: 0)
                         content_length = response.headers.get('content-length')
                         if content_length and int(content_length) == 0:
-                            logger.warning(f"[STREAM-{stream_trace_id}] Received response with Content-Length: 0")
+                            chat_log.with_fields(
+                                event_type="stream_response_warning",
+                                request_id=request_id,
+                                stream_trace_id=stream_trace_id,
+                                content_length=0
+                            ).warnf("[STREAM-%s] Received response with Content-Length: 0", stream_trace_id)
                             
                             # Log request details for debugging  
                             if req_body_json:
@@ -592,18 +980,36 @@ async def create_chat_completion(
                                 has_tool_msg = any(msg.get("role") == "tool" for msg in req_body_json.get("messages", []) if isinstance(msg, dict))
                                 has_tool_calls = any("tool_calls" in msg for msg in req_body_json.get("messages", []) if isinstance(msg, dict))
                                 
-                                logger.warning(f"[STREAM-{stream_trace_id}] Request details: message count: {msg_count}, has tool messages: {has_tool_msg}, has tool calls: {has_tool_calls}")
+                                chat_log.with_fields(
+                                    event_type="stream_request_details",
+                                    request_id=request_id,
+                                    stream_trace_id=stream_trace_id,
+                                    message_count=msg_count,
+                                    has_tool_messages=has_tool_msg,
+                                    has_tool_calls=has_tool_calls
+                                ).warnf("[STREAM-%s] Request details: message count: %d, has tool messages: %s, has tool calls: %s", stream_trace_id, msg_count, has_tool_msg, has_tool_calls)
                                 
                                 # Return a better error message based on the request type
                                 if has_tool_msg:
                                     # This is a tool follow-up response that failed
-                                    logger.warning(f"[STREAM-{stream_trace_id}] TOOL FOLLOW-UP FAILED: Empty response received for tool result processing")
+                                    chat_log.with_fields(
+                                        event_type="stream_tool_followup",
+                                        request_id=request_id,
+                                        stream_trace_id=stream_trace_id,
+                                        status="failed",
+                                        reason="empty_response"
+                                    ).warnf("[STREAM-%s] TOOL FOLLOW-UP FAILED: Empty response received for tool result processing", stream_trace_id)
                                     error_type = "tool_processing_error" 
                                     error_message = "The model returned an empty response when processing your tool results. This may indicate an issue with the tool call format or the session state."
                                     
                                     # Try direct proxy request with different tool formatting as a diagnostic
                                     try:
-                                        logger.info(f"[STREAM-{stream_trace_id}] Attempting diagnostic request without API gateway")
+                                        chat_log.with_fields(
+                                            event_type="stream_diagnostic",
+                                            request_id=request_id,
+                                            stream_trace_id=stream_trace_id,
+                                            action="direct_request"
+                                        ).infof("[STREAM-%s] Attempting diagnostic request without API gateway", stream_trace_id)
                                         
                                         # Build a simplified version of the messages just for testing
                                         test_messages = req_body_json.get("messages", [])
@@ -619,13 +1025,29 @@ async def create_chat_completion(
                                         if "tools" in req_body_json:
                                             test_body["tools"] = req_body_json["tools"]
                                         
-                                        logger.info(f"[STREAM-{stream_trace_id}] Diagnostic request: {json.dumps(test_body)}")
+                                        chat_log.with_fields(
+                                            event_type="stream_diagnostic",
+                                            request_id=request_id,
+                                            stream_trace_id=stream_trace_id,
+                                            diagnostic_body=test_body
+                                        ).infof("[STREAM-%s] Diagnostic request: %s", stream_trace_id, json.dumps(test_body))
                                         
                                         # Log this diagnostic attempt
-                                        logger.warning(f"[STREAM-{stream_trace_id}] Attempted direct diagnostic, check logs for details")
+                                        chat_log.with_fields(
+                                            event_type="stream_diagnostic",
+                                            request_id=request_id,
+                                            stream_trace_id=stream_trace_id,
+                                            status="completed"
+                                        ).warnf("[STREAM-%s] Attempted direct diagnostic, check logs for details", stream_trace_id)
                                         error_message += " A diagnostic attempt was logged for further analysis."
                                     except Exception as diag_err:
-                                        logger.error(f"[STREAM-{stream_trace_id}] Error in diagnostic: {diag_err}")
+                                        chat_log.with_fields(
+                                            event_type="stream_diagnostic",
+                                            request_id=request_id,
+                                            stream_trace_id=stream_trace_id,
+                                            status="error",
+                                            error=str(diag_err)
+                                        ).errorf("[STREAM-%s] Error in diagnostic: %s", stream_trace_id, diag_err)
                                 else:
                                     error_type = "empty_response_error"
                                     error_message = "The model returned an empty response. This may indicate an issue with the session or model."
@@ -652,15 +1074,32 @@ async def create_chat_completion(
                             if chunk_count <= 2:
                                 try:
                                     preview = chunk_bytes[:150].decode('utf-8', errors='replace')
-                                    logger.info(f"[STREAM-{stream_trace_id}] Chunk {chunk_count} preview: {preview}")
+                                    chat_log.with_fields(
+                                        event_type="stream_chunk",
+                                        request_id=request_id,
+                                        stream_trace_id=stream_trace_id,
+                                        chunk_count=chunk_count,
+                                        chunk_preview=preview
+                                    ).infof("[STREAM-%s] Chunk %d preview: %s", stream_trace_id, chunk_count, preview)
                                 except:
-                                    logger.info(f"[STREAM-{stream_trace_id}] Chunk {chunk_count} received (binary data)")
+                                    chat_log.with_fields(
+                                        event_type="stream_chunk",
+                                        request_id=request_id,
+                                        stream_trace_id=stream_trace_id,
+                                        chunk_count=chunk_count,
+                                        data_type="binary"
+                                    ).infof("[STREAM-%s] Chunk %d received (binary data)", stream_trace_id, chunk_count)
                             yield chunk_bytes
                         
                         # If we got a 200 OK but no chunks despite Content-Length not being 0,
                         # this is an unusual situation
                         if not has_received_chunks and (not content_length or int(content_length) > 0):
-                            logger.warning(f"[STREAM-{stream_trace_id}] Received 200 OK but no chunks despite Content-Length not 0")
+                            chat_log.with_fields(
+                                event_type="stream_response_warning",
+                                request_id=request_id,
+                                stream_trace_id=stream_trace_id,
+                                issue="no_chunks_despite_content_length"
+                            ).warnf("[STREAM-%s] Received 200 OK but no chunks despite Content-Length not 0", stream_trace_id)
                             
                             # For tool call follow-ups, add specific messaging
                             error_msg = {
@@ -680,15 +1119,30 @@ async def create_chat_completion(
                                 tool_messages = [msg for msg in req_body_json.get("messages", []) if isinstance(msg, dict) and msg.get("role") == "tool"]
                                 if tool_messages:
                                     for tm in tool_messages:
-                                        logger.warning(f"[STREAM-{stream_trace_id}] Tool message format: {json.dumps(tm)}")
+                                        chat_log.with_fields(
+                                            event_type="stream_tool_message",
+                                            request_id=request_id,
+                                            stream_trace_id=stream_trace_id,
+                                            tool_message=tm
+                                        ).warnf("[STREAM-%s] Tool message format: %s", stream_trace_id, json.dumps(tm))
                             
                             yield f"data: {json.dumps(error_msg)}\n\n".encode('utf-8')
                         
-                        logger.info(f"[STREAM-{stream_trace_id}] Stream finished from proxy after {chunk_count} chunks.")
+                        chat_log.with_fields(
+                            event_type="stream_complete",
+                            request_id=request_id,
+                            stream_trace_id=stream_trace_id,
+                            total_chunks=chunk_count
+                        ).infof("[STREAM-%s] Stream finished from proxy after %d chunks.", stream_trace_id, chunk_count)
 
             # If we need to retry with a new session, do that now
             if retry_with_new_session and new_session_id:
-                logger.info(f"[STREAM-{stream_trace_id}] Retrying request with new session ID: {new_session_id}")
+                chat_log.with_fields(
+                    event_type="stream_retry",
+                    request_id=request_id,
+                    stream_trace_id=stream_trace_id,
+                    new_session_id=new_session_id
+                ).infof("[STREAM-%s] Retrying request with new session ID: %s", stream_trace_id, new_session_id)
                 
                 # Create new endpoint with new session ID
                 retry_endpoint = f"{settings.PROXY_ROUTER_URL}/v1/chat/completions?session_id={new_session_id}"
@@ -701,10 +1155,21 @@ async def create_chat_completion(
                 # Make the retry request
                 async with httpx.AsyncClient() as retry_client:
                     async with retry_client.stream("POST", retry_endpoint, content=body, headers=retry_headers, timeout=60.0) as retry_response:
-                        logger.info(f"[STREAM-{stream_trace_id}] Retry request returned status: {retry_response.status_code}")
+                        chat_log.with_fields(
+                            event_type="stream_retry_response",
+                            request_id=request_id,
+                            stream_trace_id=stream_trace_id,
+                            retry_status_code=retry_response.status_code
+                        ).infof("[STREAM-%s] Retry request returned status: %d", stream_trace_id, retry_response.status_code)
                         
                         if retry_response.status_code != 200:
-                            logger.error(f"[STREAM-{stream_trace_id}] Retry request failed: {retry_response.status_code}")
+                            chat_log.with_fields(
+                                event_type="stream_retry_response",
+                                request_id=request_id,
+                                stream_trace_id=stream_trace_id,
+                                retry_status_code=retry_response.status_code,
+                                status="failed"
+                            ).errorf("[STREAM-%s] Retry request failed: %d", stream_trace_id, retry_response.status_code)
                             error_body = await retry_response.aread()
                             error_text = error_body.decode('utf-8', errors='replace')
                             error_msg = {
@@ -724,16 +1189,37 @@ async def create_chat_completion(
                             if retry_chunk_count <= 2:
                                 try:
                                     preview = chunk_bytes[:150].decode('utf-8', errors='replace')
-                                    logger.info(f"[STREAM-{stream_trace_id}] Retry chunk {retry_chunk_count} preview: {preview}")
+                                    chat_log.with_fields(
+                                        event_type="stream_retry_chunk",
+                                        request_id=request_id,
+                                        stream_trace_id=stream_trace_id,
+                                        retry_chunk_count=retry_chunk_count,
+                                        chunk_preview=preview
+                                    ).infof("[STREAM-%s] Retry chunk %d preview: %s", stream_trace_id, retry_chunk_count, preview)
                                 except:
-                                    logger.info(f"[STREAM-{stream_trace_id}] Retry chunk {retry_chunk_count} received (binary data)")
+                                    chat_log.with_fields(
+                                        event_type="stream_retry_chunk",
+                                        request_id=request_id,
+                                        stream_trace_id=stream_trace_id,
+                                        retry_chunk_count=retry_chunk_count,
+                                        data_type="binary"
+                                    ).infof("[STREAM-%s] Retry chunk %d received (binary data)", stream_trace_id, retry_chunk_count)
                             yield chunk_bytes
                         
-                        logger.info(f"[STREAM-{stream_trace_id}] Retry stream finished after {retry_chunk_count} chunks")
+                        chat_log.with_fields(
+                            event_type="stream_retry_complete",
+                            request_id=request_id,
+                            stream_trace_id=stream_trace_id,
+                            retry_chunks=retry_chunk_count
+                        ).infof("[STREAM-%s] Retry stream finished after %d chunks", stream_trace_id, retry_chunk_count)
 
         except Exception as e:
-            logger.error(f"[STREAM-{stream_trace_id}] Error in stream_generator: {e}")
-            logger.exception(e)  # Log full stack trace
+            chat_log.with_fields(
+                event_type="stream_error",
+                request_id=request_id,
+                stream_trace_id=stream_trace_id,
+                error=str(e)
+            ).errorf("[STREAM-%s] Error in stream_generator: %s", stream_trace_id, e)
             # Yield a generic error message as bytes
             error_message = f"data: {{\"error\": {{\"message\": \"Error in API gateway streaming: {str(e)}\", \"type\": \"gateway_error\", \"session_id\": \"{session_id}\"}}}}\n\n"
             yield error_message.encode('utf-8')
@@ -767,18 +1253,30 @@ async def create_chat_completion(
                 
                 # Check response status
                 if response.status_code != 200:
-                    logger.error(f"[REQ-{request_id}] Proxy router error response: {response.status_code}")
+                    chat_log.with_fields(
+                        event_type="non_stream_proxy_error",
+                        request_id=request_id,
+                        status_code=response.status_code
+                    ).errorf("[REQ-%s] Proxy router error response: %d", request_id, response.status_code)
                     try:
                         error_content = response.text
                         
                         # Check if this is a session expired error
                         if 'session expired' in error_content.lower():
-                            logger.warning(f"[REQ-{request_id}] Detected session expired error, will create new session and retry")
+                            chat_log.with_fields(
+                                event_type="non_stream_session_expired",
+                                request_id=request_id,
+                                action="retry_with_new_session"
+                            ).warnf("[REQ-%s] Detected session expired error, will create new session and retry", request_id)
                             retry_with_new_session = True
                             
                             if db_api_key and user:
                                 try:
-                                    logger.info(f"[REQ-{request_id}] Creating new session to replace expired session")
+                                    chat_log.with_fields(
+                                        event_type="non_stream_session_replacement",
+                                        request_id=request_id,
+                                        action="creating"
+                                    ).infof("[REQ-%s] Creating new session to replace expired session", request_id)
                                     new_session = await session_service.create_automated_session(
                                         db=db,
                                         api_key_id=db_api_key.id,
@@ -786,13 +1284,27 @@ async def create_chat_completion(
                                         requested_model=requested_model
                                     )
                                     new_session_id = new_session.id
-                                    logger.info(f"[REQ-{request_id}] Created new session: {new_session_id}")
+                                    chat_log.with_fields(
+                                        event_type="non_stream_session_replacement",
+                                        request_id=request_id,
+                                        new_session_id=new_session_id,
+                                        status="success"
+                                    ).infof("[REQ-%s] Created new session: %s", request_id, new_session_id)
                                     
                                     # Add a small delay to ensure the session is fully registered
-                                    logger.info(f"[REQ-{request_id}] Adding brief delay to ensure session is registered")
+                                    chat_log.with_fields(
+                                        event_type="non_stream_session_delay",
+                                        request_id=request_id,
+                                        new_session_id=new_session_id
+                                    ).infof("[REQ-%s] Adding brief delay to ensure session is registered", request_id)
                                     await asyncio.sleep(1.0)
                                 except Exception as e:
-                                    logger.error(f"[REQ-{request_id}] Failed to create new session: {e}")
+                                    chat_log.with_fields(
+                                        event_type="non_stream_session_replacement",
+                                        request_id=request_id,
+                                        status="failed",
+                                        error=str(e)
+                                    ).errorf("[REQ-%s] Failed to create new session: %s", request_id, e)
                                     retry_with_new_session = False
                         
                         # If not retrying, return error to client
@@ -815,7 +1327,11 @@ async def create_chat_completion(
                                     }
                                 )
                     except Exception as e:
-                        logger.error(f"[REQ-{request_id}] Error parsing error response: {e}")
+                        chat_log.with_fields(
+                            event_type="non_stream_error_parsing",
+                            request_id=request_id,
+                            error=str(e)
+                        ).errorf("[REQ-%s] Error parsing error response: %s", request_id, e)
                         retry_with_new_session = False
                         return JSONResponse(
                             status_code=response.status_code,
@@ -838,7 +1354,11 @@ async def create_chat_completion(
             
             # If we need to retry with a new session, do that now
             if retry_with_new_session and new_session_id:
-                logger.info(f"[REQ-{request_id}] Retrying request with new session ID: {new_session_id}")
+                chat_log.with_fields(
+                    event_type="non_stream_retry",
+                    request_id=request_id,
+                    new_session_id=new_session_id
+                ).infof("[REQ-%s] Retrying request with new session ID: %s", request_id, new_session_id)
                 
                 # Create new endpoint with new session ID
                 retry_endpoint = f"{settings.PROXY_ROUTER_URL}/v1/chat/completions?session_id={new_session_id}"
@@ -858,7 +1378,12 @@ async def create_chat_completion(
                     )
                     
                     if retry_response.status_code != 200:
-                        logger.error(f"[REQ-{request_id}] Retry request failed: {retry_response.status_code}")
+                        chat_log.with_fields(
+                            event_type="non_stream_retry_response",
+                            request_id=request_id,
+                            retry_status_code=retry_response.status_code,
+                            status="failed"
+                        ).errorf("[REQ-%s] Retry request failed: %d", request_id, retry_response.status_code)
                         return JSONResponse(
                             status_code=retry_response.status_code,
                             content={
@@ -877,8 +1402,11 @@ async def create_chat_completion(
                     )
                 
         except Exception as e:
-            logger.error(f"[REQ-{request_id}] Error in non-streaming request: {e}")
-            logger.exception(e)
+            chat_log.with_fields(
+                event_type="non_stream_error",
+                request_id=request_id,
+                error=str(e)
+            ).errorf("[REQ-%s] Error in non-streaming request: %s", request_id, e)
             return JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 content={

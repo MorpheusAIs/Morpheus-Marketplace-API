@@ -5,13 +5,14 @@ Handles interactions with AWS Cognito User Pools for user lifecycle management.
 """
 
 import boto3
-import logging
 from typing import Optional, Dict, Any
 from botocore.exceptions import ClientError, NoCredentialsError
 
 from src.core.config import settings
+from ..core.structured_logger import create_component_logger
 
-logger = logging.getLogger(__name__)
+# Setup structured logging
+cognito_log = create_component_logger("COGNITO")
 
 class CognitoUserService:
     """Service for managing Cognito users"""
@@ -27,12 +28,24 @@ class CognitoUserService:
                 aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
                 aws_session_token=settings.AWS_SESSION_TOKEN
             )
-            logger.info(f"✅ Cognito client initialized for region: {settings.COGNITO_REGION}")
+            cognito_log.with_fields(
+                event_type="cognito_initialization",
+                region=settings.COGNITO_REGION,
+                status="success"
+            ).infof("Cognito client initialized for region: %s", settings.COGNITO_REGION)
         except NoCredentialsError:
-            logger.error("❌ AWS credentials not found for Cognito operations")
+            cognito_log.with_fields(
+                event_type="cognito_initialization",
+                status="failed",
+                error="no_credentials"
+            ).error("AWS credentials not found for Cognito operations")
             raise
         except Exception as e:
-            logger.error(f"❌ Failed to initialize Cognito client: {str(e)}")
+            cognito_log.with_fields(
+                event_type="cognito_initialization",
+                status="failed",
+                error=str(e)
+            ).errorf("Failed to initialize Cognito client: %s", str(e))
             raise
     
     async def delete_user(self, cognito_user_id: str) -> Dict[str, Any]:
@@ -46,7 +59,11 @@ class CognitoUserService:
             Dict with deletion status and details
         """
         try:
-            logger.info(f"🗑️ Attempting to delete Cognito user: {cognito_user_id}")
+            cognito_log.with_fields(
+                event_type="user_deletion",
+                cognito_user_id=cognito_user_id,
+                status="attempting"
+            ).infof("Attempting to delete Cognito user: %s", cognito_user_id)
             
             # Delete the user from Cognito User Pool
             response = self.cognito_client.admin_delete_user(
@@ -54,7 +71,11 @@ class CognitoUserService:
                 Username=cognito_user_id
             )
             
-            logger.info(f"✅ Successfully deleted Cognito user: {cognito_user_id}")
+            cognito_log.with_fields(
+                event_type="user_deletion",
+                cognito_user_id=cognito_user_id,
+                status="success"
+            ).infof("Successfully deleted Cognito user: %s", cognito_user_id)
             
             return {
                 "success": True,
@@ -68,7 +89,12 @@ class CognitoUserService:
             error_message = e.response['Error']['Message']
             
             if error_code == 'UserNotFoundException':
-                logger.warning(f"⚠️ Cognito user not found: {cognito_user_id}")
+                cognito_log.with_fields(
+                    event_type="user_deletion",
+                    cognito_user_id=cognito_user_id,
+                    status="not_found",
+                    error_code=error_code
+                ).warnf("Cognito user not found: %s", cognito_user_id)
                 return {
                     "success": True,  # Consider this successful since user doesn't exist
                     "cognito_user_id": cognito_user_id,
@@ -77,7 +103,13 @@ class CognitoUserService:
                 }
             
             elif error_code == 'InvalidParameterException':
-                logger.error(f"❌ Invalid parameter for Cognito deletion: {error_message}")
+                cognito_log.with_fields(
+                    event_type="user_deletion",
+                    cognito_user_id=cognito_user_id,
+                    status="failed",
+                    error_code=error_code,
+                    error_message=error_message
+                ).errorf("Invalid parameter for Cognito deletion: %s", error_message)
                 return {
                     "success": False,
                     "cognito_user_id": cognito_user_id,
@@ -86,7 +118,13 @@ class CognitoUserService:
                 }
                 
             else:
-                logger.error(f"❌ Cognito deletion failed: {error_code} - {error_message}")
+                cognito_log.with_fields(
+                    event_type="user_deletion",
+                    cognito_user_id=cognito_user_id,
+                    status="failed",
+                    error_code=error_code,
+                    error_message=error_message
+                ).errorf("Cognito deletion failed: %s - %s", error_code, error_message)
                 return {
                     "success": False,
                     "cognito_user_id": cognito_user_id,
@@ -95,7 +133,12 @@ class CognitoUserService:
                 }
                 
         except Exception as e:
-            logger.error(f"❌ Unexpected error during Cognito deletion: {str(e)}")
+            cognito_log.with_fields(
+                event_type="user_deletion",
+                cognito_user_id=cognito_user_id,
+                status="failed",
+                error=str(e)
+            ).errorf("Unexpected error during Cognito deletion: %s", str(e))
             return {
                 "success": False,
                 "cognito_user_id": cognito_user_id,
@@ -137,10 +180,20 @@ class CognitoUserService:
         except ClientError as e:
             if e.response['Error']['Code'] == 'UserNotFoundException':
                 return None
-            logger.error(f"❌ Error fetching Cognito user info: {str(e)}")
+            cognito_log.with_fields(
+                event_type="user_info_fetch",
+                cognito_user_id=cognito_user_id,
+                status="failed",
+                error=str(e)
+            ).errorf("Error fetching Cognito user info: %s", str(e))
             return None
         except Exception as e:
-            logger.error(f"❌ Unexpected error fetching Cognito user info: {str(e)}")
+            cognito_log.with_fields(
+                event_type="user_info_fetch",
+                cognito_user_id=cognito_user_id,
+                status="failed",
+                error=str(e)
+            ).errorf("Unexpected error fetching Cognito user info: %s", str(e))
             return None
 
 # Global service instance

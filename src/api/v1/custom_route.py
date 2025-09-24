@@ -12,12 +12,12 @@ from fastapi.responses import JSONResponse
 from starlette.requests import Request
 from starlette.responses import Response
 import inspect
-import logging
 import traceback
 from typing import Any, Callable, Dict, List, Optional, Set, Type
+from ...core.structured_logger import create_component_logger
 
-# Setup logging
-logger = logging.getLogger(__name__)
+# Setup structured logging
+custom_route_log = create_component_logger("CUSTOM_ROUTE")
 
 class FixedDependencyAPIRoute(APIRoute):
     """
@@ -56,7 +56,11 @@ class FixedDependencyAPIRoute(APIRoute):
                         return await route_handler(request)
                     except TypeError as e:
                         # If the parent class doesn't accept one arg, continue with our implementation
-                        logger.debug(f"Falling back to fixed implementation: {str(e)}")
+                        custom_route_log.with_fields(
+                            event_type="dependency_fallback",
+                            route_path=self.path,
+                            error=str(e)
+                        ).debugf("Falling back to fixed implementation: %s", str(e))
                         pass
                 
             # Get the endpoint handler and dependencies
@@ -89,10 +93,18 @@ class FixedDependencyAPIRoute(APIRoute):
             
             # If 'args' and 'kwargs' are not actual parameters, remove them
             if 'args' not in param_names and 'args' in values:
-                logger.debug(f"Removing unexpected 'args' parameter from {self.path}")
+                custom_route_log.with_fields(
+                    event_type="parameter_cleanup",
+                    route_path=self.path,
+                    removed_param="args"
+                ).debugf("Removing unexpected 'args' parameter from %s", self.path)
                 del values['args']
             if 'kwargs' not in param_names and 'kwargs' in values:
-                logger.debug(f"Removing unexpected 'kwargs' parameter from {self.path}")
+                custom_route_log.with_fields(
+                    event_type="parameter_cleanup",
+                    route_path=self.path,
+                    removed_param="kwargs"
+                ).debugf("Removing unexpected 'kwargs' parameter from %s", self.path)
                 del values['kwargs']
             
             # Check if any required parameters are missing
@@ -106,7 +118,11 @@ class FixedDependencyAPIRoute(APIRoute):
             if missing_params:
                 # Log the error but don't fail - we'll let the endpoint receive what we have
                 param_str = ", ".join(missing_params)
-                logger.warning(f"Missing required parameters for {self.path}: {param_str}")
+                custom_route_log.with_fields(
+                    event_type="missing_parameters",
+                    route_path=self.path,
+                    missing_params=param_str
+                ).warnf("Missing required parameters for %s: %s", self.path, param_str)
             
             # Run the endpoint with the fixed dependencies
             raw_response = await run_endpoint_function(
@@ -121,8 +137,12 @@ class FixedDependencyAPIRoute(APIRoute):
         except Exception as exc:
             # Log the full error with stack trace
             error_msg = f"Error in route {self.path}: {str(exc)}"
-            logger.error(error_msg)
-            logger.error(traceback.format_exc())
+            custom_route_log.with_fields(
+                event_type="route_error",
+                route_path=self.path,
+                error=error_msg,
+                traceback=traceback.format_exc()
+            ).error(error_msg)
             
             # Return a JSON error response
             return JSONResponse(

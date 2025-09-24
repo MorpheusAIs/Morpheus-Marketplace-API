@@ -5,9 +5,10 @@ Determines the appropriate API endpoint and UI behavior based on model tags and 
 
 from enum import Enum
 from typing import List, Dict, Optional, Set
-import logging
+from .structured_logger import create_component_logger
 
-logger = logging.getLogger(__name__)
+# Setup structured logging
+model_types_log = create_component_logger("MODEL_TYPES")
 
 class ModelType(Enum):
     """Enumeration of supported model types"""
@@ -139,14 +140,24 @@ def classify_model_type(tags: List[str], model_name: str = "") -> ModelCapabilit
     # Check exact tag combinations first
     for rule_tags, capability in MODEL_TYPE_RULES.items():
         if rule_tags.issubset(tags_set):
-            logger.info(f"Model classified by tag combination {rule_tags}: {capability.model_type}")
+            model_types_log.with_fields(
+                event_type="model_classification",
+                rule_tags=rule_tags,
+                model_type=capability.model_type,
+                classification_method="tag_combination"
+            ).infof("Model classified by tag combination %s: %s", rule_tags, capability.model_type)
             return capability
     
     # Check individual tags
     for tag in tags:
         if tag in SINGLE_TAG_RULES:
             model_type = SINGLE_TAG_RULES[tag]
-            logger.info(f"Model classified by single tag '{tag}': {model_type}")
+            model_types_log.with_fields(
+                event_type="model_classification",
+                tag=tag,
+                model_type=model_type,
+                classification_method="single_tag"
+            ).infof("Model classified by single tag '%s': %s", tag, model_type)
             
             # Return appropriate capability based on type
             if model_type == ModelType.EMBEDDINGS:
@@ -157,7 +168,12 @@ def classify_model_type(tags: List[str], model_name: str = "") -> ModelCapabilit
                 return MODEL_TYPE_RULES[frozenset(["transcribe", "s2t", "speech"])]
     
     # Default to chat model
-    logger.info(f"Model with tags {tags} defaulted to chat type")
+    model_types_log.with_fields(
+        event_type="model_classification",
+        tags=tags,
+        model_type="chat",
+        classification_method="default"
+    ).infof("Model with tags %s defaulted to chat type", tags)
     return ModelCapability(
         model_type=ModelType.CHAT,
         endpoint="/api/v1/chat/completions",

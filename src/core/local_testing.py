@@ -6,13 +6,14 @@ Only active when BYPASS_COGNITO_AUTH=true and LOCAL_TESTING_MODE=true.
 """
 
 import os
-import logging
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.db.models import User
 from src.crud import user as user_crud
+from .structured_logger import create_component_logger
 
-logger = logging.getLogger(__name__)
+# Setup structured logging
+local_testing_log = create_component_logger("LOCAL_TESTING")
 
 def is_local_testing_mode() -> bool:
     """Check if we're in local testing mode."""
@@ -40,16 +41,39 @@ async def get_or_create_test_user(db: AsyncSession) -> User:
             'name': 'Local Test User'
         }
         test_user = await user_crud.create_user_from_cognito(db, user_data)
-        logger.info("✅ Created test user for local development")
+        local_testing_log.with_fields(
+            event_type="test_user_creation",
+            email="test@local.dev",
+            environment="local_development"
+        ).info("Created test user for local development")
     
     return test_user
 
 def log_local_testing_status():
     """Log the current local testing configuration."""
     if is_local_testing_mode():
-        logger.warning("🧪 LOCAL TESTING MODE ACTIVE")
-        logger.warning("🔓 Cognito authentication BYPASSED")
-        logger.warning("👤 Using test user: test@local.dev")
-        logger.warning("⚠️  NOT FOR PRODUCTION USE")
+        local_testing_log.with_fields(
+            event_type="local_testing_mode",
+            mode="active",
+            security_warning=True,
+            authentication="bypassed",
+            test_user="test@local.dev"
+        ).warn("LOCAL TESTING MODE ACTIVE")
+        local_testing_log.with_fields(
+            event_type="authentication_bypass",
+            security_warning=True
+        ).warn("Cognito authentication BYPASSED")
+        local_testing_log.with_fields(
+            event_type="test_user_info",
+            test_user="test@local.dev"
+        ).warn("Using test user: test@local.dev")
+        local_testing_log.with_fields(
+            event_type="production_warning",
+            security_warning=True
+        ).warn("NOT FOR PRODUCTION USE")
     else:
-        logger.info("🔒 Production authentication mode active")
+        local_testing_log.with_fields(
+            event_type="authentication_mode",
+            mode="production",
+            security_status="active"
+        ).info("Production authentication mode active")

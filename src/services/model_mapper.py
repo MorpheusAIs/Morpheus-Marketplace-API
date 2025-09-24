@@ -1,13 +1,14 @@
 from typing import Dict, List, Optional
 import time
-import logging
 import httpx
 import uuid
 
 from ..schemas import openai as openai_schemas
 from ..core.config import settings
+from ..core.structured_logger import create_component_logger
 
-logger = logging.getLogger(__name__)
+# Setup structured logging
+model_mapper_log = create_component_logger("MODEL_MAPPER")
 
 # Blockchain model endpoint
 BLOCKCHAIN_MODELS_ENDPOINT = f"{settings.PROXY_ROUTER_URL}/blockchain/models"
@@ -54,7 +55,10 @@ class ModelMapper:
             List of model objects in simplified format
         """
         # Fetch models from the blockchain
-        logger.info(f"Fetching models from blockchain at {BLOCKCHAIN_MODELS_ENDPOINT}")
+        model_mapper_log.with_fields(
+            event_type="blockchain_models_fetch",
+            endpoint=BLOCKCHAIN_MODELS_ENDPOINT
+        ).infof("Fetching models from blockchain at %s", BLOCKCHAIN_MODELS_ENDPOINT)
         
         # Use authentication credentials
         async with httpx.AsyncClient() as client:

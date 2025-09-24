@@ -1,10 +1,10 @@
 from typing import Dict, Optional
-import logging
 from .direct_model_service import direct_model_service
 from .config import settings
+from .structured_logger import create_component_logger
 
-# Configure logger
-logger = logging.getLogger(__name__)
+# Configure structured logger
+model_router_log = create_component_logger("MODEL_ROUTER")
 
 # Get default model from settings
 DEFAULT_MODEL = getattr(settings, 'DEFAULT_FALLBACK_MODEL', "mistral-31-24b")
@@ -15,7 +15,9 @@ class ModelRouter:
     """
     
     def __init__(self):
-        logger.info("[MODEL_DEBUG] Initialized ModelRouter with DirectModelService")
+        model_router_log.with_fields(
+            event_type="model_router_init"
+        ).info("Initialized ModelRouter with DirectModelService")
         # No initialization needed - DirectModelService handles all caching
     
     async def get_target_model(self, requested_model: Optional[str]) -> str:
@@ -28,36 +30,82 @@ class ModelRouter:
         Returns:
             str: The blockchain ID to use
         """
-        logger.info(f"[MODEL_DEBUG] Getting target model for requested model: '{requested_model}'")
+        model_router_log.with_fields(
+            event_type="model_resolution",
+            requested_model=requested_model
+        ).infof("Getting target model for requested model: '%s'", requested_model)
         
         if not requested_model:
-            logger.warning(f"[MODEL_DEBUG] No model specified, using default model: {DEFAULT_MODEL}")
+            model_router_log.with_fields(
+                event_type="model_resolution",
+                fallback_reason="no_model_specified",
+                default_model=DEFAULT_MODEL
+            ).warnf("No model specified, using default model: %s", DEFAULT_MODEL)
             default_id = await self._get_default_model_id()
-            logger.info(f"[MODEL_DEBUG] Resolved to default model ID: {default_id}")
+            model_router_log.with_fields(
+                event_type="model_resolution",
+                resolved_id=default_id,
+                resolution_type="default"
+            ).infof("Resolved to default model ID: %s", default_id)
             return default_id
             
         # Try to resolve using DirectModelService
         try:
             resolved_id = await direct_model_service.resolve_model_id(requested_model)
             if resolved_id:
-                logger.info(f"[MODEL_DEBUG] Found mapping: {requested_model} -> {resolved_id}")
+                model_router_log.with_fields(
+                    event_type="model_resolution",
+                    requested_model=requested_model,
+                    resolved_id=resolved_id,
+                    resolution_type="direct_mapping"
+                ).infof("Found mapping: %s -> %s", requested_model, resolved_id)
                 return resolved_id
             else:
                 # Model not found, use default
-                logger.warning(f"[MODEL_DEBUG] Model '{requested_model}' not found in active models")
+                model_router_log.with_fields(
+                    event_type="model_resolution",
+                    requested_model=requested_model,
+                    fallback_reason="model_not_found"
+                ).warnf("Model '%s' not found in active models", requested_model)
                 model_mapping = await direct_model_service.get_model_mapping()
                 blockchain_ids = await direct_model_service.get_blockchain_ids()
-                logger.warning(f"[MODEL_DEBUG] Available models: {sorted(list(model_mapping.keys()))}")
-                logger.warning(f"[MODEL_DEBUG] Available blockchain IDs: {sorted(list(blockchain_ids))}")
-                logger.warning(f"[MODEL_DEBUG] Using default model: {DEFAULT_MODEL}")
+                model_router_log.with_fields(
+                    event_type="model_debug",
+                    available_models=sorted(list(model_mapping.keys()))
+                ).warnf("Available models: %s", sorted(list(model_mapping.keys())))
+                model_router_log.with_fields(
+                    event_type="model_debug",
+                    available_blockchain_ids=sorted(list(blockchain_ids))
+                ).warnf("Available blockchain IDs: %s", sorted(list(blockchain_ids)))
+                model_router_log.with_fields(
+                    event_type="model_resolution",
+                    fallback_reason="model_not_found",
+                    default_model=DEFAULT_MODEL
+                ).warnf("Using default model: %s", DEFAULT_MODEL)
                 default_id = await self._get_default_model_id()
-                logger.info(f"[MODEL_DEBUG] Resolved to default model ID: {default_id}")
+                model_router_log.with_fields(
+                    event_type="model_resolution",
+                    resolved_id=default_id,
+                    resolution_type="fallback_default"
+                ).infof("Resolved to default model ID: %s", default_id)
                 return default_id
         except Exception as e:
-            logger.error(f"[MODEL_DEBUG] Error resolving model '{requested_model}': {e}")
-            logger.warning(f"[MODEL_DEBUG] Using default model: {DEFAULT_MODEL}")
+            model_router_log.with_fields(
+                event_type="model_resolution_error",
+                requested_model=requested_model,
+                error=str(e)
+            ).errorf("Error resolving model '%s': %s", requested_model, e)
+            model_router_log.with_fields(
+                event_type="model_resolution",
+                fallback_reason="resolution_error",
+                default_model=DEFAULT_MODEL
+            ).warnf("Using default model: %s", DEFAULT_MODEL)
             default_id = await self._get_default_model_id()
-            logger.info(f"[MODEL_DEBUG] Resolved to default model ID: {default_id}")
+            model_router_log.with_fields(
+                event_type="model_resolution",
+                resolved_id=default_id,
+                resolution_type="error_fallback"
+            ).infof("Resolved to default model ID: %s", default_id)
             return default_id
     
     async def _get_default_model_id(self) -> str:
@@ -67,26 +115,46 @@ class ModelRouter:
             
             # First try the explicitly defined default
             if DEFAULT_MODEL in model_mapping:
-                logger.info(f"[MODEL_DEBUG] Using configured default model: {DEFAULT_MODEL} -> {model_mapping[DEFAULT_MODEL]}")
+                model_router_log.with_fields(
+                    event_type="default_model_selection",
+                    default_model=DEFAULT_MODEL,
+                    resolved_id=model_mapping[DEFAULT_MODEL],
+                    selection_type="configured_default"
+                ).infof("Using configured default model: %s -> %s", DEFAULT_MODEL, model_mapping[DEFAULT_MODEL])
                 return model_mapping[DEFAULT_MODEL]
             
             # If that fails, try "default" model
             if "default" in model_mapping:
-                logger.info(f"[MODEL_DEBUG] Using 'default' model: {model_mapping['default']}")
+                model_router_log.with_fields(
+                    event_type="default_model_selection",
+                    resolved_id=model_mapping["default"],
+                    selection_type="generic_default"
+                ).infof("Using 'default' model: %s", model_mapping["default"])
                 return model_mapping["default"]
                 
             # If no default model is found, use the first available model
             if model_mapping:
                 first_model_name = next(iter(model_mapping.keys()))
                 first_model = model_mapping[first_model_name]
-                logger.warning(f"[MODEL_DEBUG] No default model configured, using first available model: {first_model_name} -> {first_model}")
+                model_router_log.with_fields(
+                    event_type="default_model_selection",
+                    first_model_name=first_model_name,
+                    resolved_id=first_model,
+                    selection_type="first_available"
+                ).warnf("No default model configured, using first available model: %s -> %s", first_model_name, first_model)
                 return first_model
                 
             # If there are no models at all, raise an error
-            logger.error("[MODEL_DEBUG] No models available in the system, cannot route!")
+            model_router_log.with_fields(
+                event_type="default_model_error",
+                error="no_models_available"
+            ).error("No models available in the system, cannot route!")
             raise ValueError("No models available in the system")
         except Exception as e:
-            logger.error(f"[MODEL_DEBUG] Error getting default model: {e}")
+            model_router_log.with_fields(
+                event_type="default_model_error",
+                error=str(e)
+            ).errorf("Error getting default model: %s", e)
             raise ValueError(f"Error getting default model: {e}")
     
     async def is_valid_model(self, model: str) -> bool:
@@ -106,7 +174,11 @@ class ModelRouter:
             resolved_id = await direct_model_service.resolve_model_id(model)
             return resolved_id is not None
         except Exception as e:
-            logger.error(f"[MODEL_DEBUG] Error validating model '{model}': {e}")
+            model_router_log.with_fields(
+                event_type="model_validation_error",
+                model=model,
+                error=str(e)
+            ).errorf("Error validating model '%s': %s", model, e)
             return False
     
     async def get_available_models(self) -> Dict[str, str]:
@@ -119,7 +191,10 @@ class ModelRouter:
         try:
             return await direct_model_service.get_model_mapping()
         except Exception as e:
-            logger.error(f"[MODEL_DEBUG] Error getting available models: {e}")
+            model_router_log.with_fields(
+                event_type="get_models_error",
+                error=str(e)
+            ).errorf("Error getting available models: %s", e)
             return {}
 
 # Create a singleton instance

@@ -425,9 +425,13 @@ async def delete_user_account(
         raise
     except Exception as e:
         # Log the error properly
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Error deleting user account {user_id}: {str(e)}")
+        from ...core.structured_logger import create_component_logger
+        auth_log = create_component_logger("AUTH")
+        auth_log.with_fields(
+            event_type="user_deletion",
+            user_id=user_id,
+            error=str(e)
+        ).errorf("Error deleting user account %d: %s", user_id, str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete user account"
