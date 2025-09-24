@@ -217,7 +217,7 @@ async def delete_api_key(
 async def store_private_key(
     request_body: dict = Body(...),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Store an encrypted blockchain private key for the authenticated user.
@@ -249,7 +249,7 @@ async def store_private_key(
 @router.get("/private-key", response_model=private_key_schemas.PrivateKeyStatus)
 async def get_private_key_status(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Check if a user has a private key registered.
@@ -261,7 +261,7 @@ async def get_private_key_status(
 @router.delete("/private-key", status_code=status.HTTP_200_OK, response_model=dict)
 async def delete_private_key(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Delete a user's private key.
@@ -287,7 +287,7 @@ async def delete_private_key(
 async def store_delegation(
     delegation_in: delegation_schemas.DelegationCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Allows an authenticated user to store a signed delegation.
@@ -313,7 +313,7 @@ async def get_user_delegations(
     skip: int = 0,
     limit: int = 10,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Retrieves the user's stored delegations.
@@ -324,7 +324,7 @@ async def get_user_delegations(
 @router.get("/delegation/active", response_model=Optional[delegation_schemas.DelegationRead])
 async def get_active_user_delegation(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Retrieves the user's currently active delegation, if any.
@@ -336,7 +336,7 @@ async def get_active_user_delegation(
 async def delete_delegation(
     delegation_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(CurrentUser)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Deletes a specific delegation for the user.

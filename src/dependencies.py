@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 import boto3
 from jose import jwt, jwk
 from jose.utils import base64url_decode
-import requests
+from src.core.http_client import cognito_request
 
 from src.core.config import settings
 from src.core.security import verify_api_key
@@ -24,10 +24,10 @@ from src.db.database import get_db
 from src.db.models import User, APIKey
 from src.schemas.token import TokenPayload
 from src.services.cognito_service import cognito_service
-from src.core.structured_logger import CORE_LOG
+from src.core.structured_logger import AUTH_LOG
 
-# Setup structured logging (Core infrastructure category)
-dependencies_log = CORE_LOG.named("DEPENDENCIES")
+# Setup structured logging (Authentication category)
+dependencies_log = AUTH_LOG.named("DEPENDENCIES")
 
 # Define bearer token scheme for JWT authentication
 oauth2_scheme = HTTPBearer(
@@ -99,7 +99,7 @@ async def get_current_user(
             event_type="jwt_validation_debug",
             jwks_url=jwks_url
         ).infof("JWKS URL: %s", jwks_url)
-        jwks_response = requests.get(jwks_url)
+        jwks_response = await cognito_request("GET", jwks_url)
         jwks_response.raise_for_status()
         jwks = jwks_response.json()
         
@@ -216,7 +216,7 @@ async def get_current_user(
         
         return user
         
-    except requests.RequestException as e:
+    except Exception as e:
         dependencies_log.with_fields(
             event_type="jwks_fetch_error",
             error=str(e),

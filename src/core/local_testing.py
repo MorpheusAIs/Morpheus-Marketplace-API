@@ -10,10 +10,10 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.db.models import User
 from src.crud import user as user_crud
-from .structured_logger import CORE_LOG
+from .structured_logger import AUTH_LOG
 
-# Setup structured logging (Core infrastructure category)
-local_testing_log = CORE_LOG.named("LOCAL_TESTING")
+# Setup structured logging (Authentication category)
+local_testing_log = AUTH_LOG.named("LOCAL_TESTING")
 
 def is_local_testing_mode() -> bool:
     """Check if we're in local testing mode."""

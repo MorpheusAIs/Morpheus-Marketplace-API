@@ -1,4 +1,4 @@
-import httpx
+from ..core.http_client import proxy_router_request
 import asyncio
 import json
 from typing import Dict, Any
@@ -99,76 +99,74 @@ async def execute_proxy_router_operation(
             query_params=params
         ).infof("[PROXY_DEBUG] Query params: %s", json.dumps(params))
     
-    async with httpx.AsyncClient() as client:
-        for attempt in range(max_retries):
+    for attempt in range(max_retries):
+        try:
+            proxy_log.with_fields(
+                event_type="proxy_request_attempt",
+                method=method,
+                attempt=attempt+1,
+                max_retries=max_retries
+            ).infof("[PROXY_DEBUG] Making %s request (attempt %d/%d)", method, attempt+1, max_retries)
+            response = await proxy_router_request(
+                method,
+                url,
+                headers=request_headers,
+                json=json_data,
+                params=params,
+                auth=auth
+            )
+            
+            status_code = response.status_code
+            proxy_log.with_fields(
+                event_type="proxy_response_debug",
+                status_code=status_code
+            ).infof("[PROXY_DEBUG] Response status code: %d", status_code)
+            
+            # Log response headers (excluding sensitive data)
+            resp_headers = {k: v for k, v in response.headers.items() 
+                           if k.lower() not in ["authorization", "cookie", "set-cookie"]}
+            proxy_log.with_fields(
+                event_type="proxy_response_debug",
+                response_headers=dict(resp_headers)
+            ).infof("[PROXY_DEBUG] Response headers: %s", json.dumps(dict(resp_headers)))
+            
+            # Try to raise for HTTP errors
             try:
+                response.raise_for_status()
+            except Exception as e:
                 proxy_log.with_fields(
-                    event_type="proxy_request_attempt",
+                    event_type="proxy_http_error",
+                    error=str(e),
+                    response_body_preview=response.text[:500]
+                ).errorf("[PROXY_DEBUG] HTTP error: %s", e)
+                raise
+            
+            # For DELETE operations or other cases where no JSON response is expected
+            if method.upper() == "DELETE" or response.status_code == 204:
+                proxy_log.with_fields(
+                    event_type="proxy_response_empty",
                     method=method,
-                    attempt=attempt+1,
-                    max_retries=max_retries
-                ).infof("[PROXY_DEBUG] Making %s request (attempt %d/%d)", method, attempt+1, max_retries)
-                response = await client.request(
-                    method,
-                    url,
-                    headers=request_headers,
-                    json=json_data,
-                    params=params,
-                    auth=auth,
-                    timeout=30.0
-                )
-                
-                status_code = response.status_code
-                proxy_log.with_fields(
-                    event_type="proxy_response_debug",
                     status_code=status_code
-                ).infof("[PROXY_DEBUG] Response status code: %d", status_code)
-                
-                # Log response headers (excluding sensitive data)
-                resp_headers = {k: v for k, v in response.headers.items() 
-                               if k.lower() not in ["authorization", "cookie", "set-cookie"]}
+                ).info("[PROXY_DEBUG] No content response (204) or DELETE method, returning empty dict")
+                return {}
+            
+            # Try to parse JSON response
+            try:
+                result = response.json()
                 proxy_log.with_fields(
-                    event_type="proxy_response_debug",
-                    response_headers=dict(resp_headers)
-                ).infof("[PROXY_DEBUG] Response headers: %s", json.dumps(dict(resp_headers)))
+                    event_type="proxy_response_json",
+                    response_json=result
+                ).infof("[PROXY_DEBUG] Response JSON: %s", json.dumps(result))
+                return result
+            except json.JSONDecodeError as json_err:
+                proxy_log.with_fields(
+                    event_type="proxy_json_parse_error",
+                    error=str(json_err),
+                    response_text_preview=response.text[:500]
+                ).errorf("[PROXY_DEBUG] Failed to parse JSON response: %s", json_err)
+                raise ValueError(f"Invalid JSON response from proxy router: {json_err}")
                 
-                # Try to raise for HTTP errors
-                try:
-                    response.raise_for_status()
-                except httpx.HTTPStatusError as e:
-                    proxy_log.with_fields(
-                        event_type="proxy_http_error",
-                        error=str(e),
-                        response_body_preview=response.text[:500]
-                    ).errorf("[PROXY_DEBUG] HTTP error: %s", e)
-                    raise
-                
-                # For DELETE operations or other cases where no JSON response is expected
-                if method.upper() == "DELETE" or response.status_code == 204:
-                    proxy_log.with_fields(
-                        event_type="proxy_response_empty",
-                        method=method,
-                        status_code=status_code
-                    ).info("[PROXY_DEBUG] No content response (204) or DELETE method, returning empty dict")
-                    return {}
-                
-                # Try to parse JSON response
-                try:
-                    result = response.json()
-                    proxy_log.with_fields(
-                        event_type="proxy_response_json",
-                        response_json=result
-                    ).infof("[PROXY_DEBUG] Response JSON: %s", json.dumps(result))
-                    return result
-                except json.JSONDecodeError as json_err:
-                    proxy_log.with_fields(
-                        event_type="proxy_json_parse_error",
-                        error=str(json_err),
-                        response_text_preview=response.text[:500]
-                    ).errorf("[PROXY_DEBUG] Failed to parse JSON response: %s", json_err)
-                    raise ValueError(f"Invalid JSON response from proxy router: {json_err}")
-                
-            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        except Exception as e:
                 proxy_log.with_fields(
                     event_type="proxy_request_error",
                     attempt=attempt+1,
@@ -189,23 +187,27 @@ async def execute_proxy_router_operation(
                         error_message = f"[USING FALLBACK KEY] {error_message}"
                     
                     # If it's an HTTP error, log the response content
-                    if isinstance(e, httpx.HTTPStatusError) and hasattr(e, 'response'):
+                    if hasattr(e, 'response'):
                         proxy_log.with_fields(
                             event_type="proxy_error_response",
                             error_content=e.response.text[:500]
                         ).errorf("[PROXY_DEBUG] Error response content: %s", e.response.text[:500])
                     
                     raise ValueError(error_message)
-                
-                # Wait with exponential backoff before retrying
-                backoff_time = 1 * (attempt + 1)  # 1, 2, 3... seconds
-                proxy_log.with_fields(
-                    event_type="proxy_retry",
-                    backoff_time=backoff_time,
-                    attempt=attempt+1,
-                    max_retries=max_retries
-                ).warnf("[PROXY_DEBUG] Request failed, retrying in %d seconds... (%d/%d)", backoff_time, attempt+1, max_retries)
-                await asyncio.sleep(backoff_time)
+                else:
+                    # Wait with exponential backoff before retrying
+                    backoff_time = 1 * (attempt + 1)  # 1, 2, 3... seconds
+                    proxy_log.with_fields(
+                        event_type="proxy_retry",
+                        backoff_time=backoff_time,
+                        attempt=attempt+1,
+                        max_retries=max_retries
+                    ).warnf("[PROXY_DEBUG] Request failed, retrying in %d seconds... (%d/%d)", backoff_time, attempt+1, max_retries)
+                    await asyncio.sleep(backoff_time)
+    
+    # If we reach here, all retries have been exhausted
+    raise ValueError(f"All {max_retries} retry attempts failed for proxy router request")
+
 
 def handle_proxy_error(e, operation_name):
     """
@@ -218,7 +220,7 @@ def handle_proxy_error(e, operation_name):
     Returns:
         Dict: Error response to return to the client
     """
-    if isinstance(e, httpx.HTTPStatusError):
+    if hasattr(e, 'response'):
         proxy_log.with_fields(
             event_type="proxy_operation_error",
             operation_name=operation_name,

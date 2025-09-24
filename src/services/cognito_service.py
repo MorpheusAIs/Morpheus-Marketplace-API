@@ -10,6 +10,7 @@ from botocore.exceptions import ClientError, NoCredentialsError
 
 from src.core.config import settings
 from ..core.structured_logger import AUTH_LOG
+from ..core.http_client import http_log_context
 
 # Setup structured logging (Auth category)
 cognito_log = AUTH_LOG.named("COGNITO")
@@ -66,10 +67,11 @@ class CognitoUserService:
             ).infof("Attempting to delete Cognito user: %s", cognito_user_id)
             
             # Delete the user from Cognito User Pool
-            response = self.cognito_client.admin_delete_user(
-                UserPoolId=settings.COGNITO_USER_POOL_ID,
-                Username=cognito_user_id
-            )
+            with http_log_context(cognito_log, "COGNITO"):
+                response = self.cognito_client.admin_delete_user(
+                    UserPoolId=settings.COGNITO_USER_POOL_ID,
+                    Username=cognito_user_id
+                )
             
             cognito_log.with_fields(
                 event_type="user_deletion",
@@ -157,10 +159,11 @@ class CognitoUserService:
             User information dict or None if not found
         """
         try:
-            response = self.cognito_client.admin_get_user(
-                UserPoolId=settings.COGNITO_USER_POOL_ID,
-                Username=cognito_user_id
-            )
+            with http_log_context(cognito_log, "COGNITO"):
+                response = self.cognito_client.admin_get_user(
+                    UserPoolId=settings.COGNITO_USER_POOL_ID,
+                    Username=cognito_user_id
+                )
             
             # Parse user attributes
             user_attributes = {}

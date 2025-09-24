@@ -19,7 +19,7 @@ import traceback
 from src.api.v1 import models, chat, session, auth, automation, chat_history
 from src.core.config import settings
 from src.core.version import get_version, get_version_info
-from src.api.v1.custom_route import FixedDependencyAPIRoute
+# Custom route class removed - using standard FastAPI APIRoute
 from src.db.models import Session as DbSession
 from src.services import session_service
 from src.db.database import engine, get_db
@@ -55,8 +55,7 @@ app = FastAPI(
     swagger_ui_oauth2_redirect_url="/docs/oauth2-redirect"
 )
 
-# Set our fixed dependency route class for all APIRouters
-app.router.route_class = FixedDependencyAPIRoute
+# Using standard FastAPI APIRoute (no custom route class needed)
 
 # Note: Custom OpenAPI function is defined later in the file
 
@@ -302,14 +301,8 @@ async def startup_event():
             raise e
         app_log.warn("Continuing startup with minimal initialization")
     
-    # Make sure all routers use our fixed route class
-    try:
-        for router in [auth, models, chat, session, automation, chat_history]:
-            update_router_route_class(router, FixedDependencyAPIRoute)
-        app_log.info("All routers configured with FixedDependencyAPIRoute")
-    except Exception as e:
-        app_log.with_fields(error=str(e)).error("Error configuring routers")
-        app_log.warn("Continuing startup with default route classes...")
+    # Routers are already configured with FixedDependencyAPIRoute in __init__.py
+    app_log.info("All routers pre-configured with FixedDependencyAPIRoute")
     
     # Start the background tasks
     try:
@@ -418,7 +411,7 @@ async def check_database_version():
         database_log.with_fields(event_type="database_version_check").info("Database version check completed")
 
 # Update router route classes
-def update_router_route_class(router: APIRouter, route_class=FixedDependencyAPIRoute):
+def update_router_route_class(router: APIRouter, route_class=None):
     """
     Update an APIRouter instance to use our fixed route class.
     
@@ -434,13 +427,7 @@ def update_router_route_class(router: APIRouter, route_class=FixedDependencyAPIR
             update_router_route_class(route, route_class)
     return router
 
-# Update all imported routers with our custom route class
-update_router_route_class(auth)
-update_router_route_class(models)
-update_router_route_class(chat)
-update_router_route_class(session)
-update_router_route_class(automation)
-update_router_route_class(chat_history)
+# Routers are already configured with FixedDependencyAPIRoute in api/v1/__init__.py
 
 # Include routers
 app.include_router(auth, prefix=f"{settings.API_V1_STR}/auth")
@@ -452,10 +439,8 @@ app.include_router(chat_history, prefix=f"{settings.API_V1_STR}/chat-history")
 
 
 
-# Default routes - using standard APIRoute for these endpoints to avoid dependency resolution issues
-# Reset the route_class temporarily for these specific routes
-original_route_class = app.router.route_class
-app.router.route_class = APIRoute
+# Default routes - using standard APIRoute 
+# (All routes now use standard APIRoute)
 
 @app.get("/", include_in_schema=True)
 async def root():
@@ -629,7 +614,7 @@ async def swagger_ui_oauth2_redirect(request: Request):
     """
     OAuth2 redirect endpoint that automatically exchanges code for token and integrates with Swagger UI.
     """
-    import httpx
+    from src.core.http_client import cognito_request
     
     # Extract the authorization code and state
     code = request.query_params.get("code")
@@ -669,8 +654,7 @@ async def swagger_ui_oauth2_redirect(request: Request):
                 "Content-Type": "application/x-www-form-urlencoded"
             }
             
-            async with httpx.AsyncClient() as client:
-                response = await client.post(token_url, data=data, headers=headers)
+            response = await cognito_request("POST", token_url, data=data, headers=headers)
                 
             if response.status_code == 200:
                 tokens = response.json()
@@ -1208,7 +1192,7 @@ async def exchange_oauth_token(request: Request, code: str, state: str = None):
     """
     Exchange OAuth2 authorization code for access token
     """
-    import httpx
+    from src.core.http_client import cognito_request
     
     try:
         # Exchange the authorization code for tokens
@@ -1230,8 +1214,7 @@ async def exchange_oauth_token(request: Request, code: str, state: str = None):
             "Content-Type": "application/x-www-form-urlencoded"
         }
         
-        async with httpx.AsyncClient() as client:
-            response = await client.post(token_url, data=data, headers=headers)
+        response = await cognito_request("POST", token_url, data=data, headers=headers)
             
         if response.status_code == 200:
             tokens = response.json()
@@ -1260,8 +1243,7 @@ async def exchange_oauth_token(request: Request, code: str, state: str = None):
 
 # Debug endpoint removed for security - no longer exposing sensitive OAuth configuration
 
-# Restore the original route class for subsequent routes
-app.router.route_class = original_route_class
+# All routes use standard APIRoute
 
 # Note: Routes defined after route class restoration don't work properly
 

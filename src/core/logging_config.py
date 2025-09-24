@@ -83,9 +83,45 @@ def setup_zap_compatible_logging():
     
     root_logger.addHandler(handler)
     
+    # Configure third-party library loggers
+    core_level = get_component_log_level("CORE")
+    auth_level = get_component_log_level("AUTH")
+    
+    # HTTP libraries used for general infrastructure
+    core_loggers = [
+        "urllib3",
+        "requests"
+    ]
+    
+    # HTTP libraries used primarily for authentication (Cognito, JWT validation, password hashing)
+    auth_loggers = [
+        "httpx",
+        "httpcore", 
+        "httpcore.connection",
+        "httpcore.http11",
+        "httpcore.http2",
+        "botocore",
+        "botocore.endpoint",
+        "botocore.hooks",
+        "botocore.regions",
+        "boto3",
+        "boto3.resources",
+        "passlib",
+        "passlib.handlers.bcrypt"
+    ]
+    
+    for logger_name in core_loggers:
+        third_party_logger = logging.getLogger(logger_name)
+        third_party_logger.setLevel(getattr(logging, core_level, logging.INFO))
+        
+    for logger_name in auth_loggers:
+        third_party_logger = logging.getLogger(logger_name)
+        third_party_logger.setLevel(getattr(logging, auth_level, logging.INFO))
+    
     # Log the configuration
     config_logger = logging.getLogger("LOGGING_CONFIG")
     config_logger.info(f"Zap-compatible logging initialized: JSON={use_json}, Level={log_level}, Prod={log_is_prod}")
+    config_logger.info(f"HTTP libraries: CORE={core_level} (urllib3, requests), AUTH={auth_level} (httpx, httpcore)")
     
     return root_logger
 

@@ -1,7 +1,6 @@
 # This file makes api.v1 a Python package 
 from fastapi import APIRouter
 
-from .custom_route import FixedDependencyAPIRoute
 from .auth import router as auth_router
 from .models import router as models_router
 from .chat import router as chat_router
@@ -9,24 +8,24 @@ from .session import router as session_router
 from .automation import router as automation_router
 from .chat_history import router as chat_history_router
 
-# Create routers with the fixed dependency route class
-models = APIRouter(route_class=FixedDependencyAPIRoute)
+# Create routers with standard APIRoute (no custom route class needed)
+models = APIRouter()
 models.include_router(models_router)
 
-chat = APIRouter(route_class=FixedDependencyAPIRoute)
+chat = APIRouter()
 chat.include_router(chat_router)
 
-session = APIRouter(route_class=FixedDependencyAPIRoute)
+session = APIRouter()
 session.include_router(session_router)
 
 # Automation router
-automation = APIRouter(route_class=FixedDependencyAPIRoute)
+automation = APIRouter()
 automation.include_router(automation_router)
 
-# Wrap auth router in a router with our fixed route class
-auth = APIRouter(route_class=FixedDependencyAPIRoute)
+# Auth router
+auth = APIRouter()
 auth.include_router(auth_router)
 
 # Chat history router
-chat_history = APIRouter(route_class=FixedDependencyAPIRoute)
+chat_history = APIRouter()
 chat_history.include_router(chat_history_router) 

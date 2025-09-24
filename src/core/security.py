@@ -4,9 +4,14 @@ from typing import Any, Union, Optional
 from jose import jwt
 from passlib.context import CryptContext
 from src.core.config import settings
+from src.core.http_client import http_log_context
+from src.core.structured_logger import AUTH_LOG
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Create logger for password operations
+password_log = AUTH_LOG.named("PASSWORD")
 
 # JWT token functions
 def create_access_token(subject: Union[str, Any], expires_delta: Optional[timedelta] = None) -> str:
@@ -69,7 +74,8 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     Returns:
         True if the password matches, False otherwise
     """
-    return pwd_context.verify(plain_password, hashed_password)
+    with http_log_context(password_log, "PASSWORD"):
+        return pwd_context.verify(plain_password, hashed_password)
 
 def get_password_hash(password: str) -> str:
     """
@@ -81,7 +87,8 @@ def get_password_hash(password: str) -> str:
     Returns:
         Hashed password
     """
-    return pwd_context.hash(password)
+    with http_log_context(password_log, "PASSWORD"):
+        return pwd_context.hash(password)
 
 # API Key functions
 def generate_api_key_prefix() -> str:
@@ -131,7 +138,8 @@ def get_api_key_hash(api_key: str) -> str:
     Returns:
         Hashed API key
     """
-    return pwd_context.hash(api_key)
+    with http_log_context(password_log, "PASSWORD"):
+        return pwd_context.hash(api_key)
 
 def verify_api_key(plain_api_key: str, hashed_api_key: str) -> bool:
     """
@@ -144,4 +152,5 @@ def verify_api_key(plain_api_key: str, hashed_api_key: str) -> bool:
     Returns:
         True if the API key matches, False otherwise
     """
-    return pwd_context.verify(plain_api_key, hashed_api_key) 
+    with http_log_context(password_log, "PASSWORD"):
+        return pwd_context.verify(plain_api_key, hashed_api_key) 

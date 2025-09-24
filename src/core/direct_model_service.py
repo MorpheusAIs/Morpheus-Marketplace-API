@@ -7,7 +7,7 @@ import json
 import hashlib
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
-import httpx
+from .http_client import model_service_request
 
 from src.core.config import settings
 from src.core.structured_logger import MODELS_LOG
@@ -115,48 +115,47 @@ class DirectModelService:
             if self._last_etag:
                 headers['If-None-Match'] = self._last_etag
             
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    settings.ACTIVE_MODELS_URL,
-                    headers=headers,
-                    timeout=10.0
-                )
+            response = await model_service_request(
+                "GET",
+                settings.ACTIVE_MODELS_URL,
+                headers=headers
+            )
+            
+            # Handle 304 Not Modified
+            if response.status_code == 304:
+                self.log.with_fields(
+                    event_type="model_cache",
+                    cache_event="not_modified"
+                ).info("Models data unchanged (304 Not Modified), extending cache")
+                self._extend_cache()
+                return
+            
+            response.raise_for_status()
+            
+            # Get response data and hash
+            response_text = response.text
+            current_hash = hashlib.sha256(response_text.encode()).hexdigest()
+            
+            # Check if content actually changed (hash comparison)
+            if current_hash == self._last_hash:
+                self.log.with_fields(
+                    event_type="model_cache",
+                    cache_event="hash_unchanged",
+                    hash=current_hash[:8]
+                ).info("Models data unchanged (same hash), extending cache")
+                self._extend_cache()
+                return
+            
+            # Parse new data
+            data = response.json()
+            models = data.get("models", [])
+            
+            # Update cache
+            self._update_cache(models, current_hash, response.headers.get('ETag'))
+            
+            self.log.model_event("cache_refreshed", model_count=len(models), cache_hit=False)
                 
-                # Handle 304 Not Modified
-                if response.status_code == 304:
-                    self.log.with_fields(
-                        event_type="model_cache",
-                        cache_event="not_modified"
-                    ).info("Models data unchanged (304 Not Modified), extending cache")
-                    self._extend_cache()
-                    return
-                
-                response.raise_for_status()
-                
-                # Get response data and hash
-                response_text = response.text
-                current_hash = hashlib.sha256(response_text.encode()).hexdigest()
-                
-                # Check if content actually changed (hash comparison)
-                if current_hash == self._last_hash:
-                    self.log.with_fields(
-                        event_type="model_cache",
-                        cache_event="hash_unchanged",
-                        hash=current_hash[:8]
-                    ).info("Models data unchanged (same hash), extending cache")
-                    self._extend_cache()
-                    return
-                
-                # Parse new data
-                data = response.json()
-                models = data.get("models", [])
-                
-                # Update cache
-                self._update_cache(models, current_hash, response.headers.get('ETag'))
-                
-                self.log.model_event("cache_refreshed", model_count=len(models), cache_hit=False)
-                
-        except httpx.HTTPStatusError as e:
+        except Exception as e:
             self.log.with_fields(
                 event_type="model_cache",
                 error=str(e),
