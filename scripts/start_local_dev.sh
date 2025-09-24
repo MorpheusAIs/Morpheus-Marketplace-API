@@ -57,4 +57,4 @@ asyncio.run(verify_tables())
 "
 
 echo "🚀 Starting API with hot reload..."
-exec uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+exec uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload --log-config src/core/uvicorn_log_config.json
