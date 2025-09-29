@@ -143,7 +143,7 @@ The new system provides the same functionality with better performance:
 
 ```bash
 # Test model resolution
-curl -X POST https://api.dev.mor.org/api/v1/chat/completions \
+curl -X POST https://api.mor.org/api/v1/chat/completions \
   -H "Authorization: Bearer sk-..." \
   -H "Content-Type: application/json" \
   -d '{

@@ -19,6 +19,7 @@ import platform
 from src.api.v1 import models, chat, session, auth, automation, chat_history
 from src.core.config import settings
 from src.core.version import get_version, get_version_info
+from src.core.cors_middleware import CredentialSafeCORSMiddleware
 from src.api.v1.custom_route import FixedDependencyAPIRoute
 from src.db.models import Session as DbSession
 from src.services import session_service
@@ -62,41 +63,69 @@ app.router.route_class = FixedDependencyAPIRoute
 
 # Note: Custom OpenAPI function is defined later in the file
 
-# Set up CORS
-if hasattr(settings, 'BACKEND_CORS_ORIGINS'):
-    origins = []
-    if isinstance(settings.BACKEND_CORS_ORIGINS, list):
-        origins = settings.BACKEND_CORS_ORIGINS
-    elif isinstance(settings.BACKEND_CORS_ORIGINS, str):
-        origins = [settings.BACKEND_CORS_ORIGINS]
+# Set up CORS with credential-safe configuration
+try:
+    # Use new CORS_ALLOWED_ORIGINS setting (preferred)
+    allowed_origins = settings.CORS_ALLOWED_ORIGINS
     
-    if origins and origins[0] == "*":
-        # Allow all origins
+    app.add_middleware(
+        CredentialSafeCORSMiddleware,
+        allowed_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Requested-With", "X-API-Key"],
+        expose_headers=["Content-Length", "Content-Type"],
+        max_age=86400,  # 24 hours for preflight cache
+        trusted_domain_patterns=[
+            r"^https://.*\.mor\.org$",  # Any subdomain of mor.org
+            r"^https://.*\.dev\.mor\.org$",  # Any subdomain of dev.mor.org
+        ],
+        allow_direct_access=True  # Enable for ALB cookie stickiness from any client
+    )
+    
+    core_log.info(f"CORS configured with allowed origins: {', '.join(allowed_origins)}")
+    
+except Exception as e:
+    # Fallback to legacy CORS configuration for development
+    core_log.warning(f"Failed to configure new CORS middleware: {e}")
+    core_log.warning("Falling back to legacy CORS configuration")
+    
+    if hasattr(settings, 'BACKEND_CORS_ORIGINS'):
+        origins = []
+        if isinstance(settings.BACKEND_CORS_ORIGINS, list):
+            origins = settings.BACKEND_CORS_ORIGINS
+        elif isinstance(settings.BACKEND_CORS_ORIGINS, str):
+            origins = [settings.BACKEND_CORS_ORIGINS]
+        
+        # Never use wildcard with credentials in production
+        if origins and origins[0] == "*":
+            core_log.warning("Using wildcard CORS origins - this should only be used in development")
+            app.add_middleware(
+                CORSMiddleware,
+                allow_origins=["*"],
+                allow_credentials=False,  # Disable credentials with wildcard
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
+        else:
+            # Use specified origins with credentials
+            app.add_middleware(
+                CORSMiddleware,
+                allow_origins=origins,
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
+    else:
+        # Development fallback
+        core_log.warning("No CORS origins configured - using development defaults")
         app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
-            allow_credentials=True,
+            allow_credentials=False,  # Disable credentials with wildcard
             allow_methods=["*"],
             allow_headers=["*"],
         )
-    else:
-        # Use specified origins
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=origins,
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
-else:
-    # If no CORS origins specified, allow all origins (for development)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
 
 # Request timing middleware
 @app.middleware("http")
@@ -579,6 +608,91 @@ async def model_health_check():
                 "default_fallback_model": settings.DEFAULT_FALLBACK_MODEL
             }
         }
+
+@app.get("/cors-check", include_in_schema=True)
+async def cors_check(request: Request):
+    """
+    CORS configuration test endpoint for ALB lb_cookie stickiness verification.
+    
+    This endpoint helps verify that CORS is properly configured for cross-origin
+    requests with credentials, which is required for AWS ALB sticky sessions.
+    
+    Returns CORS configuration details and request information for debugging.
+    """
+    origin = request.headers.get("origin")
+    user_agent = request.headers.get("user-agent", "")
+    
+    # Get CORS configuration
+    cors_config = {
+        "explicit_origins": settings.CORS_ALLOWED_ORIGINS,
+        "credentials_enabled": True,
+        "allowed_methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        "allowed_headers": ["Authorization", "Content-Type", "X-Requested-With", "X-API-Key"],
+        "exposed_headers": ["Content-Length", "Content-Type"],
+        "trusted_patterns": [
+            "^https://.*\\.mor\\.org$",
+            "^https://.*\\.dev\\.mor\\.org$"
+        ],
+        "direct_access_enabled": True,
+        "direct_access_note": "Any HTTPS origin allowed for ALB cookie stickiness"
+    }
+    
+    # Check if the current origin would be allowed
+    origin_allowed = False
+    origin_type = "none"
+    if origin:
+        # Simulate the middleware logic
+        if origin in settings.CORS_ALLOWED_ORIGINS:
+            origin_allowed = True
+            origin_type = "explicit"
+        else:
+            # Check patterns
+            import re
+            patterns = [r"^https://.*\.mor\.org$", r"^https://.*\.dev\.mor\.org$"]
+            for pattern in patterns:
+                if re.match(pattern, origin):
+                    origin_allowed = True
+                    origin_type = "trusted_pattern"
+                    break
+            
+            # Check direct access (HTTPS origins)
+            if not origin_allowed:
+                from urllib.parse import urlparse
+                try:
+                    parsed = urlparse(origin)
+                    if parsed.scheme == 'https':
+                        origin_allowed = True
+                        origin_type = "direct_https"
+                    elif parsed.scheme == 'http' and parsed.hostname in ['localhost', '127.0.0.1']:
+                        origin_allowed = True
+                        origin_type = "direct_http_local"
+                except:
+                    pass
+    
+    response_data = {
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat(),
+        "message": "CORS check endpoint - verify headers in browser dev tools",
+        "request_info": {
+            "origin": origin,
+            "origin_allowed": origin_allowed,
+            "origin_type": origin_type,
+            "method": request.method,
+            "user_agent": user_agent[:100] + "..." if len(user_agent) > 100 else user_agent
+        },
+        "cors_config": cors_config,
+        "instructions": {
+            "browser_test": "Open browser dev tools, check Network tab for CORS headers",
+            "expected_headers": [
+                "Access-Control-Allow-Origin: <your-origin>",
+                "Access-Control-Allow-Credentials: true",
+                "Vary: Origin"
+            ],
+            "curl_test": "curl -H 'Origin: https://openbeta.mor.org' -v https://api.mor.org/cors-check"
+        }
+    }
+    
+    return response_data
 
 # Custom docs endpoints using standard APIRoute
 @app.get("/docs/oauth2-redirect", include_in_schema=False)
