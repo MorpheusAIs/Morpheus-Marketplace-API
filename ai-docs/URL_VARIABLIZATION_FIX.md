@@ -17,8 +17,8 @@ The website had hardcoded API URLs that pointed to specific environments, preven
 **Before:**
 ```typescript
 // Hardcoded URLs with incorrect subdomain
-const response = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'https://newapi.dev.mor.org'}/api/v1/models`);
-const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'https://newapi.dev.mor.org'}/api/v1/chat/completions`);
+const response = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'https://apimor.org'}/api/v1/models`);
+const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || 'https://apimor.org'}/api/v1/chat/completions`);
 ```
 
 **After:**
@@ -34,7 +34,7 @@ const res = await fetch(API_URLS.chatCompletions());
 ```typescript
 // API Configuration (already existed)
 export const API_CONFIG = {
-  BASE_URL: process.env.NEXT_PUBLIC_API_BASE_URL || 'https://api.dev.mor.org',
+  BASE_URL: process.env.NEXT_PUBLIC_API_BASE_URL || 'https://api.mor.org',
   // ... rest of config
 };
 
@@ -56,8 +56,8 @@ export const DOC_URLS = {
 **Before:**
 ```typescript
 // Hardcoded URLs
-<a href="https://api.dev.mor.org/docs">https://api.dev.mor.org/docs</a>
-<code>https://api.dev.mor.org/api/v1</code>
+<a href="https://api.mor.org/docs">https://api.mor.org/docs</a>
+<code>https://api.mor.org/api/v1</code>
 ```
 
 **After:**
@@ -73,11 +73,11 @@ import { DOC_URLS } from '@/lib/api/config';
 
 ### **Development Environment:**
 ```bash
-NEXT_PUBLIC_API_BASE_URL=https://api.dev.mor.org
+NEXT_PUBLIC_API_BASE_URL=https://api.mor.org
 ```
 **Results in:**
-- API calls: `https://api.dev.mor.org/api/v1/*`
-- Swagger UI: `https://api.dev.mor.org/docs`
+- API calls: `https://api.mor.org/api/v1/*`
+- Swagger UI: `https://api.mor.org/docs`
 
 ### **Production Environment:**
 ```bash
@@ -114,7 +114,7 @@ NEXT_PUBLIC_API_BASE_URL=https://api.mor.org
 1. **Check development build:**
    ```bash
    npm run build
-   # Should use https://api.dev.mor.org by default
+   # Should use https://api.mor.org by default
    ```
 
 2. **Check with custom environment:**
@@ -151,7 +151,7 @@ NEXT_PUBLIC_API_BASE_URL=https://api.mor.org
 
 **Development:**
 ```bash
-NEXT_PUBLIC_API_BASE_URL=https://api.dev.mor.org
+NEXT_PUBLIC_API_BASE_URL=https://api.mor.org
 ```
 
 **Production:**
@@ -161,7 +161,7 @@ NEXT_PUBLIC_API_BASE_URL=https://api.mor.org
 
 ### **Verification Steps:**
 1. Deploy to dev environment
-2. Check that documentation shows `api.dev.mor.org` URLs
+2. Check that documentation shows `api.mor.org` URLs
 3. Verify API calls go to dev environment
 4. Test chat functionality with dev API
 5. Deploy to production with production environment variable
@@ -170,7 +170,7 @@ NEXT_PUBLIC_API_BASE_URL=https://api.mor.org
 ## 📋 **Summary**
 
 **Fixed Issues:**
-- ❌ `https://newapi.dev.mor.org` → ✅ Environment-aware URLs
+- ❌ `https://apimor.org` → ✅ Environment-aware URLs
 - ❌ Hardcoded documentation URLs → ✅ Dynamic URLs
 - ❌ Inconsistent URL patterns → ✅ Centralized configuration
 
