@@ -35,18 +35,31 @@ class Settings(BaseSettings):
     BACKEND_CORS_ORIGINS: Union[List[str], str] = Field(default="*")
     
     @field_validator("CORS_ALLOWED_ORIGINS", mode="before")
-    def parse_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
+    def parse_cors_origins(cls, v) -> List[str]:
         """Parse comma-separated CORS origins into a list with environment awareness"""
         # Get environment from the current values being validated
         environment = os.getenv("ENVIRONMENT", "development").lower()
         
+        # Check if CORS_ALLOWED_ORIGINS environment variable is set
+        env_cors_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
+        
         # Handle different input types
-        if isinstance(v, list):
-            origins = v
+        if env_cors_origins and env_cors_origins.strip():
+            # Environment variable is set, use it
+            origins = [origin.strip() for origin in env_cors_origins.split(",") if origin.strip()]
+        elif isinstance(v, list) and v:
+            # Already a list with values, filter out empty strings
+            origins = [origin.strip() for origin in v if origin and origin.strip()]
         elif isinstance(v, str) and v.strip():
+            # String input, split by comma
             origins = [origin.strip() for origin in v.split(",") if origin.strip()]
         else:
-            # Auto-detect based on environment when no explicit value
+            # Empty or None input, use auto-detection
+            origins = []
+        
+        # If no explicit origins provided, auto-detect based on environment
+        if not origins:
+            # Auto-detect based on environment
             if environment in ["production", "prod", "prd"]:
                 origins = [
                     "https://openbeta.mor.org",
@@ -125,9 +138,6 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
     REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
     
-    # API Key Encryption
-    ENCRYPTION_SECRET_KEY: str = Field(default=os.getenv("ENCRYPTION_SECRET_KEY", "encryption_secret_change_me"))
-
     # API Key Encryption
     ENCRYPTION_SECRET_KEY: str = Field(default=os.getenv("ENCRYPTION_SECRET_KEY", "encryption_secret_change_me"))
 
