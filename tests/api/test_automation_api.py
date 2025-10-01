@@ -15,7 +15,7 @@ from src.core.config import settings as app_settings
 from src.db.models import User, UserAutomationSettings
 from src.crud import automation as automation_crud
 from src.dependencies import get_api_key_user, get_db
-from src.api.v1.automation import AutomationSettingsBase
+from src.api.v1.automation.index import AutomationSettingsBase
 
 # Create test client
 client = TestClient(app)
