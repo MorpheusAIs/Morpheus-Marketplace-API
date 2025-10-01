@@ -19,8 +19,8 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = Field(default=os.getenv("ENVIRONMENT", "development"))
     
     # CORS Settings - explicit allowlist for credential-safe CORS
-    CORS_ALLOWED_ORIGINS: str = Field(
-        default=os.getenv("CORS_ALLOWED_ORIGINS", "")  # Empty means auto-detect
+    CORS_ALLOWED_ORIGINS: List[str] = Field(
+        default_factory=lambda: []  # Empty means auto-detect
     )
     
     # Development CORS origins (for local development)
@@ -35,16 +35,18 @@ class Settings(BaseSettings):
     BACKEND_CORS_ORIGINS: Union[List[str], str] = Field(default="*")
     
     @field_validator("CORS_ALLOWED_ORIGINS", mode="before")
-    def parse_cors_origins(cls, v: str) -> List[str]:
+    def parse_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
         """Parse comma-separated CORS origins into a list with environment awareness"""
         # Get environment from the current values being validated
         environment = os.getenv("ENVIRONMENT", "development").lower()
         
-        # If explicitly set, use those origins
-        if v and v.strip():
+        # Handle different input types
+        if isinstance(v, list):
+            origins = v
+        elif isinstance(v, str) and v.strip():
             origins = [origin.strip() for origin in v.split(",") if origin.strip()]
         else:
-            # Auto-detect based on environment
+            # Auto-detect based on environment when no explicit value
             if environment in ["production", "prod", "prd"]:
                 origins = [
                     "https://openbeta.mor.org",
