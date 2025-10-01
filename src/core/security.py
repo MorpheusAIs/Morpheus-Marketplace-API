@@ -6,7 +6,7 @@ from passlib.context import CryptContext
 from src.core.config import settings
 
 # Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__truncate_error=False)
 
 # JWT token functions
 def create_access_token(subject: Union[str, Any], expires_delta: Optional[timedelta] = None) -> str:
@@ -131,7 +131,8 @@ def get_api_key_hash(api_key: str) -> str:
     Returns:
         Hashed API key
     """
-    return pwd_context.hash(api_key)
+    truncated_api_key = api_key[3:]
+    return pwd_context.hash(truncated_api_key)
 
 def verify_api_key(plain_api_key: str, hashed_api_key: str) -> bool:
     """
@@ -144,4 +145,5 @@ def verify_api_key(plain_api_key: str, hashed_api_key: str) -> bool:
     Returns:
         True if the API key matches, False otherwise
     """
-    return pwd_context.verify(plain_api_key, hashed_api_key) 
+    truncated_api_key = plain_api_key[3:]
+    return pwd_context.verify(truncated_api_key, hashed_api_key) 

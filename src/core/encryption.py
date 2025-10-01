@@ -14,6 +14,10 @@ from cryptography.hazmat.backends import default_backend
 import secrets
 from src.core.config import settings
 
+from src.core.logging_config import get_auth_logger
+
+logger = get_auth_logger()
+
 class APIKeyEncryption:
     """Handle encryption and decryption of API keys using Cognito user data."""
     
@@ -125,7 +129,7 @@ class APIKeyEncryption:
             
         except Exception as e:
             # Log error but don't expose details
-            print(f"Decryption failed: {e}")
+            logger.error(f"Decryption failed: {e}")
             return None
     
     @staticmethod

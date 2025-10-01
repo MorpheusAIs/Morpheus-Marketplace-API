@@ -32,4 +32,3 @@ def downgrade():
     
     # Drop the column
     op.drop_column('api_keys', 'is_default')
-

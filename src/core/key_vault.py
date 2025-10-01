@@ -11,7 +11,6 @@ import os
 import base64
 import json
 from typing import Dict, Tuple, Any, Optional, Union
-import logging
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
@@ -22,9 +21,10 @@ from cryptography.hazmat.backends import default_backend
 import secrets
 
 from src.core.config import settings
+from src.core.logging_config import get_core_logger
 
 # Configure logging
-logger = logging.getLogger(__name__)
+logger = get_core_logger()
 
 class KeyVault:
     """
@@ -68,10 +68,9 @@ class KeyVault:
             self.master_key = os.getenv("MASTER_ENCRYPTION_KEY")
             
             if not self.master_key:
-                logger.warning(
-                    "MASTER_ENCRYPTION_KEY not found in environment. "
-                    "Using fallback from settings (NOT SECURE FOR PRODUCTION)."
-                )
+                logger.warning("MASTER_ENCRYPTION_KEY not found in environment - using fallback from settings (NOT SECURE FOR PRODUCTION)",
+                              kms_enabled=self.using_kms,
+                              event_type="master_key_fallback")
                 # Fallback to settings (only for development)
                 self.master_key = settings.JWT_SECRET_KEY
     
@@ -104,7 +103,10 @@ class KeyVault:
             
             return plaintext_key, encrypted_key
         except ClientError as e:
-            logger.error(f"Error generating data key from KMS: {e}")
+            logger.error("Error generating data key from KMS",
+                        error=str(e),
+                        kms_key_id=self.kms_client._client_config.__dict__.get('region_name'),
+                        event_type="kms_generate_key_error")
             raise
     
     def _decrypt_data_key(self, encrypted_key: bytes) -> bytes:
@@ -130,7 +132,9 @@ class KeyVault:
             
             return response['Plaintext']
         except ClientError as e:
-            logger.error(f"Error decrypting data key with KMS: {e}")
+            logger.error("Error decrypting data key with KMS",
+                        error=str(e),
+                        event_type="kms_decrypt_key_error")
             raise
     
     def _derive_key(self, salt: bytes, key_material: bytes) -> bytes:
@@ -254,7 +258,8 @@ class KeyVault:
             return decrypted_data.decode()
         except Exception as e:
             if provider == "aws-kms" and not self.using_kms:
-                logger.error("Failed to decrypt KMS-encrypted data with local key. AWS KMS is required.")
+                logger.error("Failed to decrypt KMS-encrypted data with local key - AWS KMS is required",
+                           event_type="kms_required_for_decryption")
                 raise ValueError("This data was encrypted with AWS KMS and cannot be decrypted locally.") from e
             raise
 

@@ -126,11 +126,14 @@ class Settings(BaseSettings):
     # API Key Encryption
     ENCRYPTION_SECRET_KEY: str = Field(default=os.getenv("ENCRYPTION_SECRET_KEY", "encryption_secret_change_me"))
 
+    # API Key Encryption
+    ENCRYPTION_SECRET_KEY: str = Field(default=os.getenv("ENCRYPTION_SECRET_KEY", "encryption_secret_change_me"))
+
     # Proxy Router Settings
     PROXY_ROUTER_URL: str = Field(default=os.getenv("PROXY_ROUTER_URL", ""))
     PROXY_ROUTER_USERNAME: str = Field(default=os.getenv("PROXY_ROUTER_USERNAME", ""))
     PROXY_ROUTER_PASSWORD: str = Field(default=os.getenv("PROXY_ROUTER_PASSWORD", ""))
-    
+
     # Blockchain Private Key Fallback
     FALLBACK_PRIVATE_KEY: str | None = Field(default=os.getenv("FALLBACK_PRIVATE_KEY"))
 

@@ -4,11 +4,11 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 
-from ...db.database import get_db
-from ...dependencies import get_api_key_user, oauth2_scheme
-from ...db.models import User
-from ...crud import automation as automation_crud
-from ...core.config import settings as app_settings
+from ....db.database import get_db
+from ....dependencies import get_api_key_user, oauth2_scheme
+from ....db.models import User
+from ....crud import automation as automation_crud
+from ....core.config import settings as app_settings
 
 router = APIRouter(tags=["Automation"])
 

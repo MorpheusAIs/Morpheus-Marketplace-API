@@ -1,8 +1,6 @@
 from fastapi import APIRouter, HTTPException, status, Query, Body, Depends, Request
 from typing import Dict, Any, Optional
 import httpx
-import json
-import logging
 import os
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
@@ -10,16 +8,19 @@ import base64
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
-from ...core.config import settings
-from ...db.database import get_db
-from ...dependencies import get_api_key_user, get_current_api_key
-from ...db.models import User, Session, APIKey
-from ...crud import session as session_crud
-from ...crud import api_key as api_key_crud
-from ...crud import private_key as private_key_crud
-from ...services.proxy_router import execute_proxy_router_operation, handle_proxy_error
-from ...services import session_service
-from ...core.model_routing import model_router
+from ....core.config import settings
+from ....db.database import get_db
+from ....dependencies import get_api_key_user, get_current_api_key, get_api_key_model
+from ....db.models import User, Session, APIKey
+from ....crud import session as session_crud
+from ....crud import api_key as api_key_crud
+from ....crud import private_key as private_key_crud
+from ....services import proxy_router_service
+from ....services import session_service
+from ....core.model_routing import model_router
+from ....core.logging_config import get_api_logger
+
+logger = get_api_logger()
 
 # Define the request models
 class SessionInitRequest(BaseModel):
@@ -35,50 +36,9 @@ class SessionDataRequest(BaseModel):
 
 router = APIRouter(tags=["Session"])
 
-# Authentication credentials
-AUTH = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
-
 # Contract address from environment variable
 DIAMOND_CONTRACT_ADDRESS = os.getenv("DIAMOND_CONTRACT_ADDRESS", "0xb8C55cD613af947E73E262F0d3C54b7211Af16CF")
 
-def handle_proxy_error(e, operation_name):
-    """Common error handling for proxy router errors"""
-    
-    if isinstance(e, httpx.HTTPStatusError):
-        logging.error(f"HTTP error during {operation_name}: {e}")
-        
-        # Try to extract detailed error information
-        try:
-            error_detail = e.response.json()
-            if isinstance(error_detail, dict):
-                if "error" in error_detail:
-                    detail_message = error_detail["error"]
-                elif "detail" in error_detail:
-                    detail_message = error_detail["detail"]
-                else:
-                    detail_message = json.dumps(error_detail)
-            else:
-                detail_message = str(error_detail)
-        except:
-            detail_message = f"Status code: {e.response.status_code}, Reason: {e.response.reason_phrase}"
-            
-        return {
-            "error": {
-                "message": f"Error {operation_name}: {detail_message}",
-                "type": "ProxyRouterError",
-                "status_code": e.response.status_code
-            }
-        }
-    else:
-        # Handle other errors
-        logging.error(f"Error {operation_name}: {e}")
-        return {
-            "error": {
-                "message": f"Unexpected error {operation_name}: {str(e)}",
-                "type": str(type(e).__name__),
-                "details": str(e)
-            }
-        }
 
 @router.post("/approve")
 async def approve_spending(
@@ -106,67 +66,45 @@ async def approve_spending(
             }
         
         if using_fallback:
-            logging.warning(f"DEBUGGING MODE: Using fallback private key for user {user.id} - this should never be used in production!")
+            logger.warning("Using fallback private key for user - FOR DEBUGGING ONLY",
+                          user_id=user.id,
+                          event_type="fallback_key_warning")
         
-        # Now make the direct call to the proxy-router
-        full_url = f"{settings.PROXY_ROUTER_URL}/blockchain/approve"
-        auth = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
-        headers = {"X-Private-Key": private_key}
-        params = {"spender": DIAMOND_CONTRACT_ADDRESS, "amount": amount}
-        
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    full_url,
-                    params=params,
-                    headers=headers,
-                    auth=auth,
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                # Add note about fallback key usage
-                if using_fallback and isinstance(result, dict):
-                    result["note"] = "Private Key not set, using fallback key (FOR DEBUGGING ONLY)"
-                
-                return result
-            except httpx.HTTPStatusError as http_err:
-                logging.error(f"HTTP error in approve_spending: {http_err}")
-                try:
-                    error_data = http_err.response.json()
-                    error_result = {"error": error_data}
-                    
-                    # Add note about fallback key usage
-                    if using_fallback:
-                        error_result["note"] = "Private Key not set, using fallback key (FOR DEBUGGING ONLY)"
-                    
-                    return error_result
-                except:
-                    error_msg = f"HTTP error: {http_err.response.status_code} - {http_err.response.reason_phrase}"
-                    if using_fallback:
-                        error_msg = f"[USING FALLBACK KEY] {error_msg}"
-                    
-                    return {
-                        "error": {
-                            "message": error_msg,
-                            "type": "HTTPError"
-                        }
-                    }
-            except Exception as req_err:
-                logging.error(f"Request error in approve_spending: {req_err}")
-                error_msg = str(req_err)
-                if using_fallback:
-                    error_msg = f"[USING FALLBACK KEY] {error_msg}"
-                
-                return {
-                    "error": {
-                        "message": error_msg,
-                        "type": str(type(req_err).__name__)
-                    }
-                }
+        # Use SDK to make the call to the proxy-router
+        try:
+            response = await proxy_router_service.approveSpending(
+                spender=DIAMOND_CONTRACT_ADDRESS,
+                amount=amount,
+                user_id=user.id,
+                db=db
+            )
+            result = response.json()
+            
+            # Add note about fallback key usage
+            if using_fallback and isinstance(result, dict):
+                result["note"] = "Private Key not set, using fallback key (FOR DEBUGGING ONLY)"
+            
+            return result
+            
+        except proxy_router_service.ProxyRouterServiceError as e:
+            logger.error("Proxy router service error in approve_spending",
+                       error=str(e),
+                       status_code=e.status_code,
+                       error_type=e.error_type,
+                       event_type="approve_spending_service_error")
+            
+            # Try to extract error details from the service error
+            error_result = {"error": {"message": e.message, "type": e.error_type}}
+            
+            # Add note about fallback key usage
+            if using_fallback:
+                error_result["note"] = "Private Key not set, using fallback key (FOR DEBUGGING ONLY)"
+            
+            return error_result
     except Exception as e:
-        logging.error(f"Unexpected error in approve_spending: {e}")
+        logger.error("Unexpected error in approve_spending",
+                    error=str(e),
+                    event_type="approve_spending_unexpected_error")
         return {
             "error": {
                 "message": str(e),
@@ -179,7 +117,8 @@ async def create_bid_session(
     bid_id: str = Query(..., description="The blockchain ID (hex) of the bid to create a session for"),
     session_data: SessionDataRequest = Body(..., description="Session data including duration and payment options"),
     user: User = Depends(get_api_key_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(get_api_key_model)
 ):
     """
     Create a session with a provider using a bid ID and associate it with the API key.
@@ -194,27 +133,8 @@ async def create_bid_session(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Setup detailed logging
-    logging.basicConfig(level=logging.DEBUG)
-    logger = logging.getLogger("bidsession")
-    
-    # We need to extract the API key prefix, but we know it's already loaded
-    # Using the API key returned from the dependency is safer than depending on user.api_keys
-    api_key_prefix = user.api_keys[0].key_prefix if user.api_keys and len(user.api_keys) > 0 else None
-    if not api_key_prefix:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No API key found for this user"
-        )
-    
-    # Since user.api_keys is already loaded by the dependency, we can directly get the first API key
-    # without another database query
-    api_key = user.api_keys[0] if user.api_keys and len(user.api_keys) > 0 else None
-    if not api_key:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="API key not found"
-        )
+    # Use structured logging for this endpoint
+    session_logger = logger.bind(endpoint="bidsession", user_id=user.id)
     
     try:
         # First, deactivate any existing sessions for this API key
@@ -224,13 +144,12 @@ async def create_bid_session(
         provider_address = None
         try:
             bid_details_url = f"{settings.PROXY_ROUTER_URL}/blockchain/bids/{bid_id}"
-            logger.info(f"Fetching bid details from: {bid_details_url}")
+            session_logger.info("Fetching bid details",
+                               bid_id=bid_id,
+                               url=bid_details_url,
+                               event_type="bid_details_fetch")
             
-            bid_response = await execute_proxy_router_operation(
-                "GET",
-                f"blockchain/bids/{bid_id}",
-                max_retries=2
-            )
+            bid_response = await proxy_router_service.getBidDetails(bid_id)
             
             # Extract provider address from bid details if available
             if isinstance(bid_response, dict):
@@ -240,12 +159,20 @@ async def create_bid_session(
                     provider_address = bid_response["provider"]
             
             if provider_address:
-                logger.info(f"Found provider address in bid details: {provider_address}")
+                session_logger.info("Found provider address in bid details",
+                                   provider_address=provider_address,
+                                   bid_id=bid_id)
             else:
-                logger.warning("Could not find provider address in bid details")
+                session_logger.warning("Could not find provider address in bid details",
+                                      bid_id=bid_id,
+                                      event_type="provider_address_missing")
         except Exception as e:
-            logger.error(f"Error fetching bid details: {str(e)}")
-            logger.warning("Proceeding without provider address, may fail if required by proxy router")
+            session_logger.error("Error fetching bid details",
+                                error=str(e),
+                                bid_id=bid_id,
+                                event_type="bid_details_fetch_error")
+            session_logger.warning("Proceeding without provider address, may fail if required by proxy router",
+                                  bid_id=bid_id)
         
         # Get required environment variables
         chain_id = os.getenv("CHAIN_ID")
@@ -263,7 +190,9 @@ async def create_bid_session(
             
         if missing_vars:
             error_msg = f"Missing required environment variables: {', '.join(missing_vars)}"
-            logger.error(error_msg)
+            session_logger.error("Missing required environment variables",
+                                missing_variables=missing_vars,
+                                event_type="env_vars_missing")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=error_msg
@@ -298,20 +227,14 @@ async def create_bid_session(
                 detail="No private key found and no fallback key configured"
             )
         
-        # Add private key to headers
-        headers = {
-            "X-Private-Key": private_key,
-            "X-Chain-ID": chain_id,
-            "X-Contract-Address": diamond_contract_address
-        }
-        
         # Create session with proxy router
-        response = await execute_proxy_router_operation(
-            "POST",
-            f"blockchain/bids/{bid_id}/session",
-            headers=headers,
-            json=session_data_dict,
-            max_retries=3
+        response = await proxy_router_service.createBidSession(
+            bid_id=bid_id,
+            session_data=session_data_dict,
+            user_id=user.id,
+            db=db,
+            chain_id=chain_id,
+            contract_address=diamond_contract_address
         )
         
         # Extract session ID from response
@@ -347,7 +270,7 @@ async def create_bid_session(
             "success": True,
             "message": "Session created and associated with API key",
             "session_id": blockchain_session_id,
-            "api_key_prefix": api_key_prefix
+            "api_key_prefix": api_key.key_prefix
         }
         
         # Add note about fallback key usage
@@ -356,19 +279,29 @@ async def create_bid_session(
             
         return result
     except ValueError as e:
-        logger.error(f"Error creating bid session: {str(e)}")
+        session_logger.error("Error creating bid session",
+                            error=str(e),
+                            bid_id=bid_id,
+                            event_type="bid_session_creation_error")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP error creating bid session: {str(e)}")
+    except proxy_router_service.ProxyRouterServiceError as e:
+        session_logger.error("Proxy router error creating bid session",
+                            error=str(e),
+                            error_type=e.error_type,
+                            bid_id=bid_id,
+                            event_type="proxy_router_error")
         raise HTTPException(
-            status_code=e.response.status_code if hasattr(e, 'response') else 500,
+            status_code=e.get_http_status_code(),
             detail=f"Error from proxy router: {str(e)}"
         )
     except Exception as e:
-        logger.error(f"Unexpected error creating bid session: {str(e)}")
+        session_logger.error("Unexpected error creating bid session",
+                            error=str(e),
+                            bid_id=bid_id,
+                            event_type="bid_session_unexpected_error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Unexpected error: {str(e)}"
@@ -379,6 +312,7 @@ async def create_model_session(
     model_id: str = Query(..., description="The blockchain ID (hex) of the model to create a session for"),
     session_data: SessionDataRequest = Body(..., description="Session data including duration and payment options"),
     user: User = Depends(get_api_key_user),
+    api_key: APIKey = Depends(get_api_key_model),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -394,41 +328,26 @@ async def create_model_session(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Setup detailed logging
-    logging.basicConfig(level=logging.DEBUG)
-    logger = logging.getLogger("modelsession")
-    
-    # We need to extract the API key prefix, but we know it's already loaded
-    # Using the API key returned from the dependency is safer than depending on user.api_keys
-    api_key_prefix = user.api_keys[0].key_prefix if user.api_keys and len(user.api_keys) > 0 else None
-    if not api_key_prefix:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No API key found for this user"
-        )
-    
-    # Since user.api_keys is already loaded by the dependency, we can directly get the first API key
-    # without another database query
-    api_key = user.api_keys[0] if user.api_keys and len(user.api_keys) > 0 else None
-    if not api_key:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="API key not found"
-        )
+    # Use structured logging for this endpoint  
+    session_logger = logger.bind(endpoint="modelsession", user_id=user.id, model_id=model_id)
     
     try:
         # Use the new session_service.switch_model function to safely switch models
-        logger.info(f"Switching to model {model_id} for API key {api_key.id}")
+        session_logger.info("Switching to model for API key",
+                           model_id=model_id,
+                           api_key_id=api_key.id,
+                           event_type="model_switch_start")
         
         # Override the session duration from the request
         session_duration = session_data.sessionDuration
         
         # Use our enhanced model switching function that properly ensures session cleanup
-        db_session = await session_service.switch_model(
+        db_session = await session_service.get_session_for_api_key(
             db=db,
             api_key_id=api_key.id,
             user_id=user.id,
-            new_model=model_id
+            requested_model=model_id,
+            session_duration=session_duration
         )
         
         if not db_session:
@@ -440,7 +359,10 @@ async def create_model_session(
         # Verify the new session is active in both DB and proxy
         is_valid = await session_service.verify_session_status(db, db_session.id)
         if not is_valid:
-            logger.error(f"Created session {db_session.id} is not valid in proxy router")
+            session_logger.error("Created session is not valid in proxy router",
+                                session_id=db_session.id,
+                                model_id=model_id,
+                                event_type="session_validation_failed")
             # Try to close it cleanly
             await session_service.close_session(db, db_session.id)
             raise HTTPException(
@@ -453,25 +375,35 @@ async def create_model_session(
             "success": True,
             "message": "Session created and associated with API key",
             "session_id": db_session.id,
-            "api_key_prefix": api_key_prefix,
+            "api_key_prefix": api_key.key_prefix,
             "model": model_id
         }
         
         return result
     except ValueError as e:
-        logger.error(f"Error creating model session: {str(e)}")
+        session_logger.error("Error creating model session",
+                            error=str(e),
+                            model_id=model_id,
+                            event_type="model_session_creation_error")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP error creating model session: {str(e)}")
+    except proxy_router_service.ProxyRouterServiceError as e:
+        session_logger.error("Proxy router error creating model session",
+                            error=str(e),
+                            error_type=e.error_type,
+                            model_id=model_id,
+                            event_type="proxy_router_error")
         raise HTTPException(
-            status_code=e.response.status_code if hasattr(e, 'response') else 500,
+            status_code=e.get_http_status_code(),
             detail=f"Error from proxy router: {str(e)}"
         )
     except Exception as e:
-        logger.error(f"Unexpected error creating model session: {str(e)}")
+        session_logger.error("Unexpected error creating model session",
+                            error=str(e),
+                            model_id=model_id,
+                            event_type="model_session_unexpected_error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Unexpected error: {str(e)}"
@@ -480,7 +412,8 @@ async def create_model_session(
 @router.post("/closesession")
 async def close_session(
     user: User = Depends(get_api_key_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(get_api_key_model)
 ):
     """
     Close the session associated with the current API key.
@@ -492,23 +425,7 @@ async def close_session(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    try:
-        # We need to extract the API key prefix, but we know it's already loaded
-        api_key_prefix = user.api_keys[0].key_prefix if user.api_keys and len(user.api_keys) > 0 else None
-        if not api_key_prefix:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No API key found for this user"
-            )
-        
-        # Since user.api_keys is already loaded by the dependency, we can directly get the first API key
-        api_key = user.api_keys[0] if user.api_keys and len(user.api_keys) > 0 else None
-        if not api_key:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="API key not found"
-            )
-        
+    try:        
         # Get session associated with the API key using the new CRUD function
         session = await session_crud.get_active_session_by_api_key(db, api_key.id)
         
@@ -543,7 +460,10 @@ async def close_session(
             "session_id": session.id
         }
     except Exception as e:
-        logging.error(f"Error in close_session: {str(e)}")
+        logger.error("Error in close_session",
+                    error=str(e),
+                    user_id=user.id,
+                    event_type="close_session_error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error closing session: {str(e)}"
@@ -552,7 +472,8 @@ async def close_session(
 @router.post("/pingsession")
 async def ping_session(
     user: User = Depends(get_api_key_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(get_api_key_model)
 ):
     """
     Ping the session by attempting a simple chat completion.
@@ -565,17 +486,9 @@ async def ping_session(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    logger = logging.getLogger(__name__)
+    ping_logger = logger.bind(endpoint="pingsession", user_id=user.id)
     
-    try:
-        # Get API key
-        api_key = user.api_keys[0] if user.api_keys and len(user.api_keys) > 0 else None
-        if not api_key:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="API key not found"
-            )
-            
+    try:            
         # Get session associated with the API key using the new CRUD function
         session = await session_crud.get_active_session_by_api_key(db, api_key.id)
         
@@ -617,7 +530,9 @@ async def ping_session(
         # Make request to chat completions endpoint
         endpoint = f"{settings.PROXY_ROUTER_URL}/v1/chat/completions"
         
-        logger.info(f"Testing session {session.id} with chat completion")
+        ping_logger.info("Testing session with chat completion",
+                         session_id=session.id,
+                         event_type="session_ping_test")
         
         async with httpx.AsyncClient() as client:
             try:
@@ -645,8 +560,13 @@ async def ping_session(
                     raise Exception("No response received from chat completion")
                     
             except Exception as e:
-                logger.error(f"Chat completion test failed: {str(e)}")
-                logger.info(f"Closing dead session {session.id}")
+                ping_logger.error("Chat completion test failed",
+                                 error=str(e),
+                                 session_id=session.id,
+                                 event_type="session_ping_failed")
+                ping_logger.info("Closing dead session",
+                                session_id=session.id,
+                                event_type="dead_session_cleanup")
                 
                 # Session is dead, close it using the session service
                 await session_service.close_session(db, session.id)
@@ -660,7 +580,9 @@ async def ping_session(
                 }
                 
     except Exception as e:
-        logger.error(f"Error in ping_session: {str(e)}")
+        ping_logger.error("Error in ping_session",
+                         error=str(e),
+                         event_type="ping_session_error")
         return {
             "status": "error",
             "message": f"Error checking session status: {str(e)}",

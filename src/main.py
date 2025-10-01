@@ -9,7 +9,6 @@ from urllib.parse import quote
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 import time
-import logging
 import asyncio
 import os
 import uuid
@@ -25,21 +24,13 @@ from src.db.models import Session as DbSession
 from src.services import session_service
 from src.db.database import engine, get_db
 from src.core.direct_model_service import direct_model_service
+from src.core.logging_config import configure_logging, get_core_logger, get_auth_logger
 
-# Define log directory
-log_dir = 'logs'
-os.makedirs(log_dir, exist_ok=True) # Create log directory if it doesn't exist
+# Configure structured logging
+configure_logging()
+logger = get_core_logger()
 
-# Set up detailed logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(log_dir, 'app.log')), # Use os.path.join
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+auth_logger = get_auth_logger()
 
 # Global variables for container diagnostics
 APP_START_TIME = None
@@ -58,8 +49,6 @@ app = FastAPI(
     swagger_ui_oauth2_redirect_url="/docs/oauth2-redirect"
 )
 
-# Set our fixed dependency route class for all APIRouters
-app.router.route_class = FixedDependencyAPIRoute
 
 # Note: Custom OpenAPI function is defined later in the file
 
@@ -209,13 +198,13 @@ async def cleanup_expired_sessions():
     from sqlalchemy.ext.asyncio import AsyncSession
     import traceback
     
-    logger = logging.getLogger("session_cleanup")
-    logger.info("Starting expired session cleanup task")
+    cleanup_logger = get_core_logger().bind(component="session_cleanup")
+    cleanup_logger.info("Starting expired session cleanup task")
     
     while True:
         try:
             # Log connection attempt for debugging
-            logger.info("Attempting to connect to database for session cleanup")
+            cleanup_logger.info("Attempting to connect to database for session cleanup")
             
             async with AsyncSessionLocal() as db:
                 # Find expired active sessions
@@ -229,27 +218,36 @@ async def cleanup_expired_sessions():
                 expired_sessions = result.scalars().all()
                 
                 if expired_sessions:
-                    logger.info(f"Found {len(expired_sessions)} expired sessions to clean up")
+                    cleanup_logger.info("Found expired sessions to clean up", 
+                                       expired_session_count=len(expired_sessions))
                     
                     # Process each expired session
                     for session in expired_sessions:
-                        logger.info(f"Cleaning up expired session {session.id}")
+                        cleanup_logger.info("Cleaning up expired session", 
+                                          session_id=session.id,
+                                          event_type="session_cleanup")
                         await session_service.close_session(db, session.id)
                 else:
-                    logger.info("No expired sessions found to clean up")
+                    cleanup_logger.info("No expired sessions found to clean up")
                 
                 # Synchronize session states between database and proxy router
                 try:
-                    logger.info("Starting session state synchronization")
+                    cleanup_logger.info("Starting session state synchronization", 
+                                       event_type="sync_start")
                     await session_service.synchronize_sessions(db)
-                    logger.info("Session state synchronization completed")
+                    cleanup_logger.info("Session state synchronization completed", 
+                                       event_type="sync_complete")
                 except Exception as sync_error:
-                    logger.error(f"Error during session synchronization: {str(sync_error)}")
-                    logger.error(traceback.format_exc())
+                    cleanup_logger.error("Error during session synchronization",
+                                        error=str(sync_error),
+                                        event_type="sync_error",
+                                        exc_info=True)
         
         except Exception as e:
-            logger.error(f"Error in session cleanup task: {str(e)}")
-            logger.error(traceback.format_exc())
+            cleanup_logger.error("Error in session cleanup task",
+                                error=str(e),
+                                event_type="cleanup_error",
+                                exc_info=True)
         
         # Run every 15 minutes
         await asyncio.sleep(15 * 60)
@@ -262,10 +260,11 @@ async def startup_event():
     global APP_START_TIME
     APP_START_TIME = datetime.utcnow()
     
-    logger.info("🔄 Starting Morpheus API Gateway startup sequence...")
-    logger.info(f"📊 Configuration: Direct model fetching from {settings.ACTIVE_MODELS_URL}")
-    logger.info(f"🏷️ Container ID: {CONTAINER_ID}")
-    logger.info(f"📦 Version: {APP_VERSION}")
+    logger.info("Starting Morpheus API Gateway startup sequence",
+                event_type="startup_begin",
+                container_id=CONTAINER_ID,
+                version=APP_VERSION,
+                models_url=settings.ACTIVE_MODELS_URL)
     
     # Log local testing status
     from src.core.local_testing import log_local_testing_status
@@ -273,7 +272,7 @@ async def startup_event():
     
     # All workers perform lightweight checks - no complex coordination needed
     worker_pid = os.getpid()
-    logger.info(f"🔧 Worker PID: {worker_pid}")
+    logger.info("Worker process started", worker_pid=worker_pid, event_type="worker_start")
     
     try:
         # Temporarily skip database version check to resolve startup issues
@@ -282,62 +281,67 @@ async def startup_event():
         
         # Only first worker checks database version to prevent connection pool exhaustion
         # if worker_pid % 4 == 0:  # Only one worker does DB version check
-        #     logger.info("🗃️ Checking database version compatibility...")
+        #     logger.info("Checking database version compatibility", 
+        #                event_type="db_version_check_start")
         #     await check_database_version()
         # else:
-        #     logger.info("⏩ Skipping database version check in this worker to prevent connection contention")
+        #     logger.info("Skipping database version check in this worker to prevent connection contention",
+        #                event_type="db_version_check_skip")
         
         # Initialize direct model service with memory-conscious approach
-        logger.info("🤖 Initializing direct model service...")
+        logger.info("Initializing direct model service", event_type="model_service_init_start")
         try:
             # Stagger model fetching to reduce concurrent requests (shorter delays to avoid timeout)
             stagger_delay = (worker_pid % 4) * 0.5  # 0, 0.5, 1.0, 1.5 second delays
             if stagger_delay > 0:
-                logger.info(f"⏳ Staggering model fetch by {stagger_delay}s to reduce concurrent requests")
+                logger.info("Staggering model fetch to reduce concurrent requests",
+                           stagger_delay_seconds=stagger_delay)
                 await asyncio.sleep(stagger_delay)
             
             # Test initial fetch to ensure service is working
             models = await direct_model_service.get_model_mapping()
-            logger.info(f"✅ Direct model service initialized with {len(models)} models")
+            logger.info("Direct model service initialized successfully",
+                       model_count=len(models),
+                       event_type="model_service_init_success")
         except Exception as e:
-            logger.error(f"❌ Failed to initialize direct model service: {e}")
+            logger.error("Failed to initialize direct model service",
+                        error=str(e),
+                        event_type="model_service_init_error")
             logger.warning("Continuing startup - model service will retry on first request")
         
     except Exception as e:
-        logger.error(f"❌ Error during worker initialization: {e}")
+        logger.error("Error during worker initialization",
+                    error=str(e),
+                    event_type="worker_init_error")
         # For database version mismatches, we want to fail fast
         if "Database version mismatch" in str(e):
-            logger.error("🚨 Database version incompatible - failing startup")
+            logger.error("Database version incompatible - failing startup",
+                        event_type="startup_failure")
             raise e
         logger.warning("Continuing startup with minimal initialization")
     
-    # Make sure all routers use our fixed route class
-    try:
-        for router in [auth, models, chat, session, automation, chat_history]:
-            update_router_route_class(router, FixedDependencyAPIRoute)
-        logger.info("✅ All routers configured with FixedDependencyAPIRoute")
-    except Exception as e:
-        logger.error(f"❌ Error configuring routers: {e}")
-        logger.warning("Continuing startup with default route classes...")
-    
+
     # Start the background tasks
     try:
         asyncio.create_task(cleanup_expired_sessions())
-        logger.info("✅ Started background task for expired session cleanup")
+        logger.info("Started background task for expired session cleanup",
+                   event_type="background_task_start")
     except Exception as e:
-        logger.error(f"❌ Failed to start background cleanup task: {e}")
-        logger.warning("Continuing startup without background session cleanup...")
+        logger.error("Failed to start background cleanup task",
+                    error=str(e),
+                    event_type="background_task_error")
+        logger.warning("Continuing startup without background session cleanup")
     
-    logger.info("🚀 Application startup complete!")
+    logger.info("Application startup complete", event_type="startup_complete")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """
     Perform cleanup during application shutdown.
     """
-    logger.info("🛑 Application shutdown initiated...")
-    logger.info("✅ Direct model service requires no cleanup (stateless)")
-    logger.info("🏁 Application shutdown complete")
+    logger.info("Application shutdown initiated", event_type="shutdown_start")
+    logger.info("Direct model service requires no cleanup (stateless)")
+    logger.info("Application shutdown complete", event_type="shutdown_complete")
 
 async def check_database_version():
     """
@@ -346,7 +350,9 @@ async def check_database_version():
     CI/CD should handle migrations - this just verifies they completed successfully.
     """
     try:
-        logger.info("🔍 Checking database version compatibility...")
+        db_logger = get_core_logger().bind(component="database_version")
+        db_logger.info("Checking database version compatibility", 
+                      event_type="db_version_check_start")
         
         # Import what we need to check migration revisions
         from alembic.script import ScriptDirectory
@@ -362,7 +368,8 @@ async def check_database_version():
         
         # Get the expected revision (what this app version expects)
         expected_revision = script_dir.get_current_head()
-        logger.info(f"📋 Expected database version: {expected_revision}")
+        db_logger.info("Expected database version determined", 
+                      expected_revision=expected_revision)
         
         # Connect to database and check current revision
         async with engine.begin() as conn:
@@ -373,8 +380,8 @@ async def check_database_version():
             table_exists = result.scalar()
             
             if not table_exists:
-                error_msg = "❌ Alembic version table doesn't exist - database not initialized or CI/CD migration failed"
-                logger.error(error_msg)
+                error_msg = "Alembic version table doesn't exist - database not initialized or CI/CD migration failed"
+                db_logger.error(error_msg, event_type="db_version_error")
                 raise RuntimeError(error_msg)
             
             # Get current database revision
@@ -382,51 +389,35 @@ async def check_database_version():
             current_revision = result.scalar()
             
             if current_revision is None:
-                error_msg = "❌ No migration version found in database - CI/CD migration may have failed"
-                logger.error(error_msg)
+                error_msg = "No migration version found in database - CI/CD migration may have failed"
+                db_logger.error(error_msg, event_type="db_version_error")
                 raise RuntimeError(error_msg)
                 
-            logger.info(f"🗄️ Current database version: {current_revision}")
+            db_logger.info("Current database version retrieved",
+                          current_revision=current_revision)
             
             # Compare revisions - must match exactly
             if current_revision == expected_revision:
-                logger.info("✅ Database version matches expected version")
+                db_logger.info("Database version matches expected version",
+                              event_type="db_version_match")
             else:
-                error_msg = f"❌ Database version mismatch! Expected '{expected_revision}' but got '{current_revision}'. CI/CD migration may not have completed successfully. Please check the deployment pipeline."
-                logger.error(error_msg)
+                error_msg = f"Database version mismatch! Expected '{expected_revision}' but got '{current_revision}'. CI/CD migration may not have completed successfully. Please check the deployment pipeline."
+                db_logger.error(error_msg,
+                               expected_revision=expected_revision,
+                               current_revision=current_revision,
+                               event_type="db_version_mismatch")
                 raise RuntimeError(error_msg)
                 
     except Exception as e:
-        logger.error(f"❌ Database version check failed: {str(e)}")
+        db_logger.error("Database version check failed",
+                       error=str(e),
+                       event_type="db_version_check_failed")
         # Fail fast if database version is incompatible
         raise RuntimeError(f"Database version check failed: {str(e)}")
     finally:
-        logger.info("Database version check completed")
+        db_logger.info("Database version check completed",
+                      event_type="db_version_check_complete")
 
-# Update router route classes
-def update_router_route_class(router: APIRouter, route_class=FixedDependencyAPIRoute):
-    """
-    Update an APIRouter instance to use our fixed route class.
-    
-    This is used to propagate the route class to all included routers.
-    
-    Args:
-        router: The router to update
-        route_class: The route class to use
-    """
-    router.route_class = route_class
-    for route in router.routes:
-        if isinstance(route, APIRouter):
-            update_router_route_class(route, route_class)
-    return router
-
-# Update all imported routers with our custom route class
-update_router_route_class(auth)
-update_router_route_class(models)
-update_router_route_class(chat)
-update_router_route_class(session)
-update_router_route_class(automation)
-update_router_route_class(chat_history)
 
 # Include routers
 app.include_router(auth, prefix=f"{settings.API_V1_STR}/auth")
@@ -746,15 +737,18 @@ async def swagger_ui_oauth2_redirect(request: Request):
             if response.status_code == 200:
                 tokens = response.json()
                 access_token = tokens.get("access_token")
-                logger.info("Token exchange successful")
+                auth_logger.info("Token exchange successful", event_type="oauth_token_exchange")
             else:
                 error_body = response.text
-                logger.warning(f"Token exchange failed - Status: {response.status_code}")
-                logger.warning("Token exchange error response received")
+                auth_logger.warning("Token exchange failed",
+                                   status_code=response.status_code,
+                                   event_type="oauth_token_exchange_failed")
                 token_error = f"HTTP {response.status_code}: {error_body}"
                 
         except Exception as e:
-            logger.error(f"Token exchange exception: {str(e)}")
+            auth_logger.error("Token exchange exception",
+                            error=str(e),
+                            event_type="oauth_token_exchange_error")
             token_error = str(e)
     
     # Build the HTML with proper JavaScript variable interpolation
