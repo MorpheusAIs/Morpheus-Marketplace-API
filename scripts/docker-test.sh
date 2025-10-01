@@ -17,13 +17,12 @@ fi
 echo "✅ Found .env.local"
 
 # Stop and remove any existing containers
-# echo "🧹 Cleaning up existing containers..."
-docker compose -f docker-compose.local.yml down
+echo "🧹 Cleaning up existing containers..."
+docker compose -f docker-compose.local.yml down --remove-orphans
 
 # Build and start services
 echo "🚀 Starting services with docker-compose..."
-# docker compose -f docker-compose.local.yml up --build -d
-docker compose -f docker-compose.local.yml up --build
+docker compose -f docker-compose.local.yml up --build -d
 
 echo "⏳ Waiting for container to start..."
 sleep 5
