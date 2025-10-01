@@ -76,11 +76,6 @@ async def create_api_key(db: AsyncSession, user_id: int, api_key_in: APIKeyCreat
         full_key, user.cognito_user_id, user.email
     )
     
-    # Encrypt the API key using Cognito user data
-    encrypted_key = APIKeyEncryption.encrypt_api_key(
-        full_key, user.cognito_user_id, user.email
-    )
-    
     # Create API key object with required fields
     api_key_data = {
         "key_prefix": key_prefix,
