@@ -13,7 +13,7 @@ from src.main import app
 from src.db.models import User, APIKey, UserAutomationSettings, Session
 from src.crud import automation as automation_crud
 from src.dependencies import get_api_key_user, get_db
-from src.api.v1.chat import ChatCompletionRequest, ChatMessage
+from src.api.v1.chat.chat_models import ChatCompletionRequest, ChatMessage
 
 # Create test client
 client = TestClient(app)

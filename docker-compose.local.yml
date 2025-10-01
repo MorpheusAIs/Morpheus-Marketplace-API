@@ -45,6 +45,10 @@ services:
       COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID}
       COGNITO_REGION: ${COGNITO_REGION}
       COGNITO_DOMAIN: ${COGNITO_DOMAIN}
+
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+      LOG_JSON: ${LOG_JSON:-false}
+      LOG_IS_PROD: ${LOG_IS_PROD:-false}
       
       # Model service
       ACTIVE_MODELS_URL: ${ACTIVE_MODELS_URL:-https://active.dev.mor.org/active_models.json}

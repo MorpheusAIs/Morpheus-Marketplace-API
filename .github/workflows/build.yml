@@ -39,7 +39,7 @@ on:
       - dev
       - cicd/*
 
-    paths: [".github/**", "src/**", "alembic/**", "pyproject.toml", "poetry.lock", "Dockerfile", "alembic.ini"]
+    paths: [".github/**", "src/**", "alembic/**", "pyproject.toml", "poetry.lock", "Dockerfile", "alembic.ini", "tests/**"]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -195,12 +195,14 @@ jobs:
       - name: Run database migrations (test)
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
+          ENVIRONMENT: test
         run: |
           poetry run alembic upgrade head
           
       - name: Run tests
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/test_db
+          ENVIRONMENT: test
         run: |
           # Run tests but don't fail the build if tests fail (focus on infrastructure)
           poetry run pytest tests/ -v --cov=src --cov-report=xml || echo "⚠️ Some tests failed, but continuing with build process"
@@ -372,6 +374,7 @@ jobs:
           
           # Set database URL for migrations
           export DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}"
+          export ENVIRONMENT="$ENV"
           
           # Create backup point (get current revision before migration)
           echo "📋 Recording current database state before migration..."

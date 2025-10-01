@@ -8,10 +8,10 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime
 
-from src.db.database import get_db
-from src.db.models import User, MessageRole
-from src.dependencies import get_api_key_user, get_current_user, CurrentUser
-from src.crud import chat as chat_crud
+from ....db.database import get_db
+from ....db.models import User, MessageRole
+from ....dependencies import get_api_key_user, get_current_user, CurrentUser
+from ....crud import chat as chat_crud
 
 
 router = APIRouter()

@@ -5,14 +5,14 @@ Replaces the complex model sync system with a simple, efficient approach.
 
 import json
 import hashlib
-import logging
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 import httpx
 
 from src.core.config import settings
+from src.core.logging_config import get_models_logger
 
-logger = logging.getLogger(__name__)
+logger = get_models_logger()
 
 class DirectModelService:
     """
@@ -40,7 +40,9 @@ class DirectModelService:
         self._last_hash: Optional[str] = None
         self._raw_models_data: List[Dict] = []
         
-        logger.info(f"DirectModelService initialized with {cache_duration_seconds}s cache duration")
+        logger.info("DirectModelService initialized",
+                   cache_duration_seconds=cache_duration_seconds,
+                   event_type="model_service_init")
     
     async def get_model_mapping(self) -> Dict[str, str]:
         """
@@ -96,15 +98,22 @@ class DirectModelService:
         now = datetime.now()
         
         if (self._cache_expiry is None or now > self._cache_expiry):
-            logger.debug("Cache expired, refreshing model data")
+            logger.debug("Cache expired, refreshing model data",
+                        cache_expiry=self._cache_expiry.isoformat() if self._cache_expiry else None,
+                        event_type="cache_refresh")
             await self._refresh_cache()
         else:
-            logger.debug(f"Using cached model data (expires in {(self._cache_expiry - now).total_seconds():.1f}s)")
+            cache_remaining = (self._cache_expiry - now).total_seconds()
+            logger.debug("Using cached model data",
+                        cache_expires_in_seconds=cache_remaining,
+                        event_type="cache_hit")
     
     async def _refresh_cache(self):
         """Refresh the cache by fetching from the API."""
         try:
-            logger.info(f"Fetching models from {settings.ACTIVE_MODELS_URL}")
+            logger.info("Fetching models from external API",
+                   source_url=settings.ACTIVE_MODELS_URL,
+                   event_type="external_models_fetch_start")
             
             headers = {}
             if self._last_etag:

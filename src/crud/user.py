@@ -5,6 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import User
 from src.schemas.user import UserCreate, UserUpdate
+from src.core.logging_config import get_auth_logger
+
+logger = get_auth_logger()
 
 async def get_user_by_id(db: AsyncSession, user_id: int) -> Optional[User]:
     """
@@ -72,6 +75,12 @@ async def create_user_from_cognito(db: AsyncSession, user_data: dict) -> User:
     await db.commit()
     await db.refresh(db_user)
     
+    logger.info("User created from Cognito authentication",
+               user_id=db_user.id,
+               cognito_user_id=user_data['cognito_user_id'],
+               email=user_data['email'],
+               event_type="user_created_from_cognito")
+    
     return db_user
 
 async def update_user(
@@ -99,6 +108,11 @@ async def update_user(
     # Commit changes
     await db.commit()
     await db.refresh(db_user)
+    
+    logger.info("User updated successfully",
+               user_id=db_user.id,
+               updated_fields=list(update_data.keys()),
+               event_type="user_updated")
     
     return db_user
 
@@ -133,11 +147,24 @@ async def delete_user(db: AsyncSession, user_id: int) -> Optional[User]:
     
     # Return None if user not found
     if not user:
+        logger.warning("User not found for deletion",
+                      user_id=user_id,
+                      event_type="user_not_found_for_deletion")
         return None
+    
+    logger.info("Deleting user",
+               user_id=user_id,
+               cognito_user_id=user.cognito_user_id,
+               email=user.email,
+               event_type="user_deletion")
     
     # Delete user
     await db.delete(user)
     await db.commit()
+    
+    logger.info("User deleted successfully",
+               user_id=user_id,
+               event_type="user_deleted")
     
     return user
 
@@ -156,10 +183,19 @@ async def update_user_from_cognito(
         Updated user object or None if Cognito fetch fails
     """
     try:
+        logger.debug("Fetching user info from Cognito",
+                    user_id=db_user.id,
+                    cognito_user_id=db_user.cognito_user_id,
+                    event_type="cognito_user_info_fetch_start")
+        
         # Fetch user info from Cognito
         cognito_info = await cognito_service.get_user_info(db_user.cognito_user_id)
         
         if not cognito_info:
+            logger.warning("No user info received from Cognito",
+                          user_id=db_user.id,
+                          cognito_user_id=db_user.cognito_user_id,
+                          event_type="cognito_user_info_not_found")
             return None
         
         # Extract attributes from Cognito response
@@ -176,12 +212,22 @@ async def update_user_from_cognito(
         
         # Apply updates if we have any
         if update_data:
+            logger.info("Updating user with Cognito data",
+                       user_id=db_user.id,
+                       update_fields=list(update_data.keys()),
+                       event_type="cognito_user_data_update")
             return await update_user(db, db_user=db_user, user_in=update_data)
         
+        logger.debug("No updates needed from Cognito",
+                    user_id=db_user.id,
+                    event_type="cognito_no_updates_needed")
         return db_user
         
     except Exception as e:
         # Log error but don't fail - return the original user
-        import logging
-        logging.error(f"❌ Failed to update user from Cognito: {str(e)}")
+        logger.error("Failed to update user from Cognito",
+                    user_id=db_user.id,
+                    cognito_user_id=db_user.cognito_user_id,
+                    error=str(e),
+                    event_type="cognito_user_update_error")
         return db_user 

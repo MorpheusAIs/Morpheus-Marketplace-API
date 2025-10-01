@@ -19,8 +19,8 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = Field(default=os.getenv("ENVIRONMENT", "development"))
     
     # CORS Settings - explicit allowlist for credential-safe CORS
-    CORS_ALLOWED_ORIGINS: str = Field(
-        default=os.getenv("CORS_ALLOWED_ORIGINS", "")  # Empty means auto-detect
+    CORS_ALLOWED_ORIGINS: List[str] = Field(
+        default_factory=lambda: []  # Empty means auto-detect
     )
     
     # Development CORS origins (for local development)
@@ -35,15 +35,30 @@ class Settings(BaseSettings):
     BACKEND_CORS_ORIGINS: Union[List[str], str] = Field(default="*")
     
     @field_validator("CORS_ALLOWED_ORIGINS", mode="before")
-    def parse_cors_origins(cls, v: str) -> List[str]:
+    def parse_cors_origins(cls, v) -> List[str]:
         """Parse comma-separated CORS origins into a list with environment awareness"""
         # Get environment from the current values being validated
         environment = os.getenv("ENVIRONMENT", "development").lower()
         
-        # If explicitly set, use those origins
-        if v and v.strip():
+        # Check if CORS_ALLOWED_ORIGINS environment variable is set
+        env_cors_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
+        
+        # Handle different input types
+        if env_cors_origins and env_cors_origins.strip():
+            # Environment variable is set, use it
+            origins = [origin.strip() for origin in env_cors_origins.split(",") if origin.strip()]
+        elif isinstance(v, list) and v:
+            # Already a list with values, filter out empty strings
+            origins = [origin.strip() for origin in v if origin and origin.strip()]
+        elif isinstance(v, str) and v.strip():
+            # String input, split by comma
             origins = [origin.strip() for origin in v.split(",") if origin.strip()]
         else:
+            # Empty or None input, use auto-detection
+            origins = []
+        
+        # If no explicit origins provided, auto-detect based on environment
+        if not origins:
             # Auto-detect based on environment
             if environment in ["production", "prod", "prd"]:
                 origins = [
@@ -130,7 +145,7 @@ class Settings(BaseSettings):
     PROXY_ROUTER_URL: str = Field(default=os.getenv("PROXY_ROUTER_URL", ""))
     PROXY_ROUTER_USERNAME: str = Field(default=os.getenv("PROXY_ROUTER_USERNAME", ""))
     PROXY_ROUTER_PASSWORD: str = Field(default=os.getenv("PROXY_ROUTER_PASSWORD", ""))
-    
+
     # Blockchain Private Key Fallback
     FALLBACK_PRIVATE_KEY: str | None = Field(default=os.getenv("FALLBACK_PRIVATE_KEY"))
 
