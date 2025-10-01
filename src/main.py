@@ -19,7 +19,6 @@ from src.api.v1 import models, chat, session, auth, automation, chat_history
 from src.core.config import settings
 from src.core.version import get_version, get_version_info
 from src.core.cors_middleware import CredentialSafeCORSMiddleware
-from src.api.v1.custom_route import FixedDependencyAPIRoute
 from src.db.models import Session as DbSession
 from src.services import session_service
 from src.db.database import engine, get_db
