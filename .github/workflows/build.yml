@@ -39,7 +39,7 @@ on:
       - dev
       - cicd/*
 
-    paths: [".github/**", "src/**", "alembic/**", "pyproject.toml", "poetry.lock", "Dockerfile", "alembic.ini"]
+    paths: [".github/**", "src/**", "alembic/**", "pyproject.toml", "poetry.lock", "Dockerfile", "alembic.ini", "tests/**"]
 
 concurrency:
   group: ci-${{ github.ref }}
