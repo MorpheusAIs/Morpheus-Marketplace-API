@@ -71,12 +71,12 @@ try:
         allow_direct_access=True  # Enable for ALB cookie stickiness from any client
     )
     
-    core_log.info(f"CORS configured with allowed origins: {', '.join(allowed_origins)}")
+    logger.info(f"CORS configured with allowed origins: {', '.join(allowed_origins)}")
     
 except Exception as e:
     # Fallback to legacy CORS configuration for development
-    core_log.warning(f"Failed to configure new CORS middleware: {e}")
-    core_log.warning("Falling back to legacy CORS configuration")
+    logger.warning(f"Failed to configure new CORS middleware: {e}")
+    logger.warning("Falling back to legacy CORS configuration")
     
     if hasattr(settings, 'BACKEND_CORS_ORIGINS'):
         origins = []
@@ -87,7 +87,7 @@ except Exception as e:
         
         # Never use wildcard with credentials in production
         if origins and origins[0] == "*":
-            core_log.warning("Using wildcard CORS origins - this should only be used in development")
+            logger.warning("Using wildcard CORS origins - this should only be used in development")
             app.add_middleware(
                 CORSMiddleware,
                 allow_origins=["*"],
@@ -106,7 +106,7 @@ except Exception as e:
             )
     else:
         # Development fallback
-        core_log.warning("No CORS origins configured - using development defaults")
+        logger.warning("No CORS origins configured - using development defaults")
         app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
