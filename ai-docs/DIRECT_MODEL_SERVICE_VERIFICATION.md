@@ -9,7 +9,7 @@ This guide provides comprehensive methods to verify that the Direct Model Fetchi
 Check the main health endpoint which includes model service status:
 
 ```bash
-curl https://api.dev.mor.org/health
+curl https://api.mor.org/health
 ```
 
 **Expected Response:**
@@ -37,7 +37,7 @@ curl https://api.dev.mor.org/health
 Check the dedicated model service health endpoint:
 
 ```bash
-curl https://api.dev.mor.org/health/models
+curl https://api.mor.org/health/models
 ```
 
 **Expected Response:**
@@ -79,10 +79,10 @@ Use the provided verification script to test all endpoints:
 
 ```bash
 # Basic verification
-python scripts/verify_model_service.py --url https://api.dev.mor.org
+python scripts/verify_model_service.py --url https://api.mor.org
 
 # Verbose verification with output file
-python scripts/verify_model_service.py --url https://api.dev.mor.org --verbose --output verification_results.json
+python scripts/verify_model_service.py --url https://api.mor.org --verbose --output verification_results.json
 ```
 
 **What it tests:**
@@ -140,7 +140,7 @@ Failed to initialize direct model service: [error details]
 
 ```bash
 # Get list of available models
-curl https://api.dev.mor.org/api/v1/models
+curl https://api.mor.org/api/v1/models
 
 # Should return models from DirectModelService with ModelType field
 {
@@ -185,7 +185,7 @@ The API now includes a `modelType` field for each model:
 
 ```bash
 # Test venice-uncensored resolution (will fail with auth error, but model should resolve)
-curl -X POST https://api.dev.mor.org/api/v1/chat/completions \
+curl -X POST https://api.mor.org/api/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "venice-uncensored",
@@ -315,9 +315,9 @@ Before deploying to production:
 ## 🔄 Environment-Specific URLs
 
 ### Development
-- Health: `https://api.dev.mor.org/health`
-- Model Health: `https://api.dev.mor.org/health/models`
-- Models List: `https://api.dev.mor.org/api/v1/models`
+- Health: `https://api.mor.org/health`
+- Model Health: `https://api.mor.org/health/models`
+- Models List: `https://api.mor.org/api/v1/models`
 - Active Models Source: `https://active.dev.mor.org/active_models.json`
 
 ### Production

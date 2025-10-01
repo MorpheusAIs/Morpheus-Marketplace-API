@@ -15,8 +15,88 @@ class Settings(BaseSettings):
     # Base URL - set by Terraform based on environment
     BASE_URL: str = Field(default=os.getenv("BASE_URL", "http://localhost:8000"))
     
-    # CORS Settings - default to an empty list that allows all origins
+    # Environment detection for CORS configuration
+    ENVIRONMENT: str = Field(default=os.getenv("ENVIRONMENT", "development"))
+    
+    # CORS Settings - explicit allowlist for credential-safe CORS
+    CORS_ALLOWED_ORIGINS: str = Field(
+        default=os.getenv("CORS_ALLOWED_ORIGINS", "")  # Empty means auto-detect
+    )
+    
+    # Development CORS origins (for local development)
+    CORS_DEV_ORIGINS: str = Field(
+        default=os.getenv(
+            "CORS_DEV_ORIGINS", 
+            "http://localhost:3000,http://localhost:8080,http://127.0.0.1:3000,http://127.0.0.1:8080"
+        )
+    )
+    
+    # Legacy CORS setting (deprecated - use CORS_ALLOWED_ORIGINS instead)
     BACKEND_CORS_ORIGINS: Union[List[str], str] = Field(default="*")
+    
+    @field_validator("CORS_ALLOWED_ORIGINS", mode="before")
+    def parse_cors_origins(cls, v: str) -> List[str]:
+        """Parse comma-separated CORS origins into a list with environment awareness"""
+        # Get environment from the current values being validated
+        environment = os.getenv("ENVIRONMENT", "development").lower()
+        
+        # If explicitly set, use those origins
+        if v and v.strip():
+            origins = [origin.strip() for origin in v.split(",") if origin.strip()]
+        else:
+            # Auto-detect based on environment
+            if environment in ["production", "prod", "prd"]:
+                origins = [
+                    "https://openbeta.mor.org",
+                    "https://api.mor.org"
+                ]
+            elif environment in ["development", "dev", "test", "staging"]:
+                origins = [
+                    # Production origins (for cross-env testing)
+                    "https://openbeta.mor.org",
+                    "https://api.mor.org",
+                    # Development origins
+                    "https://openbeta.dev.mor.org",
+                    "https://api.dev.mor.org",
+                    # Local development origins
+                    "http://localhost:3000",
+                    "http://localhost:8080",
+                    "http://127.0.0.1:3000",
+                    "http://127.0.0.1:8080"
+                ]
+            else:
+                # Unknown environment - use safe defaults
+                origins = [
+                    "https://openbeta.mor.org",
+                    "https://api.mor.org"
+                ]
+        
+        # Add development origins if CORS_DEV_ORIGINS is set
+        dev_origins_str = os.getenv("CORS_DEV_ORIGINS", "")
+        if dev_origins_str and environment != "production":
+            dev_origins = [origin.strip() for origin in dev_origins_str.split(",") if origin.strip()]
+            # Add dev origins that aren't already in the list
+            for dev_origin in dev_origins:
+                if dev_origin not in origins:
+                    origins.append(dev_origin)
+        
+        # Validate that we don't have wildcards with credentials
+        for origin in origins:
+            if origin == "*":
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS cannot contain '*' when credentials are enabled. "
+                    f"Use specific origins. Current environment: {environment}"
+                )
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_origins = []
+        for origin in origins:
+            if origin not in seen:
+                seen.add(origin)
+                unique_origins.append(origin)
+        
+        return unique_origins
     
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
@@ -42,6 +122,9 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
     REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+    
+    # API Key Encryption
+    ENCRYPTION_SECRET_KEY: str = Field(default=os.getenv("ENCRYPTION_SECRET_KEY", "encryption_secret_change_me"))
 
     # API Key Encryption
     ENCRYPTION_SECRET_KEY: str = Field(default=os.getenv("ENCRYPTION_SECRET_KEY", "encryption_secret_change_me"))
