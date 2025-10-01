@@ -6,7 +6,7 @@ with credentials, specifically designed to work with AWS ALB sticky sessions.
 """
 
 from fastapi import Request, Response
-from fastapi.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from typing import List, Set, Optional
 import logging
 import re
