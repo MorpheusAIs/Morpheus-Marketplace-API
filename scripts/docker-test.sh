@@ -17,8 +17,13 @@ fi
 echo "✅ Found .env.local"
 
 # Stop and remove any existing containers
-echo "🧹 Cleaning up existing containers..."
-docker compose -f docker-compose.local.yml down --remove-orphans
+if [ "$1" == "clean" ]; then
+    echo "🧹 Cleaning up existing containers..."
+    docker compose -f docker-compose.local.yml down --remove-orphans
+else
+    echo "🧹 Skipping cleanup"
+    docker compose -f docker-compose.local.yml down
+fi
 
 # Build and start services
 echo "🚀 Starting services with docker-compose..."
