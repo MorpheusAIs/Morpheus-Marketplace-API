@@ -176,7 +176,7 @@ async def _execute_request(
                         error_type = "client_error"
                     
                     raise ProxyRouterServiceError(
-                        f"HTTP {status_code}: {str(e)}",
+                        f"HTTP {status_code}: {response.text}",
                         status_code=status_code,
                         error_type=error_type
                     )
