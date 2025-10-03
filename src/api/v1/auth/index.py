@@ -34,45 +34,16 @@ router = APIRouter(tags=["Auth"])
 @router.get("/me", response_model=dict)
 async def get_current_user_info(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-    refresh_from_cognito: bool = Query(False, description="Fetch fresh user data from Cognito")
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Get current user information.
     
     Requires JWT Bearer authentication with Cognito token.
-    
-    Args:
-        refresh_from_cognito: If True, fetches fresh user data from Cognito and updates the database
+    User data is automatically kept up-to-date during authentication.
     """
     user = current_user
-    
-    # If refresh_from_cognito is requested, try to get fresh data from Cognito
-    if refresh_from_cognito:
-        user_logger = logger.bind(endpoint="get_current_user_info", user_id=user.id)
-        try:
-            user_logger.info("Refreshing user data from Cognito",
-                           cognito_user_id=user.cognito_user_id,
-                           event_type="cognito_refresh_start")
-            updated_user = await user_crud.update_user_from_cognito(
-                db, db_user=user, cognito_service=cognito_service
-            )
-            if updated_user:
-                user = updated_user
-                data_source = "cognito_refreshed"
-                user_logger.info("User data refreshed from Cognito",
-                               event_type="cognito_refresh_success")
-            else:
-                data_source = "database_cached"
-                user_logger.info("No updates from Cognito refresh",
-                               event_type="cognito_refresh_no_change")
-        except Exception as e:
-            user_logger.warning("Failed to refresh user data from Cognito",
-                              error=str(e),
-                              event_type="cognito_refresh_failed")
-            data_source = "database_cached"
-    else:
-        data_source = "database_cached"
+    data_source = "database_auto_updated"
     
     # Return user data focusing on email and cognito_id
     response_data = {
@@ -559,13 +530,31 @@ async def get_default_api_key_decrypted(
     
     Requires JWT Bearer authentication with the token received from the login endpoint.
     """
-    result = await api_key_crud.get_decrypted_default_api_key(db, current_user.id)
+    api_key_obj, decrypted_key, status = await api_key_crud.get_decrypted_default_api_key(db, current_user.id)
     
-    if not result:
-        return {"error": "No default API key found"}
+    if status == "no_key_found":
+        return {
+            "error": "No default API key found",
+            "error_code": "NO_DEFAULT_KEY",
+            "message": "You don't have any API keys set as default. Please create an API key or set one as default.",
+            "suggestion": "Create a new API key using POST /api/v1/auth/keys"
+        }
     
-    api_key_obj, decrypted_key = result
+    if status == "decryption_failed":
+        return {
+            "error": "API key decryption failed",
+            "error_code": "DECRYPTION_FAILED", 
+            "message": "Your default API key was found but could not be decrypted. This may be due to user data changes.",
+            "key_info": {
+                "id": api_key_obj.id,
+                "key_prefix": api_key_obj.key_prefix,
+                "name": api_key_obj.name,
+                "created_at": api_key_obj.created_at
+            },
+            "suggestion": "Try refreshing your user data with GET /api/v1/auth/me?refresh_from_cognito=true, or create a new API key"
+        }
     
+    # Success case
     return {
         "id": api_key_obj.id,
         "key_prefix": api_key_obj.key_prefix,
