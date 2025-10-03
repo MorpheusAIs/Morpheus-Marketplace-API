@@ -57,9 +57,7 @@ async def get_current_user_info(
         "data_source": data_source
     }
     
-    # Simple indicator if email is still a placeholder
-    if user.email == user.cognito_user_id:
-        response_data["note"] = "Email not yet available from Cognito - try refresh_from_cognito=true"
+    # Email should now be automatically updated during authentication
     
     return response_data
 
