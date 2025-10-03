@@ -27,19 +27,18 @@ class APIKeyEncryption:
     PBKDF2_ITERATIONS = 100000  # High iteration count for security
     
     @classmethod
-    def derive_encryption_key(cls, cognito_user_id: str, user_email: str) -> bytes:
+    def derive_encryption_key(cls, cognito_user_id: str) -> bytes:
         """
-        Derive encryption key from Cognito user data.
+        Derive encryption key from Cognito user ID.
         
         Args:
             cognito_user_id: Cognito sub claim (permanent user ID)
-            user_email: User's email address
             
         Returns:
             32-byte encryption key
         """
-        # Combine stable user identifiers with server secret
-        key_material = f"{cognito_user_id}:{user_email}:{settings.ENCRYPTION_SECRET_KEY}"
+        # Combine stable user identifier with server secret
+        key_material = f"{cognito_user_id}:{settings.ENCRYPTION_SECRET_KEY}"
         
         # Use Cognito user ID as salt (it's unique and permanent)
         salt = cognito_user_id.encode('utf-8')
@@ -56,20 +55,19 @@ class APIKeyEncryption:
         return kdf.derive(key_material.encode('utf-8'))
     
     @classmethod
-    def encrypt_api_key(cls, api_key: str, cognito_user_id: str, user_email: str) -> str:
+    def encrypt_api_key(cls, api_key: str, cognito_user_id: str) -> str:
         """
         Encrypt an API key for secure storage.
         
         Args:
             api_key: Full API key to encrypt
             cognito_user_id: Cognito sub claim
-            user_email: User's email
             
         Returns:
             Base64 encoded encrypted data (IV + encrypted_key)
         """
         # Derive encryption key
-        encryption_key = cls.derive_encryption_key(cognito_user_id, user_email)
+        encryption_key = cls.derive_encryption_key(cognito_user_id)
         
         # Generate random IV
         iv = secrets.token_bytes(cls.IV_LENGTH)
@@ -91,28 +89,42 @@ class APIKeyEncryption:
         return base64.b64encode(combined_data).decode('utf-8')
     
     @classmethod
-    def decrypt_api_key(cls, encrypted_data: str, cognito_user_id: str, user_email: str) -> Optional[str]:
+    def decrypt_api_key(cls, encrypted_data: str, cognito_user_id: str) -> Optional[str]:
         """
         Decrypt an API key from storage.
         
         Args:
             encrypted_data: Base64 encoded encrypted data
             cognito_user_id: Cognito sub claim
-            user_email: User's email
             
         Returns:
             Decrypted API key or None if decryption fails
         """
         try:
+            logger.debug("Starting API key decryption", 
+                        cognito_user_id=cognito_user_id[:8] + "...",  # Log partial ID for privacy
+                        encrypted_data_length=len(encrypted_data),
+                        event_type="api_key_decryption_start")
+            
             # Decode base64 data
             combined_data = base64.b64decode(encrypted_data.encode('utf-8'))
+            logger.debug("Base64 decoding successful", 
+                        combined_data_length=len(combined_data),
+                        event_type="base64_decode_success")
             
             # Extract IV and encrypted key
             iv = combined_data[:cls.IV_LENGTH]
             encrypted_key = combined_data[cls.IV_LENGTH:]
+            logger.debug("IV and encrypted key extracted", 
+                        iv_length=len(iv),
+                        encrypted_key_length=len(encrypted_key),
+                        event_type="iv_extraction_success")
             
             # Derive encryption key
-            encryption_key = cls.derive_encryption_key(cognito_user_id, user_email)
+            encryption_key = cls.derive_encryption_key(cognito_user_id)
+            logger.debug("Encryption key derived", 
+                        encryption_key_length=len(encryption_key),
+                        event_type="key_derivation_success")
             
             # Decrypt the API key
             cipher = Cipher(
@@ -123,13 +135,26 @@ class APIKeyEncryption:
             decryptor = cipher.decryptor()
             
             padded_key = decryptor.update(encrypted_key) + decryptor.finalize()
+            logger.debug("AES decryption successful", 
+                        padded_key_length=len(padded_key),
+                        event_type="aes_decryption_success")
+            
             api_key = cls._unpad_data(padded_key).decode('utf-8')
+            logger.debug("API key decryption completed successfully", 
+                        api_key_prefix=api_key[:10] + "..." if len(api_key) > 10 else api_key,
+                        api_key_length=len(api_key),
+                        event_type="api_key_decryption_success")
             
             return api_key
             
         except Exception as e:
-            # Log error but don't expose details
-            logger.error(f"Decryption failed: {e}")
+            # Log detailed error information for debugging
+            logger.error("API key decryption failed", 
+                        cognito_user_id=cognito_user_id[:8] + "...",  # Log partial ID for privacy
+                        encrypted_data_length=len(encrypted_data) if encrypted_data else 0,
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                        event_type="api_key_decryption_error")
             return None
     
     @staticmethod
