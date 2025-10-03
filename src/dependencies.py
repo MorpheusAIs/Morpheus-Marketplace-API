@@ -204,7 +204,7 @@ async def get_current_user(
                                cognito_user_id=cognito_user_id,
                                event_type="auto_refresh_new_user")
                 try:
-                    user = await user_crud.refresh_user_from_cognito(db, user.id)
+                    user = await user_crud.update_user_from_cognito(db, db_user=user, cognito_service=cognito_service)
                     auth_logger.info("Successfully refreshed new user from Cognito",
                                    user_id=user.id,
                                    user_email=user.email,
@@ -240,7 +240,7 @@ async def get_current_user(
                                has_jwt_email=bool(token_email),
                                event_type="auto_refresh_existing_user")
                 try:
-                    refreshed_user = await user_crud.refresh_user_from_cognito(db, user.id)
+                    refreshed_user = await user_crud.update_user_from_cognito(db, db_user=user, cognito_service=cognito_service)
                     if refreshed_user.email != user.email:
                         user = refreshed_user
                         auth_logger.info("Successfully refreshed existing user from Cognito",
