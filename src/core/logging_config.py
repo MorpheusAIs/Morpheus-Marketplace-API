@@ -40,8 +40,8 @@ class UvicornJSONFormatter(logging.Formatter):
         
         log_data = {
             "timestamp": timestamp,
-            "level": record.levelname if record.levelname else "INFO",
-            "logger": "CORE",  # Uvicorn logs are infrastructure/core
+            "level": record.levelname.lower() if record.levelname else "info",
+            "logger": "core",  # Uvicorn logs are infrastructure/core
             "caller": f"{record.filename}:{record.lineno}" if hasattr(record, 'filename') else "",
             "event": message
         }
@@ -217,7 +217,7 @@ class MorpheusLogConfig:
         """Add logger name to event dict."""
         # If component is already bound (from get_component_logger), use it
         if "component" in event_dict:
-            event_dict["logger"] = event_dict.pop("component")
+            event_dict["logger"] = event_dict.pop("component").lower()
             return event_dict
         
         # Otherwise, extract component from logger name
@@ -226,11 +226,11 @@ class MorpheusLogConfig:
         # Check if logger name matches a component
         for component, libs in MorpheusLogConfig.COMPONENT_HIERARCHY.items():
             if logger_name_lower == component.lower() or any(lib in logger_name_lower for lib in libs):
-                event_dict["logger"] = component
+                event_dict["logger"] = component.lower()
                 return event_dict
         
-        # Fallback: use the logger name as-is (capitalized for consistency)
-        event_dict["logger"] = name.upper()
+        # Fallback: use the logger name as-is (lowercase for consistency)
+        event_dict["logger"] = name.lower()
         return event_dict
     
     @staticmethod
