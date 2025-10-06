@@ -32,35 +32,49 @@ class UvicornJSONFormatter(logging.Formatter):
         from datetime import datetime, timezone
         timestamp = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat()
         
+        # Get message, fallback to empty string if not available
+        try:
+            message = record.getMessage()
+        except Exception:
+            message = str(record.msg) if hasattr(record, 'msg') else ""
+        
         log_data = {
             "timestamp": timestamp,
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
+            "level": record.levelname if record.levelname else "INFO",
+            "logger": "CORE",  # Uvicorn logs are infrastructure/core
+            "caller": f"{record.filename}:{record.lineno}" if hasattr(record, 'filename') else "",
+            "event": message
         }
 
-        # Add extra fields from the record
-        if hasattr(record, "status_code"):
-            log_data["status_code"] = record.status_code
-        if hasattr(record, "client_addr"):
-            log_data["client_addr"] = record.client_addr
-        if hasattr(record, "method"):
-            log_data["method"] = record.method
-        if hasattr(record, "path"):
-            log_data["path"] = record.path
-        if hasattr(record, "http_version"):
-            log_data["http_version"] = record.http_version
+        # Parse uvicorn.access logs to extract structured data
+        if record.name == "uvicorn.access" and hasattr(record, 'args') and len(record.args) >= 5:
+            try:
+                log_data["client_addr"] = str(record.args[0])
+                log_data["method"] = str(record.args[1])
+                log_data["endpoint"] = str(record.args[2])
+                log_data["http_version"] = str(record.args[3])
+                log_data["status_code"] = int(record.args[4])
+                log_data["event"] = f"{log_data['method']} {log_data['endpoint']} - {log_data['status_code']}"
+            except (IndexError, ValueError, TypeError):
+                # If parsing fails, just use the original message
+                pass
 
-        if record.name == "uvicorn.access" and record.msg == '%s - "%s %s HTTP/%s" %d':
-            log_data["client_addr"] = record.args[0]
-            log_data["method"] = record.args[1]
-            log_data["path"] = record.args[2]
-            log_data["http_version"] = record.args[3]
-            log_data["status_code"] = record.args[4]
+        # Add extra fields from the record (if present)
+        if hasattr(record, "status_code") and "status_code" not in log_data:
+            log_data["status_code"] = record.status_code
+        if hasattr(record, "client_addr") and "client_addr" not in log_data:
+            log_data["client_addr"] = record.client_addr
+        if hasattr(record, "method") and "method" not in log_data:
+            log_data["method"] = record.method
+        if hasattr(record, "path") and "endpoint" not in log_data:
+            log_data["endpoint"] = record.path
             
         # Add exception info if present
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
+        
+        # Filter out empty strings to reduce noise
+        log_data = {k: v for k, v in log_data.items() if v != ""}
             
         return json.dumps(log_data)
 
@@ -107,6 +121,8 @@ class MorpheusLogConfig:
             TimeStamper(fmt="iso", utc=True),
             # Filter by level before processing
             filter_by_level,
+            # Ensure event field is populated
+            self._ensure_event_field,
         ]
         
         if self.log_json:
@@ -199,14 +215,22 @@ class MorpheusLogConfig:
     @staticmethod
     def _add_logger_name(logger, name, event_dict):
         """Add logger name to event dict."""
-        # Extract component from logger name
-        logger_name = name.upper()
+        # If component is already bound (from get_component_logger), use it
+        if "component" in event_dict:
+            event_dict["logger"] = event_dict.pop("component")
+            return event_dict
+        
+        # Otherwise, extract component from logger name
+        logger_name_lower = name.lower()
+        
+        # Check if logger name matches a component
         for component, libs in MorpheusLogConfig.COMPONENT_HIERARCHY.items():
-            if logger_name == component.lower() or any(lib in logger_name.lower() for lib in libs):
+            if logger_name_lower == component.lower() or any(lib in logger_name_lower for lib in libs):
                 event_dict["logger"] = component
-                break
-        else:
-            event_dict["logger"] = logger_name
+                return event_dict
+        
+        # Fallback: use the logger name as-is (capitalized for consistency)
+        event_dict["logger"] = name.upper()
         return event_dict
     
     @staticmethod
@@ -227,6 +251,29 @@ class MorpheusLogConfig:
         except Exception:
             # Fallback if frame inspection fails
             event_dict["caller"] = "unknown"
+        return event_dict
+    
+    @staticmethod
+    def _ensure_event_field(logger, name, event_dict):
+        """Ensure event field is populated (required for all logs)."""
+        # Check if 'event' field exists and has content
+        if not event_dict.get("event"):
+            # Try alternative message fields in order of preference
+            # 1. Check for 'message' field (common in many logging systems)
+            if event_dict.get("message"):
+                event_dict["event"] = str(event_dict["message"])
+            # 2. Check for 'msg' field (common in structlog)
+            elif event_dict.get("msg"):
+                event_dict["event"] = str(event_dict["msg"])
+            # 3. Check for '@message' field (CloudWatch specific)
+            elif event_dict.get("@message"):
+                event_dict["event"] = str(event_dict["@message"])
+            # 4. Try to get message from stdlib logging record
+            elif hasattr(logger, '_context') and hasattr(logger._context, 'msg'):
+                event_dict["event"] = str(logger._context.msg)
+            # Last resort: use a placeholder
+            else:
+                event_dict["event"] = "[no message]"
         return event_dict
     
     def get_logger(self, name: str) -> structlog.stdlib.BoundLogger:

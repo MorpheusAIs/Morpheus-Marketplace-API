@@ -8,11 +8,12 @@ with credentials, specifically designed to work with AWS ALB sticky sessions.
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from typing import List, Set, Optional
-import logging
 import re
 from urllib.parse import urlparse
 
-logger = logging.getLogger(__name__)
+from .logging_config import get_core_logger
+
+logger = get_core_logger()
 
 
 class CredentialSafeCORSMiddleware(BaseHTTPMiddleware):
