@@ -694,7 +694,10 @@ jobs:
           while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
             echo "🔄 Health check attempt $((RETRY_COUNT + 1))/$MAX_RETRIES..."
             
-            HEALTH_RESPONSE=$(curl -s --max-time 10 "$HEALTH_ENDPOINT" 2>/dev/null)
+            # Use browser user-agent to bypass WAF bot detection
+            HEALTH_RESPONSE=$(curl -s --max-time 10 \
+              -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+              "$HEALTH_ENDPOINT" 2>/dev/null)
             CURL_STATUS=$?
             
             if [ $CURL_STATUS -eq 0 ] && [ -n "$HEALTH_RESPONSE" ]; then
