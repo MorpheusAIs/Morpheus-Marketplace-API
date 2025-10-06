@@ -76,7 +76,7 @@ Every log entry automatically includes these fields:
 |-------|------|-------------|---------|
 | `timestamp` | ISO 8601 string | UTC timestamp | `"2025-10-06T10:15:30.123456Z"` |
 | `level` | string | Log level (lowercase) | `"debug"`, `"info"`, `"warning"`, `"error"`, `"critical"` |
-| `logger` | string | Component name (uppercase) | `"CORE"`, `"AUTH"`, `"PROXY"`, `"MODELS"`, `"API"` |
+| `logger` | string | Component name (lowercase) | `"core"`, `"auth"`, `"proxy"`, `"models"`, `"api"` |
 | `caller` | string | Source file and line | `"direct_model_service.py:107"` |
 | `event` | string | Main message | `"Using cached model data"` |
 
@@ -278,11 +278,11 @@ LOG_IS_PROD=false
 
 ### Filter by Component
 ```
-{ $.logger = "AUTH" }
-{ $.logger = "PROXY" }
-{ $.logger = "API" }
-{ $.logger = "MODELS" }
-{ $.logger = "CORE" }
+{ $.logger = "auth" }
+{ $.logger = "proxy" }
+{ $.logger = "api" }
+{ $.logger = "models" }
+{ $.logger = "core" }
 ```
 
 ### Filter by Log Level
@@ -303,12 +303,12 @@ LOG_IS_PROD=false
 
 **All authentication errors:**
 ```
-{ $.logger = "AUTH" && $.level = "error" }
+{ $.logger = "auth" && $.level = "error" }
 ```
 
 **Proxy timeouts:**
 ```
-{ $.logger = "PROXY" && $.error_type = "timeout_error" }
+{ $.logger = "proxy" && $.error_type = "timeout_error" }
 ```
 
 **Failed session creations:**
@@ -328,7 +328,7 @@ LOG_IS_PROD=false
 
 **API access by endpoint:**
 ```
-{ $.logger = "CORE" && $.endpoint = "/api/v1/chat/completions" }
+{ $.logger = "core" && $.endpoint = "/api/v1/chat/completions" }
 ```
 
 ---
@@ -429,7 +429,7 @@ METRIC_NAME: SessionCreationError
 **Proxy Request Duration:**
 ```
 METRIC_FILTER_NAME: proxy_request_duration
-PATTERN: { $.logger = "PROXY" && $.duration > 0 }
+PATTERN: { $.logger = "proxy" && $.duration > 0 }
 METRIC_NAME: ProxyRequestDuration
 METRIC_VALUE: $.duration
 ```
@@ -444,7 +444,7 @@ METRIC_NAME: FallbackKeyUsage
 **API Endpoint Traffic:**
 ```
 METRIC_FILTER_NAME: api_endpoint_requests
-PATTERN: { $.logger = "CORE" && $.status_code > 0 }
+PATTERN: { $.logger = "core" && $.status_code > 0 }
 METRIC_NAME: APIRequests
 DIMENSIONS: endpoint=$$.endpoint, method=$$.method, status_code=$$.status_code
 ```
@@ -472,13 +472,13 @@ tail -f logs/app.log | jq .
 tail -f logs/app.log | jq 'select(.level == "error")'
 
 # Filter by component
-tail -f logs/app.log | jq 'select(.logger == "PROXY")'
+tail -f logs/app.log | jq 'select(.logger == "proxy")'
 
 # Filter by event type
 tail -f logs/app.log | jq 'select(.event_type | contains("error"))'
 
 # Show only API requests
-tail -f logs/app.log | jq 'select(.logger == "CORE" and .method != null)'
+tail -f logs/app.log | jq 'select(.logger == "core" and .method != null)'
 ```
 
 ---

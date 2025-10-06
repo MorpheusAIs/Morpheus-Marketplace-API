@@ -1,14 +1,22 @@
 # Logging System Fixes Applied
 
 **Date:** October 6, 2025  
+**Version:** 1.2  
 **Issues:** Logs showing incorrect logger field, empty log entries, missing structured fields
+
+## Recent Updates
+
+### Version 1.2 (October 6, 2025)
+- ✅ Changed all `logger` fields to **lowercase** (e.g., `"core"` instead of `"CORE"`)
+- ✅ Changed all `level` fields to **lowercase** (e.g., `"info"` instead of `"INFO"`)
+- ✅ Ensures consistent lowercase formatting across all log entries
 
 ---
 
 ## Problems Identified
 
 ### 1. **Logger Field Showing Log Level Instead of Component**
-**Problem:** Logs showed `"logger": "DEBUG"` or `"logger": "INFO"` instead of component names like `"MODELS"`, `"CORE"`, etc.
+**Problem:** Logs showed `"logger": "DEBUG"` or `"logger": "INFO"` instead of component names like `"models"`, `"core"`, etc.
 
 **Root Cause:** Logic error in `_add_logger_name()` function (line 203-209):
 ```python
@@ -244,7 +252,7 @@ export LOG_LEVEL=DEBUG
 
 ### Verify Fixes in CloudWatch
 After deployment, check that:
-1. ✅ `logger` field shows component names (CORE, AUTH, PROXY, MODELS, API)
+1. ✅ `logger` field shows component names (core, auth, proxy, models, api)
 2. ✅ No empty log entries
 3. ✅ Uvicorn access logs have structured fields
 4. ✅ All logs have `event` field populated
@@ -266,7 +274,7 @@ fields @timestamp, level, logger, event
 **Check uvicorn access logs:**
 ```
 fields @timestamp, method, endpoint, status_code, event
-| filter logger = "CORE" and method != ""
+| filter logger = "core" and method != ""
 ```
 
 ---
