@@ -98,9 +98,13 @@ class DirectModelService:
         now = datetime.now()
         
         if (self._cache_expiry is None or now > self._cache_expiry):
-            logger.debug("Cache expired, refreshing model data",
-                        cache_expiry=self._cache_expiry.isoformat() if self._cache_expiry else None,
-                        event_type="cache_refresh")
+            if self._cache_expiry is None:
+                logger.debug("Cache miss, fetching model data for first time",
+                            event_type="cache_miss")
+            else:
+                logger.debug("Cache expired, refreshing model data",
+                            cache_expiry=self._cache_expiry.isoformat(),
+                            event_type="cache_refresh")
             await self._refresh_cache()
         else:
             cache_remaining = (self._cache_expiry - now).total_seconds()

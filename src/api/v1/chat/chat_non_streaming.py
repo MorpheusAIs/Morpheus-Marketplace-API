@@ -163,6 +163,10 @@ async def handle_non_streaming_request(
 
     # If not retrying, return the original response
     if not retry_with_new_session:
+        logger.info("Non-streaming chat completion successful",
+                   request_id=request_id,
+                   session_id=session_id,
+                   event_type="chat_completion_success")
         return JSONResponse(content=response.json(), status_code=200)
 
     # If we need to retry with a new session, do that now
@@ -198,6 +202,11 @@ async def handle_non_streaming_request(
             )
 
         # Return successful retry response
+        logger.info("Non-streaming chat completion successful after retry",
+                   request_id=request_id,
+                   session_id=new_session_id,
+                   original_session_id=session_id,
+                   event_type="chat_completion_success")
         return JSONResponse(content=retry_response.json(), status_code=200)
 
 
