@@ -86,10 +86,7 @@ async def get_session_for_api_key(
             await close_session(db, session.id)
             return await create_automated_session(db, api_key_id, user_id, requested_model, session_duration)
     
-    session_logger.info("Creating automated session for API key",
-                       api_key_id=api_key_id,
-                       requested_model=requested_model,
-                       event_type="automated_session_creation_start")
+    # No explicit logging here - create_automated_session will log with complete details
     return await create_automated_session(db, api_key_id, user_id, requested_model, session_duration)
 
 async def create_automated_session(
