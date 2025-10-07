@@ -1,29 +1,101 @@
 import asyncio
-import logging
-import httpx
-import os
 import json
 from typing import Optional, Dict, Any, Tuple, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta, timezone
-import base64
 
 from ..db.models import Session
+from ..db.models import UserAutomationSettings
 from ..core.config import settings
 from ..crud import session as session_crud
 from ..crud import private_key as private_key_crud
-from .proxy_router import execute_proxy_router_operation
+from ..crud import automation as automation_crud
+from ..services import proxy_router_service
 from ..core.model_routing import model_router
+from ..core.logging_config import get_api_logger
 
-logger = logging.getLogger(__name__)
+logger = get_api_logger()
+
+async def get_automation_settings(
+    db: AsyncSession,
+    user_id: int
+) -> Optional[UserAutomationSettings]:
+    if not settings.AUTOMATION_FEATURE_ENABLED:
+        logger.info("Automation feature is disabled system-wide",
+                   user_id=user_id,
+                   event_type="automation_disabled_system_wide")
+        return None
+        
+    # Check if automation is enabled for the user in their settings
+    automation_settings = await automation_crud.get_automation_settings(db, user_id)
+    
+    # If settings don't exist yet, create them with automation enabled by default
+    if not automation_settings:
+        logger.info("No automation settings found for user - creating default settings",
+                   user_id=user_id,
+                   event_type="automation_settings_created")
+        automation_settings = await automation_crud.create_automation_settings(
+            db=db,
+            user_id=user_id,
+            is_enabled=True,  # Enable automation by default
+            session_duration=3600  # Default 1 hour session
+        )
+    # If settings exist but automation is disabled, log and return None
+    elif not automation_settings.is_enabled:
+        logger.info("Automation is explicitly disabled for user",
+                   user_id=user_id,
+                   event_type="automation_disabled_for_user")
+        return None
+    
+    return automation_settings
+
+async def get_session_for_api_key(
+    db: AsyncSession,
+    api_key_id: int,
+    user_id: int,
+    requested_model: Optional[str] = None,
+    session_duration: Optional[int] = None,
+) -> Optional[Session]:
+    session = await session_crud.get_active_session_by_api_key(db, api_key_id)
+
+    session_logger = logger.bind(api_key_id=api_key_id, requested_model=requested_model)
+    
+    if session and session.is_active and not session.is_expired:
+        session_logger.info("Found active session for API key",
+                           session_id=session.id,
+                           session_model=session.model,
+                           event_type="active_session_found")
+        if not requested_model:
+            session_logger.info("No requested model, returning existing session",
+                               session_id=session.id,
+                               event_type="existing_session_reused")
+            return session
+        requested_model_id = await model_router.get_target_model(requested_model)
+        if session.model == requested_model_id:
+            session_logger.info("Session is already using the requested model",
+                               session_id=session.id,
+                               model_id=requested_model_id,
+                               event_type="session_model_match")
+            return session
+        else:
+            session_logger.info("Session model mismatch, closing and creating new session",
+                               session_id=session.id,
+                               current_model=session.model,
+                               requested_model_id=requested_model_id,
+                               event_type="session_model_mismatch")
+            await close_session(db, session.id)
+            return await create_automated_session(db, api_key_id, user_id, requested_model, session_duration)
+    
+    # No explicit logging here - create_automated_session will log with complete details
+    return await create_automated_session(db, api_key_id, user_id, requested_model, session_duration)
 
 async def create_automated_session(
-    db: AsyncSession = None,
-    api_key_id: Optional[int] = None, 
-    user_id: Optional[int] = None,
-    requested_model: Optional[str] = None,
-    session_duration: int = 3600
-) -> Session:
+    db: AsyncSession,
+    api_key_id: int, 
+    user_id: int,
+    requested_model: str,
+    session_duration: Optional[int] = None,
+) -> Optional[Session]:
     """
     Create an automated session, deactivating any existing sessions.
     
@@ -32,163 +104,173 @@ async def create_automated_session(
         api_key_id: Optional API key ID to associate with the session
         user_id: Optional user ID to associate with the session
         requested_model: Optional model name or blockchain ID
-        session_duration: Session duration in seconds (default: 1 hour)
         
     Returns:
         Session: The created session object
     """
-    logger.info(f"[SESSION_DEBUG] Creating automated session for API key {api_key_id}, model: {requested_model}")
-    logger.info(f"[SESSION_DEBUG] Proxy router URL: {settings.PROXY_ROUTER_URL}")
-    logger.info(f"[SESSION_DEBUG] Using session duration: {session_duration}s")
+
+    if not session_duration:
+        # Check system-wide feature flag first
+        automation_settings = await get_automation_settings(db, user_id)
+
+        if not automation_settings:
+            logger.info("Automation is disabled for user",
+                       user_id=user_id,
+                       event_type="automation_disabled")
+            return None
+        
+        # Automation is enabled - create a new session
+        logger.info("Automation enabled for user - creating new session",
+                   user_id=user_id,
+                   session_duration=automation_settings.session_duration,
+                   event_type="automation_enabled")
+        
+        # Create new session with requested model
+        session_duration = automation_settings.session_duration
+    
+    create_logger = logger.bind(api_key_id=api_key_id, user_id=user_id, requested_model=requested_model)
+    create_logger.info("Creating automated session",
+                      api_key_id=api_key_id,
+                      requested_model=requested_model,
+                      session_duration=session_duration,
+                      proxy_router_url=settings.PROXY_ROUTER_URL,
+                      event_type="automated_session_creation_start")
     
     try:
         # Get the target model using the model router
-        logger.info(f"[SESSION_DEBUG] About to resolve target model from: {requested_model}")
+        create_logger.info("Resolving target model",
+                          requested_model=requested_model,
+                          event_type="model_resolution_start")
         target_model = await model_router.get_target_model(requested_model)
-        logger.info(f"[SESSION_DEBUG] Resolved target model: {target_model}")
+        create_logger.info("Target model resolved successfully",
+                          target_model=target_model,
+                          requested_model=requested_model,
+                          event_type="model_resolved")
         
-        # If api_key_id provided and db is available, deactivate any existing sessions
-        if api_key_id and db:
-            logger.info(f"[SESSION_DEBUG] Deactivating existing sessions for API key: {api_key_id}")
-            await session_crud.deactivate_existing_sessions(db, api_key_id)
-            logger.info("[SESSION_DEBUG] Existing sessions deactivated successfully")
-        else:
-            logger.warning(f"[SESSION_DEBUG] Cannot deactivate existing sessions - api_key_id: {'present' if api_key_id else 'missing'}, db: {'present' if db else 'missing'}")
+        create_logger.info("Deactivating existing sessions for API key",
+                          api_key_id=api_key_id,
+                          event_type="existing_sessions_deactivation_start")
+        await session_crud.deactivate_existing_sessions(db, api_key_id)
+        create_logger.info("Existing sessions deactivated successfully",
+                          event_type="existing_sessions_deactivated")
         
         # Get user's private key
-        if db and user_id:
-            logger.info(f"[SESSION_DEBUG] Getting private key for user {user_id}")
-            private_key, using_fallback = await private_key_crud.get_private_key_with_fallback(db, user_id)
+        create_logger.info("Getting private key for user",
+                          user_id=user_id,
+                          event_type="private_key_lookup_start")
+        private_key, using_fallback = await private_key_crud.get_private_key_with_fallback(db, user_id)
+        
+        if not private_key:
+            create_logger.error("No private key found and no fallback key configured",
+                               user_id=user_id,
+                               event_type="private_key_not_available")
+            raise ValueError("No private key found and no fallback key configured")
+        
+        create_logger.info("Found private key for session creation",
+                          user_id=user_id,
+                          using_fallback=using_fallback,
+                          event_type="private_key_found")
+        
+        # Prepare session data
+        session_data = {
+            "sessionDuration": session_duration,
+            "failover": False,
+            "directPayment": False
+        }
+        create_logger.debug("Session data prepared",
+                           session_data=session_data,
+                           event_type="session_data_prepared")
+        
+        try:
+            # Create session with proxy router using the model session endpoint
+            create_logger.info("Calling proxy router to create session",
+                              target_model=target_model,
+                              endpoint=f"blockchain/models/{target_model}/session",
+                              event_type="proxy_session_creation_start")
             
-            if not private_key:
-                logger.error("[SESSION_DEBUG] No private key found and no fallback key configured")
-                raise ValueError("No private key found and no fallback key configured")
+            # CRITICAL FIX: Ensure we're using the blockchain ID, not the model name
+            # The proxy router expects hex blockchain IDs, not model names
+            if not target_model.startswith("0x"):
+                create_logger.error("CRITICAL ERROR: target_model is not a blockchain ID",
+                                   target_model=target_model,
+                                   expected_format="0x...",
+                                   event_type="invalid_blockchain_id_format")
+                raise ValueError(f"Invalid blockchain ID format: {target_model}. Expected hex string starting with '0x'")
             
-            logger.info(f"[SESSION_DEBUG] Found private key (using fallback: {using_fallback})")
+            create_logger.debug("Using valid blockchain ID",
+                               blockchain_id=target_model,
+                               event_type="blockchain_id_validated")
             
-            # Prepare session data
-            session_data = {
-                "sessionDuration": session_duration,
-                "failover": False,
-                "directPayment": False
-            }
-            logger.info(f"[SESSION_DEBUG] Session data: {json.dumps(session_data)}")
+            response = await proxy_router_service.openSession(
+                target_model=target_model,
+                session_duration=session_duration,
+                user_id=user_id,
+                db=db,
+                failover=False,
+                direct_payment=False
+            )
             
-            # Add private key to headers
-            headers = {
-                "X-Private-Key": private_key,
-                "Content-Type": "application/json"
-            }
-            logger.info(f"[SESSION_DEBUG] Request headers prepared: {json.dumps({k: v for k, v in headers.items() if k != 'X-Private-Key'})}")
+            create_logger.info("Proxy router response received",
+                              response_data=response,
+                              event_type="proxy_session_response")
             
-            try:
-                # Create session with proxy router using the model session endpoint
-                logger.info(f"[SESSION_DEBUG] Calling proxy router at: blockchain/models/{target_model}/session")
-                
-                # CRITICAL FIX: Ensure we're using the blockchain ID, not the model name
-                # The proxy router expects hex blockchain IDs, not model names
-                if not target_model.startswith("0x"):
-                    logger.error(f"[SESSION_DEBUG] CRITICAL ERROR: target_model is not a blockchain ID: {target_model}")
-                    logger.error(f"[SESSION_DEBUG] This will cause hex decoding errors in the proxy router")
-                    raise ValueError(f"Invalid blockchain ID format: {target_model}. Expected hex string starting with '0x'")
-                
-                logger.info(f"[SESSION_DEBUG] Using blockchain ID: {target_model}")
-                
-                response = await execute_proxy_router_operation(
-                    "POST",
-                    f"blockchain/models/{target_model}/session",
-                    headers=headers,
-                    json_data=session_data,
-                    max_retries=3
-                )
-                
-                logger.info(f"[SESSION_DEBUG] Proxy router response: {json.dumps(response) if response else 'None'}")
-                
-                # Extract session ID from response
-                blockchain_session_id = None
-                
-                if isinstance(response, dict):
-                    blockchain_session_id = (response.get("sessionID") or 
-                                         response.get("session", {}).get("id") or 
-                                         response.get("id"))
-                
-                if not blockchain_session_id:
-                    logger.error(f"[SESSION_DEBUG] No session ID found in proxy router response: {json.dumps(response)}")
-                    raise ValueError("No session ID found in proxy router response")
-                
-                logger.info(f"[SESSION_DEBUG] Extracted blockchain session ID: {blockchain_session_id}")
-                
-                # Store session in database
-                expiry_time_with_tz = datetime.now(timezone.utc) + timedelta(seconds=session_duration)
-                # Convert to naive datetime for DB compatibility
-                expiry_time = expiry_time_with_tz.replace(tzinfo=None)
-                logger.info(f"[SESSION_DEBUG] Storing session in database with expiry: {expiry_time}")
-                
-                session = await session_crud.create_session(
-                    db=db,
-                    session_id=blockchain_session_id,
-                    api_key_id=api_key_id,
-                    user_id=user_id,
-                    model=target_model,
-                    session_type="automated",
-                    expires_at=expiry_time
-                )
-                
-                logger.info(f"[SESSION_DEBUG] Successfully created automated session {blockchain_session_id} with DB ID {session.id if session else 'None'}")
-                return session
-                
-            except Exception as e:
-                logger.error(f"[SESSION_DEBUG] Error creating session with proxy router: {e}")
-                logger.exception(e)  # Log full stack trace
-                
-                # Try to diagnose proxy router connectivity
-                try:
-                    logger.info("[SESSION_DEBUG] Attempting direct connection to proxy router")
-                    
-                    # Define auth headers for raw request
-                    auth_str = f"{settings.PROXY_ROUTER_USERNAME}:{settings.PROXY_ROUTER_PASSWORD}"
-                    auth_b64 = base64.b64encode(auth_str.encode('ascii')).decode('ascii')
-                    
-                    raw_headers = {
-                        "Authorization": f"Basic {auth_b64}",
-                        "Content-Type": "application/json"
-                    }
-                    
-                    # Make a direct health check request to diagnose connection issues
-                    async with httpx.AsyncClient() as client:
-                        try:
-                            health_url = f"{settings.PROXY_ROUTER_URL}/healthcheck"
-                            logger.info(f"[SESSION_DEBUG] Testing direct connection to proxy health endpoint: {health_url}")
-                            health_response = await client.get(health_url, headers=raw_headers, timeout=5.0)
-                            logger.info(f"[SESSION_DEBUG] Health check response: Status {health_response.status_code}, Body: {health_response.text[:200]}")
-                        except Exception as health_err:
-                            logger.error(f"[SESSION_DEBUG] Health check failed: {health_err}")
-                        
-                        # Try to get available models
-                        try:
-                            models_url = f"{settings.PROXY_ROUTER_URL}/v1/models"
-                            logger.info(f"[SESSION_DEBUG] Testing available models: {models_url}")
-                            models_response = await client.get(models_url, headers=raw_headers, timeout=5.0)
-                            logger.info(f"[SESSION_DEBUG] Models API response: Status {models_response.status_code}, Body: {models_response.text[:200]}")
-                        except Exception as models_err:
-                            logger.error(f"[SESSION_DEBUG] Models check failed: {models_err}")
-                except Exception as diag_err:
-                    logger.error(f"[SESSION_DEBUG] Diagnostic connection test failed: {diag_err}")
-                
-                raise
-        else:
-            missing_items = []
-            if not db:
-                missing_items.append("db")
-            if not user_id:
-                missing_items.append("user_id")
+            # Extract session ID from response
+            blockchain_session_id = response.get("sessionID")
             
-            error_msg = f"Database session and user ID are required to create an automated session. Missing: {', '.join(missing_items)}"
-            logger.error(f"[SESSION_DEBUG] {error_msg}")
-            raise ValueError(error_msg)
+            if not blockchain_session_id:
+                create_logger.error("No session ID found in proxy router response",
+                                   response_data=response,
+                                   event_type="session_id_missing_in_response")
+                raise ValueError("No session ID found in proxy router response")
+            
+            create_logger.info("Extracted blockchain session ID",
+                              blockchain_session_id=blockchain_session_id,
+                              event_type="session_id_extracted")
+            
+            # Store session in database
+            expiry_time_with_tz = datetime.now(timezone.utc) + timedelta(seconds=session_duration)
+            # Convert to naive datetime for DB compatibility
+            expiry_time = expiry_time_with_tz.replace(tzinfo=None)
+            create_logger.info("Storing session in database",
+                              session_id=blockchain_session_id,
+                              expiry_time=expiry_time.isoformat(),
+                              event_type="session_db_storage_start")
+            
+            session = await session_crud.create_session(
+                db=db,
+                session_id=blockchain_session_id,
+                api_key_id=api_key_id,
+                user_id=user_id,
+                model=target_model,
+                session_type="automated",
+                expires_at=expiry_time
+            )
+            
+            create_logger.info("Successfully created automated session",
+                              blockchain_session_id=blockchain_session_id,
+                              db_session_id=session.id if session else None,
+                              target_model=target_model,
+                              event_type="automated_session_created")
+            return session
+            
+        except proxy_router_service.ProxyRouterServiceError as e:
+            create_logger.error("Error creating session with proxy router",
+                               error=str(e),
+                               error_type=e.error_type,
+                               status_code=e.status_code,
+                               target_model=target_model,
+                               event_type="proxy_session_creation_error",
+                               exc_info=True)
+            raise
+        
     except Exception as e:
-        logger.error(f"[SESSION_DEBUG] Fatal error creating automated session: {e}")
-        logger.exception(e)  # Log full stack trace
+        create_logger.error("Fatal error creating automated session",
+                           error=str(e),
+                           api_key_id=api_key_id,
+                           user_id=user_id,
+                           requested_model=requested_model,
+                           event_type="automated_session_fatal_error",
+                           exc_info=True)
         raise
 
 async def close_session(
@@ -205,96 +287,75 @@ async def close_session(
     Returns:
         bool: True if session was closed successfully, False otherwise
     """
+    close_logger = logger.bind(session_id=session_id)
     try:
         # Get session from database
-        session = await session_crud.get_session(db, session_id)
+        session = await session_crud.get_session_by_id(db, session_id)
         if not session:
-            logger.warning(f"Session {session_id} not found in database")
+            close_logger.warning("Session not found in database",
+                               session_id=session_id,
+                               event_type="session_not_found_for_close")
             return False
             
         proxy_success = False
         try:
-            # Use the correct POST endpoint for closing sessions
-            # No need to manually set auth headers, execute_proxy_router_operation handles it
-            response = await execute_proxy_router_operation(
-                "POST",
-                f"blockchain/sessions/{session_id}/close",
-                max_retries=3
-            )
-            logger.info(f"Successfully closed session {session_id} at proxy level")
+            # Use the proxy router service to close the session
+            response = await proxy_router_service.closeSession(session_id)
+            close_logger.info("Successfully closed session at proxy level",
+                             session_id=session_id,
+                             event_type="proxy_session_closed")
             proxy_success = True
-        except ValueError as proxy_error:
-            # Check if this is a 404 error (session doesn't exist at proxy)
-            if "404 Not Found" in str(proxy_error):
-                logger.info(f"Session {session_id} not found at proxy level, considering already closed")
-                proxy_success = True
-            else:
-                # Log other errors but don't mark success
-                logger.error(f"Error closing session at proxy level: {proxy_error}")
-                # Try to verify session status at proxy
-                try:
-                    status = await check_proxy_session_status(session_id)
-                    if status.get("closed", False):
-                        logger.info(f"Session {session_id} verified as closed despite error")
-                        proxy_success = True
-                except Exception as verify_error:
-                    logger.error(f"Failed to verify session status: {verify_error}")
+        except proxy_router_service.ProxyRouterServiceError as proxy_error:
+            # Log other errors but don't mark success
+            close_logger.error("Error closing session at proxy level",
+                              session_id=session_id,
+                              error=str(proxy_error),
+                              error_type=proxy_error.error_type,
+                              event_type="proxy_session_close_error")
+            # Try to verify session status at proxy
+            try:
+                status = await check_proxy_session_status(session_id)
+                if status.get("closed", False):
+                    close_logger.info("Session verified as closed despite error",
+                                     session_id=session_id,
+                                     event_type="session_verified_closed")
+                    proxy_success = True
+            except Exception as verify_error:
+                close_logger.error("Failed to verify session status",
+                                   session_id=session_id,
+                                   error=str(verify_error),
+                                   event_type="session_status_verification_error")
         
         # Only mark session as inactive if proxy closure was successful
-        if proxy_success:
+        if proxy_success or session.is_expired:
             await session_crud.mark_session_inactive(db, session_id)
-            logger.info(f"Successfully marked session {session_id} as inactive in database")
+            close_logger.info("Successfully marked session as inactive in database",
+                             session_id=session_id,
+                             event_type="session_marked_inactive")
             return True
-        else:
-            # If proxy failed but session is expired, still mark inactive in DB
-            if session.is_expired:
-                logger.warning(f"Session {session_id} is expired, marking inactive despite proxy failure")
-                await session_crud.mark_session_inactive(db, session_id)
-                return True
-            else:
-                # If proxy failed and session isn't expired, don't update DB to maintain consistency
-                logger.warning(f"Not marking session {session_id} as inactive in DB due to proxy failure")
-                return False
+        close_logger.warning("Not marking session as inactive in DB due to proxy failure",
+                            session_id=session_id,
+                            event_type="session_not_marked_inactive")
+        return False
     
     except Exception as e:
-        logger.error(f"Error closing session {session_id}: {e}")
+        close_logger.error("Error getting session for closure",
+                          session_id=session_id,
+                          error=str(e),
+                          event_type="session_close_error")
         try:
             # On critical errors, still try to mark the session inactive
             await session_crud.mark_session_inactive(db, session_id)
-            logger.warning(f"Marked session {session_id} inactive despite error: {e}")
+            close_logger.warning("Marked session inactive despite error",
+                                session_id=session_id,
+                                error=str(e),
+                                event_type="session_marked_inactive_despite_error")
         except Exception as inner_e:
-            logger.error(f"Failed to mark session {session_id} as inactive: {inner_e}")
+            close_logger.error("Failed to mark session as inactive",
+                              session_id=session_id,
+                              error=str(inner_e),
+                              event_type="session_mark_inactive_failed")
         return False
-
-async def get_or_create_session(
-    db: AsyncSession,
-    api_key_id: int,
-    requested_model: Optional[str] = None
-) -> Session:
-    """
-    Get an existing active session or create a new one.
-    
-    Args:
-        db: Database session
-        api_key_id: API key ID to get/create session for
-        requested_model: Optional model name or blockchain ID
-        
-    Returns:
-        Session: The active session
-    """
-    # Try to get existing active session
-    existing_session = await session_crud.get_active_session_by_api_key(db, api_key_id)
-    
-    # If session exists, is active, and not expired, return it
-    if existing_session and not existing_session.is_expired:
-        return existing_session
-        
-    # Otherwise create a new session
-    return await create_automated_session(
-        db=db,
-        api_key_id=api_key_id,
-        requested_model=requested_model
-    )
 
 async def check_proxy_session_status(session_id: str) -> Dict[str, Any]:
     """
@@ -307,14 +368,12 @@ async def check_proxy_session_status(session_id: str) -> Dict[str, Any]:
         Dict with session status information, including 'closed' boolean
     """
     try:
-        response = await execute_proxy_router_operation(
-            "GET",
-            f"blockchain/sessions/{session_id}",
-            max_retries=2
-        )
+        response = await proxy_router_service.getSessionStatus(session_id)
         
         if response and isinstance(response, dict):
-            # Check if session is closed based on ClosedAt field
+            if "BidID" in response and response["BidID"] == "0x0000000000000000000000000000000000000000000000000000000000000000":
+                return {"exists": False, "closed": True, "data": None}
+
             closed = False
             if "ClosedAt" in response and response["ClosedAt"] > 0:
                 closed = True
@@ -325,12 +384,18 @@ async def check_proxy_session_status(session_id: str) -> Dict[str, Any]:
                 "data": response
             }
         else:
+            status_logger = logger.bind(session_id=session_id)
+            status_logger.error("Invalid response from proxy router",
+                              session_id=session_id,
+                              response=response,
+                              event_type="invalid_proxy_response")
             return {"exists": False, "closed": True, "data": None}
-    except Exception as e:
-        if "404 Not Found" in str(e):
-            # Session doesn't exist in proxy router
-            return {"exists": False, "closed": True, "data": None}
-        logger.error(f"Error checking session status for {session_id}: {e}")
+    except proxy_router_service.ProxyRouterServiceError as e:
+        status_logger.error("Error checking session status",
+                           session_id=session_id,
+                           error=str(e),
+                           error_type=e.error_type,
+                           event_type="session_status_check_error")
         return {"exists": False, "closed": False, "error": str(e)}
 
 async def verify_session_status(db: AsyncSession, session_id: str) -> bool:
@@ -345,9 +410,12 @@ async def verify_session_status(db: AsyncSession, session_id: str) -> bool:
         bool: True if session is valid and active, False otherwise
     """
     # Check database status
-    session = await session_crud.get_session(db, session_id)
+    session = await session_crud.get_session_by_id(db, session_id)
     if not session or not session.is_active or session.is_expired:
-        logger.info(f"Session {session_id} is invalid in database")
+        verify_logger = logger.bind(session_id=session_id)
+        verify_logger.info("Session is invalid in database",
+                          session_id=session_id,
+                          event_type="session_invalid_in_database")
         return False
         
     # Check proxy router status
@@ -361,7 +429,9 @@ async def synchronize_sessions(db: AsyncSession):
     Args:
         db: Database session
     """
-    logger.info("Starting session synchronization")
+    sync_logger = logger.bind(component="session_synchronization")
+    sync_logger.info("Starting session synchronization",
+                    event_type="session_sync_start")
     
     # Get all sessions marked as active in database
     active_sessions = await session_crud.get_all_active_sessions(db)
@@ -373,80 +443,13 @@ async def synchronize_sessions(db: AsyncSession):
             
             # Session doesn't exist or is closed in proxy router
             if not proxy_status.get("exists", False) or proxy_status.get("closed", True):
-                logger.info(f"Session {session.id} is closed in proxy but active in DB, synchronizing")
+                sync_logger.info("Session is closed in proxy but active in DB, synchronizing",
+                                session_id=session.id,
+                                event_type="session_sync_inconsistency")
                 await session_crud.mark_session_inactive(db, session.id)
         except Exception as e:
-            logger.error(f"Error checking session {session.id} in proxy: {e}")
+            sync_logger.error("Error checking session in proxy",
+                             session_id=session.id,
+                             error=str(e),
+                             event_type="session_proxy_check_error")
             # Don't automatically mark as inactive on error
-
-async def switch_model(
-    db: AsyncSession, 
-    api_key_id: int, 
-    user_id: int,
-    new_model: str
-) -> Session:
-    """
-    Safely switch from one model to another by ensuring clean session closure.
-    
-    Args:
-        db: Database session
-        api_key_id: API key ID associated with the session
-        user_id: User ID associated with the session
-        new_model: ID or name of the model to switch to
-        
-    Returns:
-        Session: The newly created session object
-    """
-    logger.info(f"Switching to model {new_model} for API key {api_key_id}")
-    
-    # Get current active session
-    current_session = await session_crud.get_active_session_by_api_key(db, api_key_id)
-    
-    # Convert the new model to its ID form for comparison
-    try:
-        new_model_id = await model_router.get_target_model(new_model)
-        logger.info(f"Resolved new model '{new_model}' to ID: {new_model_id}")
-    except Exception as e:
-        logger.error(f"Error resolving new model '{new_model}' to ID: {e}")
-        logger.exception(e)
-        # If we can't resolve the model ID, just use the original string
-        new_model_id = new_model
-    
-    # Check if we actually need to switch models
-    if current_session:
-        current_model_id = current_session.model
-        logger.info(f"Current session model ID: {current_model_id}")
-        
-        # If models are the same, just return the current session
-        if current_model_id == new_model_id:
-            logger.info(f"Current model ID ({current_model_id}) matches requested model ID ({new_model_id}), no switch needed")
-            return current_session
-        
-        # Models are different, close current session
-        logger.info(f"Models are different. Current: {current_model_id}, Requested: {new_model_id}")
-        logger.info(f"Found existing session {current_session.id}, closing before switching models")
-        # Try closing up to 3 times
-        for attempt in range(3):
-            success = await close_session(db, current_session.id)
-            if success:
-                logger.info(f"Successfully closed session {current_session.id} on attempt {attempt+1}")
-                break
-            logger.warning(f"Failed to close session on attempt {attempt+1}, retrying...")
-            await asyncio.sleep(1)  # Wait before retry
-        
-        # Verify closure with proxy router
-        proxy_status = await check_proxy_session_status(current_session.id)
-        if not proxy_status.get("closed", False) and proxy_status.get("exists", False):
-            logger.error(f"Failed to close session {current_session.id} in proxy after multiple attempts")
-            # Force mark as inactive in DB to prevent orphaned sessions
-            await session_crud.mark_session_inactive(db, current_session.id)
-    else:
-        logger.info(f"No active session found for API key {api_key_id}")
-    
-    # Create new session
-    return await create_automated_session(
-        db=db,
-        api_key_id=api_key_id,
-        user_id=user_id,
-        requested_model=new_model
-    ) 

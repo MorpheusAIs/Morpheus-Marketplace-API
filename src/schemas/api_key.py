@@ -25,6 +25,9 @@ class APIKeyDB(BaseModel):
     name: Optional[str] = None
     created_at: datetime
     is_active: bool
+    is_default: bool = False
+    encrypted_key: Optional[str] = None  # For internal use only (not exposed to frontend)
+    encryption_version: int = 1
 
     # Configure Pydantic to work with SQLAlchemy
     model_config = ConfigDict(from_attributes=True) 

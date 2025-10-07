@@ -171,6 +171,73 @@ JWT_SECRET_KEY=generate_this_with_openssl_rand_-hex_32
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 REFRESH_TOKEN_EXPIRE_DAYS=7
 
+# Logging
+LOG_LEVEL=INFO                        # Master log level: DEBUG, INFO, WARNING, ERROR (controls all components)
+LOG_JSON=true                         # Enable JSON structured logging (recommended for production)
+LOG_IS_PROD=false                     # Production mode logging (affects performance)
+
+# Example: Enable verbose logging for specific components during development
+# LOG_LEVEL_PROXY=DEBUG        # Debug session creation/proxy communication
+# LOG_LEVEL_MODELS=DEBUG       # Debug model fetching and caching
+# LOG_LEVEL_AUTH=WARN          # Reduce auth noise to warnings only
+# LOG_LEVEL_API=DEBUG          # Debug chat completion and API endpoints
+# LOG_LEVEL_CORE=WARN          # Reduce infrastructure noise
+
+### **📊 Log Format**
+
+**JSON Format (LOG_JSON=true):**
+```json
+ {
+   "component": "MODELS", 
+   "cache_expires_in_seconds": 295.20263, 
+   "event_type": "cache_hit", 
+   "event": "Using cached model data",
+   "level": "debug", 
+   "timestamp": "2025-10-01T10:04:58.493721Z", 
+   "logger": "DEBUG", 
+   "caller": "direct_model_service.py:107"
+}
+```
+
+**Console Format (LOG_JSON=false):**
+```
+2025-10-01T09:35:58.366411Z [debug] Using cached model data        [DEBUG] cache_expires_in_seconds=269.904167 component=MODELS event_type=cache_hit
+```
+
+### **🚀 Production Recommendations**
+
+```bash
+# Production settings
+LOG_LEVEL=INFO               # Master control
+LOG_JSON=true
+LOG_IS_PROD=true
+
+# Reduce noise from infrastructure
+LOG_LEVEL_CORE=WARN          # Reduce HTTP/FastAPI noise
+LOG_LEVEL_AUTH=WARN          # Only auth errors
+
+# Monitor critical business logic
+LOG_LEVEL_PROXY=INFO         # Monitor proxy communication
+LOG_LEVEL_API=INFO           # Monitor API endpoints
+LOG_LEVEL_MODELS=INFO        # Monitor model service
+LOG_LEVEL_DATABASE=ERROR     # Only database errors
+```
+
+### **🛠️ Development/Debugging**
+
+```bash
+# Development settings
+LOG_LEVEL=DEBUG              # Master control
+LOG_JSON=false
+LOG_IS_PROD=false
+
+# Debug specific functional areas
+LOG_LEVEL_PROXY=DEBUG        # Verbose session/proxy debugging
+LOG_LEVEL_MODELS=DEBUG       # Model fetching and caching
+LOG_LEVEL_API=DEBUG          # Chat completion and API flow
+LOG_LEVEL_CORE=WARN          # Reduce infrastructure noise
+```
+
 # AWS KMS (for production)
 KMS_PROVIDER=aws
 KMS_MASTER_KEY_ID=your_kms_key_id_or_arn

@@ -6,13 +6,13 @@ Only active when BYPASS_COGNITO_AUTH=true and LOCAL_TESTING_MODE=true.
 """
 
 import os
-import logging
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.db.models import User
 from src.crud import user as user_crud
+from src.core.logging_config import get_core_logger
 
-logger = logging.getLogger(__name__)
+logger = get_core_logger()
 
 def is_local_testing_mode() -> bool:
     """Check if we're in local testing mode."""
@@ -40,16 +40,24 @@ async def get_or_create_test_user(db: AsyncSession) -> User:
             'name': 'Local Test User'
         }
         test_user = await user_crud.create_user_from_cognito(db, user_data)
-        logger.info("✅ Created test user for local development")
+        logger.info("Created test user for local development",
+                   test_user_id=test_user.id,
+                   test_email=user_data['email'],
+                   event_type="test_user_created")
     
     return test_user
 
 def log_local_testing_status():
     """Log the current local testing configuration."""
     if is_local_testing_mode():
-        logger.warning("🧪 LOCAL TESTING MODE ACTIVE")
-        logger.warning("🔓 Cognito authentication BYPASSED")
-        logger.warning("👤 Using test user: test@local.dev")
-        logger.warning("⚠️  NOT FOR PRODUCTION USE")
+        logger.warning("LOCAL TESTING MODE ACTIVE",
+                      bypass_cognito=True,
+                      test_user_email="test@local.dev",
+                      production_safe=False,
+                      event_type="local_testing_active")
+        logger.warning("Cognito authentication BYPASSED - NOT FOR PRODUCTION USE",
+                      event_type="local_testing_warning")
     else:
-        logger.info("🔒 Production authentication mode active")
+        logger.info("Production authentication mode active",
+                   local_testing_enabled=False,
+                   event_type="production_auth_active")

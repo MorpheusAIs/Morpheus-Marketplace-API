@@ -1,5 +1,4 @@
 import json
-import logging
 import re
 from typing import Optional, Dict, Tuple
 from datetime import datetime
@@ -10,9 +9,10 @@ from ..db.models import UserPrivateKey
 from ..core.key_vault import key_vault
 from ..core.config import settings
 from ..schemas import private_key as schemas
+from ..core.logging_config import get_auth_logger
 
 # Setup logging
-logger = logging.getLogger(__name__)
+logger = get_auth_logger()
 
 
 def sanitize_private_key(private_key: str) -> str:
@@ -37,17 +37,25 @@ def sanitize_private_key(private_key: str) -> str:
         
     # Ensure it's a valid hex string
     if not all(c in "0123456789abcdefABCDEF" for c in private_key):
-        logger.warning("Private key contains non-hex characters")
+        logger.warning("Private key contains non-hex characters",
+                      original_length=len(private_key),
+                      event_type="private_key_invalid_chars")
         # Filter out non-hex characters
         private_key = ''.join(c for c in private_key if c in "0123456789abcdefABCDEF")
     
     # Ethereum private keys should be 64 characters (32 bytes) in hex
     if len(private_key) < 64:
-        logger.warning(f"Private key is too short ({len(private_key)} chars), padding with zeros")
+        logger.warning("Private key is too short, padding with zeros",
+                      current_length=len(private_key),
+                      expected_length=64,
+                      event_type="private_key_too_short")
         # Pad with leading zeros if too short
         private_key = private_key.zfill(64)
     elif len(private_key) > 64:
-        logger.warning(f"Private key is too long ({len(private_key)} chars), truncating to 64 chars")
+        logger.warning("Private key is too long, truncating to 64 chars",
+                      current_length=len(private_key),
+                      expected_length=64,
+                      event_type="private_key_too_long")
         # Truncate if too long
         private_key = private_key[:64]
         
@@ -89,6 +97,9 @@ async def create_user_private_key(
     # Check if user already has a private key
     existing_key = await get_user_private_key(db, user_id)
     if existing_key:
+        logger.info("Replacing existing private key for user",
+                   user_id=user_id,
+                   event_type="private_key_replacement")
         # Delete existing key before creating a new one
         await db.delete(existing_key)
         await db.commit()
@@ -111,6 +122,11 @@ async def create_user_private_key(
     await db.commit()
     await db.refresh(db_private_key)
     
+    logger.info("Private key created and encrypted successfully",
+               user_id=user_id,
+               encryption_provider=metadata.get('provider', 'unknown'),
+               event_type="private_key_created")
+    
     return db_private_key
 
 
@@ -127,10 +143,20 @@ async def delete_user_private_key(db: AsyncSession, user_id: int) -> bool:
     """
     db_private_key = await get_user_private_key(db, user_id)
     if not db_private_key:
+        logger.info("No private key found to delete",
+                   user_id=user_id,
+                   event_type="private_key_not_found_for_deletion")
         return False
     
+    logger.info("Deleting private key for user",
+               user_id=user_id,
+               event_type="private_key_deletion")
     await db.delete(db_private_key)
     await db.commit()
+    
+    logger.info("Private key deleted successfully",
+               user_id=user_id,
+               event_type="private_key_deleted")
     return True
 
 
@@ -156,10 +182,16 @@ async def get_decrypted_private_key(db: AsyncSession, user_id: int) -> Optional[
             db_private_key.encryption_metadata
         )
         # Sanitize the private key to ensure it's in the correct format
-        return sanitize_private_key(decrypted_key)
+        sanitized_key = sanitize_private_key(decrypted_key)
+        logger.debug("Private key decrypted and sanitized successfully",
+                    user_id=user_id,
+                    event_type="private_key_decrypted")
+        return sanitized_key
     except Exception as e:
-        # Log the error (in a real application)
-        logger.error(f"Error decrypting private key: {e}")
+        logger.error("Error decrypting private key",
+                    user_id=user_id,
+                    error=str(e),
+                    event_type="private_key_decryption_error")
         return None
 
 
@@ -181,13 +213,37 @@ async def get_private_key_with_fallback(db: AsyncSession, user_id: int) -> Tuple
     
     # If user private key exists, return it
     if user_private_key:
+        logger.debug("Using user's private key",
+                    user_id=user_id,
+                    event_type="user_private_key_used")
         return user_private_key, False
     
     # Otherwise, use the fallback key
     if settings.FALLBACK_PRIVATE_KEY:
-        logger.warning(f"Private key not set for user {user_id}, using fallback key (FOR DEBUGGING ONLY)")
+        logger.warning("Private key not set for user, using fallback key (FOR DEBUGGING ONLY)",
+                      user_id=user_id,
+                      fallback_available=True,
+                      event_type="fallback_private_key_used")
         # Sanitize the fallback key to ensure it's in the correct format
         return sanitize_private_key(settings.FALLBACK_PRIVATE_KEY), True
     
     # No private key and no fallback
-    return None, True 
+    logger.error("No private key available for user and no fallback configured",
+                user_id=user_id,
+                event_type="no_private_key_available")
+    return None, True
+
+
+async def user_has_private_key(db: AsyncSession, user_id: int) -> bool:
+    """
+    Check if a user has a private key stored.
+    
+    Args:
+        db: Database session
+        user_id: ID of the user
+        
+    Returns:
+        True if user has a private key, False otherwise
+    """
+    db_private_key = await get_user_private_key(db, user_id)
+    return db_private_key is not None 

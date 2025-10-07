@@ -36,9 +36,19 @@ services:
       # Local database
       DATABASE_URL: postgresql+asyncpg://morpheus_local:local_dev_password@db-local:5432/morpheus_local_db
       
-      # Bypass Cognito for local testing
-      BYPASS_COGNITO_AUTH: "true"
-      LOCAL_TESTING_MODE: "true"
+      # Bypass Cognito for local testing (controlled by .env.local)
+      BYPASS_COGNITO_AUTH: ${BYPASS_COGNITO_AUTH:-false}
+      LOCAL_TESTING_MODE: ${LOCAL_TESTING_MODE:-false}
+
+      # Cognito authentication (ensure these are passed from .env.local)
+      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID}
+      COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID}
+      COGNITO_REGION: ${COGNITO_REGION}
+      COGNITO_DOMAIN: ${COGNITO_DOMAIN}
+
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+      LOG_JSON: ${LOG_JSON:-false}
+      LOG_IS_PROD: ${LOG_IS_PROD:-false}
       
       # Model service
       ACTIVE_MODELS_URL: ${ACTIVE_MODELS_URL:-https://active.dev.mor.org/active_models.json}
@@ -46,6 +56,8 @@ services:
       
       # Proxy router (can use dev or mock)
       PROXY_ROUTER_URL: ${PROXY_ROUTER_URL:-http://router.dev.mor.org:8082}
+      PROXY_ROUTER_USERNAME: admin
+      PROXY_ROUTER_PASSWORD: admin
       
       # JWT settings (local values)
       JWT_SECRET_KEY: local-testing-secret-key-not-for-production

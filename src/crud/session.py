@@ -21,6 +21,7 @@ async def get_active_session_by_api_key(
     result = await db.execute(
         select(Session)
         .where(Session.api_key_id == api_key_id, Session.is_active == True)
+        .order_by(Session.created_at.desc())
     )
     return result.scalars().first()
 
@@ -72,21 +73,6 @@ async def get_session_by_id(db: AsyncSession, session_id: str) -> Optional[Sessi
     """
     result = await db.execute(select(Session).where(Session.id == session_id))
     return result.scalars().first()
-
-async def get_session(
-    db: AsyncSession, session_id: str
-) -> Optional[Session]:
-    """
-    Get a session by ID.
-    
-    Args:
-        db: Database session
-        session_id: Session ID
-        
-    Returns:
-        Session object if found, None otherwise
-    """
-    return await get_session_by_id(db, session_id)
 
 async def create_session(
     db: AsyncSession,
@@ -160,25 +146,6 @@ async def mark_session_inactive(
         await db.refresh(session)
     
     return session
-
-async def get_session_by_api_key_id(
-    db: AsyncSession, api_key_id: int
-) -> Optional[Session]:
-    """
-    Get an active session associated with an API key ID.
-    
-    Args:
-        db: Database session
-        api_key_id: API key ID
-        
-    Returns:
-        Session object if found, None otherwise
-    """
-    result = await db.execute(
-        select(Session)
-        .where(Session.api_key_id == api_key_id, Session.is_active == True)
-    )
-    return result.scalars().first()
 
 async def delete_all_user_sessions(db: AsyncSession, user_id: int) -> int:
     """
