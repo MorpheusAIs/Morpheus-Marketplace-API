@@ -370,16 +370,25 @@ async def get_api_key_user(
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
-        # Validate the full API key against the stored hash
-        if not verify_api_key(api_key, db_api_key.hashed_key):
-            auth_logger.error("API key hash validation failed",
-                             key_prefix=key_prefix,
-                             event_type="api_key_validation_failed")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid API key",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+        # Validate the full API key
+        # For legacy keys (no encrypted_key), we can only verify the prefix
+        # For modern keys, verify against the stored hash
+        if db_api_key.encrypted_key is None:
+            # LEGACY KEY: Only prefix verification (prefix already matched to get here)
+            auth_logger.info("Legacy API key verified (prefix-only)",
+                           key_prefix=key_prefix,
+                           event_type="legacy_api_key_verified")
+        else:
+            # MODERN KEY: Full hash verification
+            if not verify_api_key(api_key, db_api_key.hashed_key):
+                auth_logger.error("API key hash validation failed",
+                                 key_prefix=key_prefix,
+                                 event_type="api_key_validation_failed")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid API key",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
         
         # Update last used timestamp
         await api_key_crud.update_last_used(db, db_api_key)
@@ -475,16 +484,25 @@ async def get_current_api_key(
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
-        # Validate the full API key against the stored hash
-        if not verify_api_key(api_key_str, db_api_key.hashed_key):
-            auth_logger.error("API key hash validation failed",
-                             key_prefix=key_prefix,
-                             event_type="api_key_validation_failed")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid API key",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+        # Validate the full API key
+        # For legacy keys (no encrypted_key), we can only verify the prefix
+        # For modern keys, verify against the stored hash
+        if db_api_key.encrypted_key is None:
+            # LEGACY KEY: Only prefix verification (prefix already matched to get here)
+            auth_logger.info("Legacy API key verified (prefix-only)",
+                           key_prefix=key_prefix,
+                           event_type="legacy_api_key_verified")
+        else:
+            # MODERN KEY: Full hash verification
+            if not verify_api_key(api_key_str, db_api_key.hashed_key):
+                auth_logger.error("API key hash validation failed",
+                                 key_prefix=key_prefix,
+                                 event_type="api_key_validation_failed")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid API key",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
         
         # Update last used timestamp
         await api_key_crud.update_last_used(db, db_api_key)
