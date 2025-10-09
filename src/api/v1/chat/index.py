@@ -154,7 +154,7 @@ async def create_chat_completion(
                            api_key_id=db_api_key.id,
                            requested_model=requested_model,
                            event_type="session_lookup_start")
-            session = await session_service.get_session_for_api_key(db, db_api_key.id, user.id, requested_model)
+            session = await session_service.get_session_for_api_key(db, db_api_key.id, user.id, requested_model, model_type='LLM')
             if session:
                 session_id = session.id
                 chat_logger.info("Session retrieved successfully",

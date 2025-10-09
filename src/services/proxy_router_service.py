@@ -672,7 +672,6 @@ async def embeddings(
     *,
     session_id: str,
     input_data: Any,
-    model: str,
     encoding_format: Optional[str] = "float",
     dimensions: Optional[int] = None,
     user: Optional[str] = None
@@ -683,7 +682,6 @@ async def embeddings(
     Args:
         session_id: Session ID for the embeddings request
         input_data: Text input(s) to embed (string or list of strings)
-        model: Model identifier (blockchain ID)
         encoding_format: Encoding format for embeddings
         dimensions: Number of dimensions (optional)
         user: User identifier (optional)
@@ -696,13 +694,11 @@ async def embeddings(
     """
     logger.info("Embeddings request",
                session_id=session_id,
-               model=model,
                event_type="embeddings_request_start")
     
     # Build the request payload
     payload = {
         "input": input_data,
-        "model": model,
         "encoding_format": encoding_format
     }
     
@@ -714,11 +710,9 @@ async def embeddings(
     # Build headers
     headers = {
         "Content-Type": "application/json",
-        "Accept": "application/json"
+        "Accept": "application/json",
+        "session_id": session_id,
     }
-    
-    # Add session_id as query parameter
-    params = {"session_id": session_id}
     
     try:
         response = await _execute_request(
@@ -726,7 +720,6 @@ async def embeddings(
             "v1/embeddings",
             headers=headers,
             json_data=payload,
-            params=params,
             timeout=60.0,
             max_retries=3
         )
@@ -735,7 +728,6 @@ async def embeddings(
     except Exception as e:
         logger.error("Embeddings request error",
                     session_id=session_id,
-                    model=model,
                     error=str(e),
                     event_type="embeddings_request_error")
         if isinstance(e, ProxyRouterServiceError):

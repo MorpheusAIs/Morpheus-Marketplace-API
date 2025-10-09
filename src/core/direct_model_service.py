@@ -34,6 +34,7 @@ class DirectModelService:
         """
         self.cache_duration = cache_duration_seconds
         self._model_mapping: Dict[str, str] = {}  # name -> blockchain_id
+        self._model_mapping_type: Dict[str, str] = {}  # name -> type
         self._blockchain_ids: set = set()
         self._cache_expiry: Optional[datetime] = None
         self._last_etag: Optional[str] = None
@@ -53,6 +54,16 @@ class DirectModelService:
         """
         await self._ensure_fresh_cache()
         return self._model_mapping.copy()
+
+    async def get_model_mapping_type(self) -> Dict[str, str]:
+        """
+        Get the model name to type mapping.
+        
+        Returns:
+            Dict mapping model names to types
+        """
+        await self._ensure_fresh_cache()
+        return self._model_mapping_type.copy()
     
     async def get_blockchain_ids(self) -> set:
         """
@@ -176,6 +187,7 @@ class DirectModelService:
         """Update the internal cache with new model data."""
         # Build mappings
         new_mapping = {}
+        new_mapping_type = {}
         new_blockchain_ids = set()
         
         for model in models:
@@ -184,13 +196,16 @@ class DirectModelService:
                 
             model_name = model.get("Name")
             blockchain_id = model.get("Id")
+            model_type = model.get("ModelType")
             
             if model_name and blockchain_id:
                 new_mapping[model_name] = blockchain_id
+                new_mapping_type[model_name] = model_type
                 new_blockchain_ids.add(blockchain_id)
         
         # Update cache
         self._model_mapping = new_mapping
+        self._model_mapping_type = new_mapping_type
         self._blockchain_ids = new_blockchain_ids
         self._raw_models_data = models
         self._last_hash = content_hash
