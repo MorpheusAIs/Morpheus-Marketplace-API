@@ -341,6 +341,15 @@ async def shutdown_event():
     """
     logger.info("Application shutdown initiated", event_type="shutdown_start")
     logger.info("Direct model service requires no cleanup (stateless)")
+    
+    # Close proxy router HTTP client
+    try:
+        from src.services import proxy_router_service
+        await proxy_router_service.close_http_client()
+        logger.info("Proxy router HTTP client closed successfully", event_type="http_client_shutdown")
+    except Exception as e:
+        logger.warning("Error closing proxy router HTTP client", error=str(e), event_type="http_client_shutdown_error")
+    
     logger.info("Application shutdown complete", event_type="shutdown_complete")
 
 async def check_database_version():
