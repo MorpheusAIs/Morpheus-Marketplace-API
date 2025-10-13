@@ -73,7 +73,15 @@ USER app
 # Expose the port the app runs on
 EXPOSE 8000
 
-# Run only the application using gunicorn
+# Run single uvicorn worker per container
 # Migrations should be run separately (e.g., manually or via a dedicated job)
-# Increased timeouts for long-running chat completion sequences
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "4", "-b", "0.0.0.0:8000", "--timeout", "300", "--graceful-timeout", "320", "--keep-alive", "75", "src.main:app"] 
+# ECS/Fargate will scale by running multiple tasks, each with its own uvicorn instance
+# This provides better isolation, simpler architecture, and improved ALB stickiness
+CMD ["uvicorn", "src.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--timeout-keep-alive", "75", \
+     "--timeout-graceful-shutdown", "30", \
+     "--limit-concurrency", "1000", \
+     "--backlog", "2048", \
+     "--no-access-log"] 
