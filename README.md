@@ -165,6 +165,8 @@ DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhos
 
 # Model Service (uses in-memory caching)
 ACTIVE_MODELS_URL=https://active.dev.mor.org/active_models.json
+DEFAULT_FALLBACK_MODEL=mistral-31-24b
+DEFAULT_FALLBACK_EMBEDDINGS_MODEL=text-embedding-bge-m3
 
 # JWT
 JWT_SECRET_KEY=generate_this_with_openssl_rand_-hex_32

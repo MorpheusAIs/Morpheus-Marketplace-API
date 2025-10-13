@@ -53,6 +53,7 @@ services:
       # Model service
       ACTIVE_MODELS_URL: ${ACTIVE_MODELS_URL:-https://active.dev.mor.org/active_models.json}
       DEFAULT_FALLBACK_MODEL: ${DEFAULT_FALLBACK_MODEL:-mistral-31-24b}
+      DEFAULT_FALLBACK_EMBEDDINGS_MODEL: ${DEFAULT_FALLBACK_EMBEDDINGS_MODEL:-text-embedding-bge-m3}
       
       # Proxy router (can use dev or mock)
       PROXY_ROUTER_URL: ${PROXY_ROUTER_URL:-http://router.dev.mor.org:8082}
