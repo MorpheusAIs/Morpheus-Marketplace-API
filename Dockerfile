@@ -75,4 +75,5 @@ EXPOSE 8000
 
 # Run only the application using gunicorn
 # Migrations should be run separately (e.g., manually or via a dedicated job)
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "4", "-b", "0.0.0.0:8000", "src.main:app"] 
+# Increased timeouts for long-running chat completion sequences
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "4", "-b", "0.0.0.0:8000", "--timeout", "300", "--graceful-timeout", "320", "--keep-alive", "75", "src.main:app"] 
