@@ -45,7 +45,7 @@ async def get_http_client() -> httpx.AsyncClient:
                         max_keepalive_connections=20,  # Keep 20 connections alive
                         keepalive_expiry=30.0       # Keep connections alive for 30s
                     ),
-                    http2=True,  # Enable HTTP/2 if supported by proxy router
+                    http2=True,  # Enable HTTP/2 for better performance (requires httpx[http2])
                     follow_redirects=True,
                 )
                 logger.info("Initialized singleton HTTP client for proxy router",

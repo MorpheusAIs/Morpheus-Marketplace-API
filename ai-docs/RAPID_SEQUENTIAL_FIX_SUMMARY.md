@@ -34,6 +34,12 @@ LLM Calls 4-12: Never reached due to error
 - **Impact**: Large responses (like call #3 with 4K tokens) timeout before completion
 - **File**: `src/services/proxy_router_service.py`
 
+### 5. ⚠️ **ALB Idle Timeout (60s default)**
+- **Problem**: Application Load Balancer has 60-second idle timeout by default
+- **Impact**: Requests taking >60s return `504 Gateway Time-out` from ALB
+- **File**: `Morpheus-Infra/.../04_api_service.tf`
+- **Evidence**: User's test showed LLM response took 50.7 seconds, subsequent tests failed with 504
+
 ## Fixes Applied ✅
 
 ### ✅ Fix #1: Dockerfile - Worker Timeouts
@@ -203,6 +209,27 @@ async def shutdown_event():
 
 **Impact**: Proper cleanup of HTTP connections on shutdown
 
+---
+
+### ✅ Fix #6: ALB Idle Timeout (Infrastructure)
+**File**: `Morpheus-Infra/environments/03-morpheus_api/.terragrunt/04_api_service.tf`
+
+**Added to ALB resource**:
+```hcl
+resource "aws_lb" "api_service" {
+  # ... existing config ...
+  
+  # Increased timeout for long-running LLM chat completions
+  idle_timeout = 300  # 5 minutes (was 60s default)
+  
+  tags = merge(var.default_tags, { Name = "${var.env_lifecycle}-api-service" })
+}
+```
+
+**Impact**: ALB can now handle 5-minute requests without returning 504 Gateway Time-out
+
+**Deployment**: Requires `terragrunt apply` in dev/prod environments
+
 ## Expected Results
 
 ### Before Fixes ❌
@@ -259,20 +286,37 @@ async def test_rapid_sequential_completions(
 
 ## Deployment Plan
 
-### Phase 1: Immediate (Dockerfile + DB Pool) - **Deploy First**
-1. ✅ Dockerfile with worker timeouts
-2. ✅ Database pool configuration
-3. Deploy to dev
-4. Test with user's pattern
-5. If successful → deploy to production
+### Phase 1: Application Changes - **Deploy First**
+```bash
+# In Morpheus-Marketplace-API repo
+git checkout test  # or main for production
+git pull
+# GitHub Actions will automatically:
+# 1. Build Docker image with new Dockerfile CMD
+# 2. Push to GHCR
+# 3. Update ECS task definition
+# 4. Force new deployment
+```
 
-### Phase 2: Performance (HTTP Client) - **Deploy Second**
-1. ✅ Singleton HTTP client
-2. ✅ Increased proxy router timeouts
-3. ✅ Shutdown handler
-4. Deploy to dev
-5. Test performance improvements
-6. If successful → deploy to production
+**Includes:**
+1. ✅ Dockerfile with worker timeouts (300s)
+2. ✅ Database pool configuration (20/30)
+3. ✅ Singleton HTTP client with pooling
+4. ✅ Increased proxy router timeouts (180s)
+5. ✅ Shutdown handler
+
+### Phase 2: Infrastructure Changes - **Deploy Second**
+```bash
+# In Morpheus-Infra repo
+cd environments/03-morpheus_api/02-dev  # or 04-prd for production
+terragrunt plan  # Review changes
+terragrunt apply # Apply ALB timeout change
+```
+
+**Includes:**
+1. ✅ ALB idle timeout (300s)
+
+**Note**: ALB change is non-disruptive and can be applied while service is running
 
 ## Performance Improvements
 
@@ -317,12 +361,16 @@ fields @timestamp, @message
 
 ## Files Changed
 
-1. ✅ `Dockerfile` - Worker timeout configuration
-2. ✅ `src/db/database.py` - Database pool configuration
-3. ✅ `src/services/proxy_router_service.py` - Singleton HTTP client + timeouts
+### Application (Morpheus-Marketplace-API):
+1. ✅ `Dockerfile` - Worker timeout configuration (300s)
+2. ✅ `src/db/database.py` - Database pool configuration (20/30)
+3. ✅ `src/services/proxy_router_service.py` - Singleton HTTP client + timeouts (180s)
 4. ✅ `src/main.py` - Shutdown handler
 5. ✅ `ai-docs/RAPID_SEQUENTIAL_CHAT_FIX.md` - Detailed technical analysis
 6. ✅ `ai-docs/RAPID_SEQUENTIAL_FIX_SUMMARY.md` - This summary
+
+### Infrastructure (Morpheus-Infra):
+7. ✅ `environments/03-morpheus_api/.terragrunt/04_api_service.tf` - ALB idle timeout (300s)
 
 ## Next Steps
 
