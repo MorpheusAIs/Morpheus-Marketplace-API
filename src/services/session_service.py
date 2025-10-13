@@ -55,6 +55,7 @@ async def get_session_for_api_key(
     user_id: int,
     requested_model: Optional[str] = None,
     session_duration: Optional[int] = None,
+    model_type: Optional[str] = "LLM"
 ) -> Optional[Session]:
     session = await session_crud.get_active_session_by_api_key(db, api_key_id)
 
@@ -65,12 +66,7 @@ async def get_session_for_api_key(
                            session_id=session.id,
                            session_model=session.model,
                            event_type="active_session_found")
-        if not requested_model:
-            session_logger.info("No requested model, returning existing session",
-                               session_id=session.id,
-                               event_type="existing_session_reused")
-            return session
-        requested_model_id = await model_router.get_target_model(requested_model)
+        requested_model_id = await model_router.get_target_model(requested_model, model_type)
         if session.model == requested_model_id:
             session_logger.info("Session is already using the requested model",
                                session_id=session.id,
@@ -84,10 +80,10 @@ async def get_session_for_api_key(
                                requested_model_id=requested_model_id,
                                event_type="session_model_mismatch")
             await close_session(db, session.id)
-            return await create_automated_session(db, api_key_id, user_id, requested_model, session_duration)
+            return await create_automated_session(db, api_key_id, user_id, requested_model, session_duration, model_type=model_type)
     
     # No explicit logging here - create_automated_session will log with complete details
-    return await create_automated_session(db, api_key_id, user_id, requested_model, session_duration)
+    return await create_automated_session(db, api_key_id, user_id, requested_model, session_duration, model_type=model_type)
 
 async def create_automated_session(
     db: AsyncSession,
@@ -95,6 +91,7 @@ async def create_automated_session(
     user_id: int,
     requested_model: str,
     session_duration: Optional[int] = None,
+    model_type: Optional[str] = "LLM"
 ) -> Optional[Session]:
     """
     Create an automated session, deactivating any existing sessions.
@@ -141,7 +138,7 @@ async def create_automated_session(
         create_logger.info("Resolving target model",
                           requested_model=requested_model,
                           event_type="model_resolution_start")
-        target_model = await model_router.get_target_model(requested_model)
+        target_model = await model_router.get_target_model(requested_model, model_type)
         create_logger.info("Target model resolved successfully",
                           target_model=target_model,
                           requested_model=requested_model,

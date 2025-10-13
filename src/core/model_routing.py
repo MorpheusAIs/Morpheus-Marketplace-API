@@ -8,6 +8,7 @@ logger = get_models_logger()
 
 # Get default model from settings
 DEFAULT_MODEL = getattr(settings, 'DEFAULT_FALLBACK_MODEL', "mistral-31-24b")
+DEFAULT_EMBEDDINGS_MODEL = getattr(settings, 'DEFAULT_FALLBACK_EMBEDDINGS_MODEL', "text-embedding-bge-m3")
 
 class ModelRouter:
     """
@@ -19,7 +20,7 @@ class ModelRouter:
                    event_type="model_router_init")
         # No initialization needed - DirectModelService handles all caching
     
-    async def get_target_model(self, requested_model: Optional[str]) -> str:
+    async def get_target_model(self, requested_model: Optional[str], type: Optional[str] = "LLM") -> str:
         """
         Get the target blockchain ID for the requested model.
         
@@ -31,13 +32,14 @@ class ModelRouter:
         """
         logger.info("Getting target model for requested model",
                    requested_model=requested_model,
-                   event_type="model_resolution_start")
+                   event_type="model_resolution_start",
+                   model_type=type)
         
         if not requested_model:
             logger.warning("No model specified, using default model",
                           default_model=DEFAULT_MODEL,
                           event_type="default_model_fallback")
-            default_id = await self._get_default_model_id()
+            default_id = await self._get_default_model_id(type)
             logger.info("Resolved to default model ID",
                        default_model_id=default_id,
                        event_type="default_model_resolved")
@@ -64,7 +66,7 @@ class ModelRouter:
                            available_blockchain_ids=sorted(list(blockchain_ids)),
                            requested_model=requested_model)
                 
-                default_id = await self._get_default_model_id()
+                default_id = await self._get_default_model_id(type)
                 logger.warning("Using default model fallback",
                               requested_model=requested_model,
                               default_model_id=default_id,
@@ -76,42 +78,45 @@ class ModelRouter:
                         error=str(e),
                         event_type="model_resolution_error")
             # Fall back to default model
-            default_id = await self._get_default_model_id()
+            default_id = await self._get_default_model_id(type)
             logger.warning("Using default model ID due to error",
                           requested_model=requested_model,
                           default_model_id=default_id,
                           event_type="default_model_error_fallback")
             return default_id
     
-    async def _get_default_model_id(self) -> str:
+    async def _get_default_model_id(self, type: Optional[str] = "LLM") -> str:
         """Get the blockchain ID for the default model"""
         try:
             model_mapping = await direct_model_service.get_model_mapping()
+            model_mapping_type = await direct_model_service.get_model_mapping_type()
+
+            default_model = DEFAULT_MODEL if type == "LLM" else DEFAULT_EMBEDDINGS_MODEL
             
             # First try the explicitly defined default
-            if DEFAULT_MODEL in model_mapping:
+            if default_model in model_mapping:
                 logger.info("Using configured default model",
-                           default_model=DEFAULT_MODEL,
-                           blockchain_id=model_mapping[DEFAULT_MODEL],
+                           default_model=default_model,
+                           blockchain_id=model_mapping[default_model],
                            event_type="default_model_resolved")
-                return model_mapping[DEFAULT_MODEL]
-            
-            # If that fails, try "default" model
-            if "default" in model_mapping:
-                logger.info("Using 'default' model",
-                           blockchain_id=model_mapping['default'],
-                           event_type="generic_default_model_used")
-                return model_mapping["default"]
+                return model_mapping[default_model]
                 
             # If no default model is found, use the first available model
-            if model_mapping:
-                first_model_name = next(iter(model_mapping.keys()))
-                first_model = model_mapping[first_model_name]
-                logger.warning("No default model configured, using first available model",
-                              first_model_name=first_model_name,
-                              first_model_id=first_model,
+            if model_mapping and model_mapping_type:
+                model_name = None
+                for model_name, model_type in model_mapping_type.items():
+                    if model_type == type:
+                        model_name = model_name
+                        break
+                
+                if model_name:
+                    logger.warning("No default model configured, using first available model",
+                              first_model_name=model_name,
+                              first_model_id=model_mapping[model_name],
                               event_type="first_available_model_fallback")
-                return first_model
+                    return model_mapping[model_name]
+                else:
+                    raise ValueError("No default model configured, no model of type found")
                 
             # If there are no models at all, raise an error
             logger.error("No models available in the system, cannot route",

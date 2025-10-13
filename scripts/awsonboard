@@ -451,6 +451,8 @@ If you need to set up components manually or troubleshoot:
    # MODEL_SYNC_ON_STARTUP=True
    # MODEL_SYNC_INTERVAL_HOURS=12
    # ACTIVE_MODELS_URL=https://active.mor.org/active_models.json
+   # DEFAULT_FALLBACK_MODEL=mistral-31-24b
+   # DEFAULT_FALLBACK_EMBEDDINGS_MODEL=text-embedding-bge-m3
    nano .env
 
 7. Run Application:
