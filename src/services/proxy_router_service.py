@@ -13,6 +13,62 @@ import base64
 
 logger = get_proxy_logger()
 
+# Singleton HTTP client for connection pooling
+_http_client: Optional[httpx.AsyncClient] = None
+_client_lock = asyncio.Lock()
+
+
+async def get_http_client() -> httpx.AsyncClient:
+    """
+    Get or create singleton HTTP client with connection pooling.
+    
+    This prevents creating a new HTTP client for every request, which:
+    - Reduces connection overhead
+    - Enables connection keep-alive and pooling
+    - Prevents socket exhaustion on rapid requests
+    - Improves performance through connection reuse
+    """
+    global _http_client
+    
+    if _http_client is None:
+        async with _client_lock:
+            if _http_client is None:
+                _http_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(
+                        timeout=180.0,  # Overall timeout increased for large token responses
+                        connect=10.0,   # Connection timeout
+                        read=180.0,     # Read timeout for streaming large responses
+                        write=30.0      # Write timeout
+                    ),
+                    limits=httpx.Limits(
+                        max_connections=100,        # Total connection pool
+                        max_keepalive_connections=20,  # Keep 20 connections alive
+                        keepalive_expiry=30.0       # Keep connections alive for 30s
+                    ),
+                    http2=True,  # Enable HTTP/2 for better performance (requires httpx[http2])
+                    follow_redirects=True,
+                )
+                logger.info("Initialized singleton HTTP client for proxy router",
+                           max_connections=100,
+                           max_keepalive=20,
+                           timeout=180.0,
+                           event_type="http_client_initialized")
+    
+    return _http_client
+
+
+async def close_http_client():
+    """
+    Close singleton HTTP client.
+    Should be called on application shutdown.
+    """
+    global _http_client
+    if _http_client is not None:
+        logger.info("Closing singleton HTTP client", event_type="http_client_closing")
+        await _http_client.aclose()
+        _http_client = None
+        logger.info("Singleton HTTP client closed", event_type="http_client_closed")
+
 
 class ProxyRouterServiceError(Exception):
     """Custom exception for proxy router service errors."""
@@ -54,7 +110,7 @@ async def _execute_request(
     headers: Optional[Dict[str, str]] = None,
     json_data: Optional[Dict[str, Any]] = None,
     params: Optional[Dict[str, Any]] = None,
-    timeout: float = 30.0,
+    timeout: float = 120.0,  # INCREASED from 30s for large token responses
     max_retries: int = 3,
     user_id: Optional[int] = None,
     db = None,
@@ -120,104 +176,106 @@ async def _execute_request(
     if json_data:
         logger.debug("Proxy router request body", request_body=json_data)
     
-    async with httpx.AsyncClient() as client:
-        for attempt in range(max_retries):
-            try:
-                logger.debug("Making proxy router request attempt",
+    # Use singleton HTTP client for connection pooling and performance
+    client = await get_http_client()
+    
+    for attempt in range(max_retries):
+        try:
+            logger.debug("Making proxy router request attempt",
+                        method=method,
+                        attempt=attempt+1,
+                        max_retries=max_retries)
+            response = await client.request(
+                method,
+                url,
+                headers=request_headers,
+                json=json_data,
+                params=params,
+                auth=auth,
+                timeout=timeout
+            )
+            
+            logger.debug("Proxy router response received",
+                        status_code=response.status_code,
+                        event_type="proxy_response")
+            
+            # For successful responses, return immediately
+            if response.status_code < 400:
+                return response
+            
+            # For client/server errors, raise for status
+            response.raise_for_status()
+            
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            if not status_code:
+                status_code = response.status_code
+            logger.warning("HTTP error on proxy router request",
+                          attempt=attempt+1,
+                          status_code=status_code,
+                          url=e.response.url,
+                          method=method,
+                          error = response.text,
+                          event_type="proxy_http_error")
+            
+            if attempt == max_retries - 1:
+                # If this was the last attempt, raise with status code info
+                logger.error("Proxy router request failed after all retries",
+                            max_retries=max_retries,
+                            url=e.response.url,
                             method=method,
-                            attempt=attempt+1,
-                            max_retries=max_retries)
-                response = await client.request(
-                    method,
-                    url,
-                    headers=request_headers,
-                    json=json_data,
-                    params=params,
-                    auth=auth,
-                    timeout=timeout
+                            error=response.text,
+                            status_code=status_code,
+                            event_type="proxy_request_failed")
+                error_type = "http_error"
+                if status_code >= 500:
+                    error_type = "server_error"
+                elif status_code >= 400:
+                    error_type = "client_error"
+                
+                raise ProxyRouterServiceError(
+                    f"HTTP {status_code}: {response.text}",
+                    status_code=status_code,
+                    error_type=error_type
                 )
-                
-                logger.debug("Proxy router response received",
-                            status_code=response.status_code,
-                            event_type="proxy_response")
-                
-                # For successful responses, return immediately
-                if response.status_code < 400:
-                    return response
-                
-                # For client/server errors, raise for status
-                response.raise_for_status()
-                
-            except httpx.HTTPStatusError as e:
-                status_code = e.response.status_code
-                if not status_code:
-                    status_code = response.status_code
-                logger.warning("HTTP error on proxy router request",
-                              attempt=attempt+1,
-                              status_code=status_code,
-                              url=e.response.url,
-                              method=method,
-                              error = response.text,
-                              event_type="proxy_http_error")
-                
-                if attempt == max_retries - 1:
-                    # If this was the last attempt, raise with status code info
-                    logger.error("Proxy router request failed after all retries",
-                                max_retries=max_retries,
-                                url=e.response.url,
-                                method=method,
-                                error=response.text,
-                                status_code=status_code,
-                                event_type="proxy_request_failed")
-                    error_type = "http_error"
-                    if status_code >= 500:
-                        error_type = "server_error"
-                    elif status_code >= 400:
-                        error_type = "client_error"
-                    
-                    raise ProxyRouterServiceError(
-                        f"HTTP {status_code}: {response.text}",
-                        status_code=status_code,
-                        error_type=error_type
-                    )
-                
-                # Wait with exponential backoff before retrying
-                backoff_time = 1 * (attempt + 1)  # 1, 2, 3... seconds
-                logger.info("HTTP error, retrying with backoff",
-                           backoff_time=backoff_time,
-                           attempt=attempt+1,
-                           event_type="proxy_retry_backoff")
-                await asyncio.sleep(backoff_time)
-                
-            except httpx.RequestError as e:
-                logger.warning("Request error on proxy router attempt",
-                              attempt=attempt+1,
-                              url=url,
-                              method=method,
-                              error=str(e),
-                              event_type="proxy_request_error")
-                
-                if attempt == max_retries - 1:
-                    # If this was the last attempt, raise the error
-                    logger.error("Proxy router request failed after all attempts",
-                                max_retries=max_retries,
-                                error=str(e),
-                                event_type="proxy_request_failed")
-                    raise ProxyRouterServiceError(
-                        f"Request failed after {max_retries} attempts: {str(e)}",
-                        error_type="network_error"
-                    )
-                
-                # Wait with exponential backoff before retrying
-                backoff_time = 1 * (attempt + 1)  # 1, 2, 3... seconds
-                logger.info("Request error, retrying with backoff",
-                           backoff_time=backoff_time,
-                           attempt=attempt+1,
-                           event_type="proxy_retry_backoff")
-                await asyncio.sleep(backoff_time)
-        
-        # Should never reach here, but just in case
-        raise ProxyRouterServiceError(f"Request failed after {max_retries} attempts")
+            
+            # Wait with exponential backoff before retrying
+            backoff_time = 1 * (attempt + 1)  # 1, 2, 3... seconds
+            logger.info("HTTP error, retrying with backoff",
+                       backoff_time=backoff_time,
+                       attempt=attempt+1,
+                       event_type="proxy_retry_backoff")
+            await asyncio.sleep(backoff_time)
+            
+        except httpx.RequestError as e:
+            logger.warning("Request error on proxy router attempt",
+                          attempt=attempt+1,
+                          url=url,
+                          method=method,
+                          error=str(e),
+                          event_type="proxy_request_error")
+            
+            if attempt == max_retries - 1:
+                # If this was the last attempt, raise the error
+                logger.error("Proxy router request failed after all attempts",
+                            max_retries=max_retries,
+                            error=str(e),
+                            event_type="proxy_request_failed")
+                raise ProxyRouterServiceError(
+                    f"Request failed after {max_retries} attempts: {str(e)}",
+                    error_type="network_error"
+                )
+            
+            # Wait with exponential backoff before retrying
+            backoff_time = 1 * (attempt + 1)  # 1, 2, 3... seconds
+            logger.info("Request error, retrying with backoff",
+                       backoff_time=backoff_time,
+                       attempt=attempt+1,
+                       event_type="proxy_retry_backoff")
+            await asyncio.sleep(backoff_time)
+    
+    # Should never reach here, but just in case
+    raise ProxyRouterServiceError(f"Request failed after {max_retries} attempts")
 
 
 async def openSession(
@@ -570,13 +628,14 @@ async def chatCompletions(
     
     try:
         # For non-streaming requests, use the standard retry logic
+        # Increased timeout for large token responses (user experiencing issues at ~7K tokens)
         response = await _execute_request(
             "POST",
             f"v1/chat/completions?session_id={session_id}",
             headers=headers,
             json_data=payload,
-            timeout=60.0,
-            max_retries=3
+            timeout=180.0,  # 3 minutes for large token responses
+            max_retries=2   # Reduced retries since timeout is longer
         )
         return response
             
@@ -672,7 +731,6 @@ async def embeddings(
     *,
     session_id: str,
     input_data: Any,
-    model: str,
     encoding_format: Optional[str] = "float",
     dimensions: Optional[int] = None,
     user: Optional[str] = None
@@ -683,7 +741,6 @@ async def embeddings(
     Args:
         session_id: Session ID for the embeddings request
         input_data: Text input(s) to embed (string or list of strings)
-        model: Model identifier (blockchain ID)
         encoding_format: Encoding format for embeddings
         dimensions: Number of dimensions (optional)
         user: User identifier (optional)
@@ -696,13 +753,11 @@ async def embeddings(
     """
     logger.info("Embeddings request",
                session_id=session_id,
-               model=model,
                event_type="embeddings_request_start")
     
     # Build the request payload
     payload = {
         "input": input_data,
-        "model": model,
         "encoding_format": encoding_format
     }
     
@@ -714,11 +769,9 @@ async def embeddings(
     # Build headers
     headers = {
         "Content-Type": "application/json",
-        "Accept": "application/json"
+        "Accept": "application/json",
+        "session_id": session_id,
     }
-    
-    # Add session_id as query parameter
-    params = {"session_id": session_id}
     
     try:
         response = await _execute_request(
@@ -726,7 +779,6 @@ async def embeddings(
             "v1/embeddings",
             headers=headers,
             json_data=payload,
-            params=params,
             timeout=60.0,
             max_retries=3
         )
@@ -735,7 +787,6 @@ async def embeddings(
     except Exception as e:
         logger.error("Embeddings request error",
                     session_id=session_id,
-                    model=model,
                     error=str(e),
                     event_type="embeddings_request_error")
         if isinstance(e, ProxyRouterServiceError):

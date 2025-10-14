@@ -17,6 +17,9 @@ models.include_router(models_router)
 chat = APIRouter()
 chat.include_router(chat_router)
 
+embeddings = APIRouter()
+embeddings.include_router(embeddings_router)
+
 session = APIRouter()
 session.include_router(session_router)
 
@@ -31,7 +34,3 @@ auth.include_router(auth_router)
 # Chat history router
 chat_history = APIRouter()
 chat_history.include_router(chat_history_router)
-
-# Embeddings router
-embeddings = APIRouter()
-embeddings.include_router(embeddings_router) 

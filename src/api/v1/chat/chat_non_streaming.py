@@ -9,6 +9,24 @@ from fastapi.responses import JSONResponse
 from ....services import proxy_router_service
 from ....services import session_service
 
+def safe_parse_json_response(response: httpx.Response, logger, request_id: str, messages: list, chat_params: dict) -> Tuple[dict, Exception]:
+    """Safely parse a JSON response from the proxy router."""
+    try:
+        return response.json(), None
+    except Exception as e:
+        payload = {
+            "messages": messages,
+            "stream": False,
+            **chat_params
+        }
+        logger.error("Unexpected response format",
+                    request_id=request_id,
+                    error=str(e),
+                    response_text=response.text,
+                    response_status_code=response.status_code,
+                    payload=payload,
+                    event_type="unexpected_response_format")
+        return None, Exception(f"Unexpected response format from provider: '{response.text}'")
 
 async def handle_non_streaming_request(
     *,
@@ -167,7 +185,11 @@ async def handle_non_streaming_request(
                    request_id=request_id,
                    session_id=session_id,
                    event_type="chat_completion_success")
-        return JSONResponse(content=response.json(), status_code=200)
+        response_content, parse_error = safe_parse_json_response(response, logger, request_id, messages, chat_params)
+        if response_content:
+            return JSONResponse(content=response_content, status_code=200)
+        else:
+            return JSONResponse(status_code=500, content={"error": {"message": str(parse_error), "type": "unexpected_response_format", "session_id": session_id}})
 
     # If we need to retry with a new session, do that now
     if retry_with_new_session and new_session_id:
@@ -207,6 +229,10 @@ async def handle_non_streaming_request(
                    session_id=new_session_id,
                    original_session_id=session_id,
                    event_type="chat_completion_success")
-        return JSONResponse(content=retry_response.json(), status_code=200)
+        retry_content, parse_error = safe_parse_json_response(retry_response, logger, request_id, messages, chat_params)
+        if retry_content:
+            return JSONResponse(content=retry_content, status_code=200)
+        else:
+            return JSONResponse(status_code=500, content={"error": {"message": str(parse_error), "type": "unexpected_response_format", "session_id": new_session_id}})
 
 

@@ -15,7 +15,8 @@ import uuid
 import socket
 import platform
 
-from src.api.v1 import models, chat, session, auth, automation, chat_history
+from src.api.v1 import models, chat, session, auth, automation, chat_history, embeddings
+
 from src.core.config import settings
 from src.core.version import get_version, get_version_info
 from src.core.cors_middleware import CredentialSafeCORSMiddleware
@@ -340,6 +341,15 @@ async def shutdown_event():
     """
     logger.info("Application shutdown initiated", event_type="shutdown_start")
     logger.info("Direct model service requires no cleanup (stateless)")
+    
+    # Close proxy router HTTP client
+    try:
+        from src.services import proxy_router_service
+        await proxy_router_service.close_http_client()
+        logger.info("Proxy router HTTP client closed successfully", event_type="http_client_shutdown")
+    except Exception as e:
+        logger.warning("Error closing proxy router HTTP client", error=str(e), event_type="http_client_shutdown_error")
+    
     logger.info("Application shutdown complete", event_type="shutdown_complete")
 
 async def check_database_version():
@@ -425,8 +435,7 @@ app.include_router(chat, prefix=f"{settings.API_V1_STR}/chat")
 app.include_router(session, prefix=f"{settings.API_V1_STR}/session")
 app.include_router(automation, prefix=f"{settings.API_V1_STR}/automation")
 app.include_router(chat_history, prefix=f"{settings.API_V1_STR}/chat-history")
-
-
+app.include_router(embeddings, prefix=f"{settings.API_V1_STR}")
 
 # Default routes - using standard APIRoute for these endpoints to avoid dependency resolution issues
 # Reset the route_class temporarily for these specific routes

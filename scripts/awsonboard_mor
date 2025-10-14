@@ -118,6 +118,8 @@ setup_fresh_instance() {
         sudo sed -i 's/^MODEL_SYNC_ON_STARTUP=.*/MODEL_SYNC_ON_STARTUP=true/' .env
         sudo sed -i 's/^MODEL_SYNC_INTERVAL_HOURS=.*/MODEL_SYNC_INTERVAL_HOURS=12/' .env
         sudo sed -i 's|^ACTIVE_MODELS_URL=.*|ACTIVE_MODELS_URL=https://active.mor.org/active_models.json|' .env
+        sudo sed -i 's/^DEFAULT_FALLBACK_MODEL=.*/DEFAULT_FALLBACK_MODEL=mistral-31-24b/' .env
+        sudo sed -i 's/^DEFAULT_FALLBACK_EMBEDDINGS_MODEL=.*/DEFAULT_FALLBACK_EMBEDDINGS_MODEL=text-embedding-bge-m3/' .env
 
         # Contract Settings (TESTNET)
         sudo sed -i 's/^DIAMOND_CONTRACT_ADDRESS=.*/DIAMOND_CONTRACT_ADDRESS=0xb8C55cD613af947E73E262F0d3C54b7211Af16CF/' .env
@@ -285,6 +287,8 @@ print(f'  MODEL_SYNC_ENABLED: {settings.MODEL_SYNC_ENABLED}')
 print(f'  MODEL_SYNC_ON_STARTUP: {settings.MODEL_SYNC_ON_STARTUP}')
 print(f'  MODEL_SYNC_INTERVAL_HOURS: {settings.MODEL_SYNC_INTERVAL_HOURS}')
 print(f'  ACTIVE_MODELS_URL: {settings.ACTIVE_MODELS_URL}')
+print(f'  DEFAULT_FALLBACK_MODEL: {settings.DEFAULT_FALLBACK_MODEL}')
+print(f'  DEFAULT_FALLBACK_EMBEDDINGS_MODEL: {settings.DEFAULT_FALLBACK_EMBEDDINGS_MODEL}')
 
 # Check if models.json exists and has content
 if os.path.exists('models.json'):
@@ -455,6 +459,8 @@ If you need to set up components manually or troubleshoot:
    # MODEL_SYNC_ON_STARTUP=True
    # MODEL_SYNC_INTERVAL_HOURS=12
    # ACTIVE_MODELS_URL=https://active.mor.org/active_models.json
+   # DEFAULT_FALLBACK_MODEL=mistral-31-24b
+   # DEFAULT_FALLBACK_EMBEDDINGS_MODEL=text-embedding-bge-m3
    nano .env
 
 7. Run Application:
