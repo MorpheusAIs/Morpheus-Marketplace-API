@@ -14,6 +14,7 @@ name: CI-CD
 #   • Automated deployments to AWS ECS Fargate
 #   • Health check verification with version matching
 #   • Database rollback on deployment failures
+#   • Git tags only created after successful deployment (safe to re-run on failure)
 
 on:
   workflow_dispatch:
@@ -284,6 +285,7 @@ jobs:
             -t $BUILDIMAGE:$ENV_TAG \
             . || (echo "❌ Failed to push image with tag: $BUILDIMAGE:$BUILDTAG" && exit 1)
           echo "✅ API Build and Push of $BUILDIMAGE:$BUILDTAG Successful!"
+          echo "📋 Git tag will only be created after successful deployment verification"
 
       - name: Optionally Push Latest Tag
         if: ${{ github.ref == 'refs/heads/main' }}
@@ -743,21 +745,23 @@ jobs:
             echo "🎉 Deployment verification successful!"
             echo "✅ Service is healthy and running the expected version"
             echo "🌐 Health Check URL: $HEALTH_ENDPOINT"
+            echo "📋 Git tag will be created in the next step"
           else
             echo ""
             echo "❌ Deployment verification failed!"
-            echo "🔍 The service may still be starting up or there may be an issue"
-            echo "🌐 Manual check: $HEALTH_ENDPOINT"
+            echo "🔍 The service did not pass health check with correct version after multiple retries"
+            echo "🌐 Health Check URL: $HEALTH_ENDPOINT"
             echo "🏗️  Expected version: $BUILDTAG"
             if [ -n "$DEPLOYED_VERSION" ]; then
               echo "📦 Currently deployed: $DEPLOYED_VERSION"
             fi
             echo ""
-            echo "ℹ️ This may be a temporary issue. Check the health endpoint in a few minutes."
-            echo "ℹ️ If the issue persists, check AWS ECS console and CloudWatch logs."
-            
-            # Don't fail the deployment for version mismatch, as it might be a timing issue
-            echo "⚠️ Continuing with warning - ECS deployment completed but version verification inconclusive"
+            echo "ℹ️ Check AWS ECS console and CloudWatch logs for details."
+            echo "ℹ️ You can manually verify at: $HEALTH_ENDPOINT"
+            echo ""
+            echo "⚠️ Failing deployment to prevent Git tag creation"
+            echo "ℹ️ You can safely re-run this workflow after investigating the issue"
+            exit 1
           fi
 
       - name: Database Rollback on Deployment Failure
@@ -860,7 +864,7 @@ jobs:
           fi
 
   Create-Release:
-    name: Create Git Tags
+    name: Create Git Tags (Only After Successful Deployment)
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       github.event_name == 'push' && 
@@ -876,7 +880,7 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Create Git Tag
+      - name: Create Git Tag (After Successful Deployment)
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
