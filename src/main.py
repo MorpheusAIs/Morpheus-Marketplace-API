@@ -1270,6 +1270,395 @@ def custom_swagger_ui_html():
     </html>
     """)
 
+@app.get("/get-token", include_in_schema=False)
+async def get_token_page(request: Request, code: str = None, error: str = None, error_description: str = None):
+    """
+    User-friendly endpoint to display JWT tokens after Cognito authentication.
+    
+    Usage: 
+    1. Navigate to: https://auth.mor.org/oauth2/authorize?client_id=7faqqo5lcj3175epjqs2upvmmu&response_type=code&scope=openid+email+profile&redirect_uri=https://api.mor.org/get-token
+    2. Sign in with Cognito
+    3. See your JWT tokens displayed on this page
+    """
+    import httpx
+    import json
+    
+    # Handle OAuth errors
+    if error:
+        return HTMLResponse(content=f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Authentication Error</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }}
+                .error {{ background: #fee; padding: 20px; border-left: 4px solid #c00; border-radius: 5px; }}
+                h1 {{ color: #c00; }}
+                .back-btn {{ 
+                    display: inline-block;
+                    margin-top: 20px;
+                    padding: 10px 20px;
+                    background: #007bff;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 5px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="error">
+                <h1>❌ Authentication Error</h1>
+                <p><strong>Error:</strong> {error}</p>
+                {f'<p><strong>Description:</strong> {error_description}</p>' if error_description else ''}
+            </div>
+            <a href="/" class="back-btn">← Back to Home</a>
+        </body>
+        </html>
+        """)
+    
+    # Show login page if no code present
+    if not code:
+        base_url = str(request.base_url).rstrip('/')
+        auth_url = f"https://{settings.COGNITO_DOMAIN}/oauth2/authorize?client_id={settings.COGNITO_CLIENT_ID}&response_type=code&scope=openid+email+profile&redirect_uri={base_url}/get-token"
+        
+        return HTMLResponse(content=f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Get Your JWT Token</title>
+            <style>
+                body {{ 
+                    font-family: Arial, sans-serif; 
+                    max-width: 800px; 
+                    margin: 50px auto; 
+                    padding: 20px;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                }}
+                .container {{
+                    background: white;
+                    padding: 40px;
+                    border-radius: 10px;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                }}
+                h1 {{ color: #333; margin-bottom: 20px; }}
+                .info {{ background: #e3f2fd; padding: 20px; border-left: 4px solid #2196F3; border-radius: 5px; margin: 20px 0; }}
+                .steps {{ background: #f5f5f5; padding: 20px; border-radius: 5px; margin: 20px 0; }}
+                .steps li {{ margin: 10px 0; }}
+                .login-btn {{ 
+                    display: inline-block;
+                    padding: 15px 30px;
+                    background: #4CAF50;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 5px;
+                    font-size: 18px;
+                    margin-top: 20px;
+                    transition: background 0.3s;
+                }}
+                .login-btn:hover {{ background: #45a049; }}
+                .url-box {{
+                    background: #f5f5f5;
+                    padding: 15px;
+                    border-radius: 5px;
+                    font-family: monospace;
+                    font-size: 12px;
+                    word-wrap: break-word;
+                    margin: 10px 0;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🔐 Get Your JWT Token</h1>
+                
+                <div class="info">
+                    <strong>📌 What is this?</strong><br>
+                    This page helps you obtain a JWT (JSON Web Token) from Cognito authentication 
+                    that you can use to access the Morpheus API.
+                </div>
+                
+                <div class="steps">
+                    <strong>How it works:</strong>
+                    <ol>
+                        <li>Click the "Login with Cognito" button below</li>
+                        <li>Sign in (or sign up) with your Morpheus account</li>
+                        <li>Your JWT tokens will be displayed on this page</li>
+                        <li>Copy the token and use it in your API calls</li>
+                    </ol>
+                </div>
+                
+                <a href="{auth_url}" class="login-btn">🚀 Login with Cognito</a>
+                
+                <div style="margin-top: 30px; padding-top: 30px; border-top: 1px solid #ddd;">
+                    <strong>Or use this direct URL:</strong>
+                    <div class="url-box">{auth_url}</div>
+                </div>
+            </div>
+        </body>
+        </html>
+        """)
+    
+    # Exchange code for tokens
+    try:
+        token_url = f"https://{settings.COGNITO_DOMAIN}/oauth2/token"
+        base_url = str(request.base_url).rstrip('/')
+        
+        data = {
+            "grant_type": "authorization_code",
+            "client_id": settings.COGNITO_CLIENT_ID,
+            "code": code,
+            "redirect_uri": f"{base_url}/get-token"
+        }
+        
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(token_url, data=data, headers=headers)
+            
+        if response.status_code != 200:
+            error_data = response.json() if response.headers.get('content-type') == 'application/json' else {"error": response.text}
+            return HTMLResponse(content=f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Token Exchange Failed</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }}
+                    .error {{ background: #fee; padding: 20px; border-left: 4px solid #c00; border-radius: 5px; }}
+                    h1 {{ color: #c00; }}
+                    pre {{ background: #f5f5f5; padding: 10px; border-radius: 5px; overflow-x: auto; }}
+                </style>
+            </head>
+            <body>
+                <div class="error">
+                    <h1>❌ Token Exchange Failed</h1>
+                    <p><strong>Status:</strong> {response.status_code}</p>
+                    <pre>{json.dumps(error_data, indent=2)}</pre>
+                </div>
+            </body>
+            </html>
+            """)
+        
+        tokens = response.json()
+        id_token = tokens.get("id_token", "")
+        access_token = tokens.get("access_token", "")
+        refresh_token = tokens.get("refresh_token", "")
+        expires_in = tokens.get("expires_in", 3600)
+        
+        # Parse JWT to show user info
+        try:
+            import base64
+            id_token_parts = id_token.split('.')
+            if len(id_token_parts) >= 2:
+                # Add padding if needed
+                payload = id_token_parts[1]
+                padding = 4 - len(payload) % 4
+                if padding != 4:
+                    payload += '=' * padding
+                decoded = base64.b64decode(payload)
+                user_info = json.loads(decoded)
+                user_email = user_info.get('email', 'N/A')
+                user_name = user_info.get('name', user_info.get('cognito:username', 'N/A'))
+            else:
+                user_email = 'N/A'
+                user_name = 'N/A'
+        except:
+            user_email = 'N/A'
+            user_name = 'N/A'
+        
+        return HTMLResponse(content=f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Your JWT Tokens</title>
+            <style>
+                body {{ 
+                    font-family: Arial, sans-serif; 
+                    max-width: 1000px; 
+                    margin: 50px auto; 
+                    padding: 20px;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                }}
+                .container {{
+                    background: white;
+                    padding: 40px;
+                    border-radius: 10px;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                }}
+                h1 {{ color: #333; margin-bottom: 10px; }}
+                .user-info {{
+                    background: #e8f5e9;
+                    padding: 15px;
+                    border-left: 4px solid #4CAF50;
+                    border-radius: 5px;
+                    margin: 20px 0;
+                }}
+                .token {{ 
+                    background: #f5f5f5; 
+                    padding: 20px; 
+                    margin: 15px 0; 
+                    border-radius: 5px; 
+                    border: 1px solid #ddd;
+                }}
+                .label {{ 
+                    font-weight: bold; 
+                    color: #333; 
+                    margin-bottom: 10px; 
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                }}
+                .value {{ 
+                    font-family: 'Courier New', monospace; 
+                    font-size: 12px; 
+                    word-wrap: break-word;
+                    background: white;
+                    padding: 10px;
+                    border-radius: 3px;
+                    max-height: 150px;
+                    overflow-y: auto;
+                }}
+                .btn {{ 
+                    background: #4CAF50; 
+                    color: white; 
+                    padding: 8px 16px; 
+                    border: none; 
+                    border-radius: 5px; 
+                    cursor: pointer;
+                    font-size: 14px;
+                    margin-left: 10px;
+                }}
+                .btn:hover {{ background: #45a049; }}
+                .btn:active {{ background: #3d8b40; }}
+                .usage {{ 
+                    background: #fff3cd; 
+                    padding: 20px; 
+                    border-left: 4px solid #ffc107; 
+                    border-radius: 5px; 
+                    margin: 20px 0;
+                }}
+                .usage pre {{
+                    background: #f5f5f5;
+                    padding: 10px;
+                    border-radius: 3px;
+                    overflow-x: auto;
+                }}
+                .success-msg {{
+                    background: #4CAF50;
+                    color: white;
+                    padding: 10px;
+                    border-radius: 5px;
+                    position: fixed;
+                    top: 20px;
+                    right: 20px;
+                    display: none;
+                    z-index: 1000;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="success-msg" id="successMsg">✅ Copied to clipboard!</div>
+            
+            <div class="container">
+                <h1>🎉 Authentication Successful!</h1>
+                
+                <div class="user-info">
+                    <strong>👤 Signed in as:</strong><br>
+                    <strong>Name:</strong> {user_name}<br>
+                    <strong>Email:</strong> {user_email}<br>
+                    <strong>Token expires in:</strong> {expires_in // 60} minutes
+                </div>
+                
+                <div class="token">
+                    <div class="label">
+                        <span>🔑 ID Token (JWT) - Use this for API Gateway authentication</span>
+                        <button class="btn" onclick="copyToken('id-token')">Copy</button>
+                    </div>
+                    <div class="value" id="id-token">{id_token}</div>
+                </div>
+                
+                <div class="token">
+                    <div class="label">
+                        <span>🎫 Access Token</span>
+                        <button class="btn" onclick="copyToken('access-token')">Copy</button>
+                    </div>
+                    <div class="value" id="access-token">{access_token}</div>
+                </div>
+                
+                <div class="token">
+                    <div class="label">
+                        <span>🔄 Refresh Token (valid for 30 days)</span>
+                        <button class="btn" onclick="copyToken('refresh-token')">Copy</button>
+                    </div>
+                    <div class="value" id="refresh-token">{refresh_token}</div>
+                </div>
+                
+                <div class="usage">
+                    <strong>📖 How to use your ID Token:</strong>
+                    <pre>curl -X GET "https://api.mor.org/api/v1/models" \\
+  -H "Authorization: Bearer {id_token[:50]}..."</pre>
+                    <p><strong>Note:</strong> The ID Token is what you need for API Gateway authentication. 
+                    Use it as a Bearer token in the Authorization header.</p>
+                </div>
+                
+                <div style="margin-top: 30px; padding-top: 30px; border-top: 1px solid #ddd; text-align: center;">
+                    <a href="/" style="color: #667eea; text-decoration: none;">← Back to API</a>
+                    <span style="margin: 0 20px;">|</span>
+                    <a href="/docs" style="color: #667eea; text-decoration: none;">📚 API Documentation</a>
+                </div>
+            </div>
+            
+            <script>
+                function copyToken(elementId) {{
+                    const element = document.getElementById(elementId);
+                    const text = element.textContent;
+                    
+                    navigator.clipboard.writeText(text).then(() => {{
+                        const msg = document.getElementById('successMsg');
+                        msg.style.display = 'block';
+                        setTimeout(() => {{
+                            msg.style.display = 'none';
+                        }}, 2000);
+                    }}).catch(err => {{
+                        alert('Failed to copy: ' + err);
+                    }});
+                }}
+                
+                // Log tokens to console for easy access
+                console.log('ID Token:', document.getElementById('id-token').textContent);
+                console.log('Access Token:', document.getElementById('access-token').textContent);
+                console.log('Refresh Token:', document.getElementById('refresh-token').textContent);
+            </script>
+        </body>
+        </html>
+        """)
+        
+    except Exception as e:
+        return HTMLResponse(content=f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Error</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }}
+                .error {{ background: #fee; padding: 20px; border-left: 4px solid #c00; border-radius: 5px; }}
+                h1 {{ color: #c00; }}
+            </style>
+        </head>
+        <body>
+            <div class="error">
+                <h1>❌ Unexpected Error</h1>
+                <p>{str(e)}</p>
+            </div>
+        </body>
+        </html>
+        """)
+
+
 @app.get("/exchange-token", include_in_schema=False)
 async def exchange_oauth_token(request: Request, code: str, state: str = None):
     """

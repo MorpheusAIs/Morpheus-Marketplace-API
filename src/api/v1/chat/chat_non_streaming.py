@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
+import httpx
 from fastapi.responses import JSONResponse
 
 from ....services import proxy_router_service
@@ -19,14 +20,28 @@ def safe_parse_json_response(response: httpx.Response, logger, request_id: str, 
             "stream": False,
             **chat_params
         }
-        logger.error("Unexpected response format",
-                    request_id=request_id,
-                    error=str(e),
-                    response_text=response.text,
-                    response_status_code=response.status_code,
-                    payload=payload,
-                    event_type="unexpected_response_format")
-        return None, Exception(f"Unexpected response format from provider: '{response.text}'")
+        
+        # Provide more specific error message for empty responses
+        error_msg = str(e)
+        if not response.text or response.text.strip() == "":
+            error_msg = "Empty response body from model provider"
+            logger.error("Model provider returned empty response",
+                        request_id=request_id,
+                        error=str(e),
+                        response_status_code=response.status_code,
+                        content_length=len(response.text) if response.text else 0,
+                        payload=payload,
+                        event_type="empty_model_response")
+        else:
+            logger.error("Unexpected response format from model provider",
+                        request_id=request_id,
+                        error=str(e),
+                        response_text=response.text[:500],  # Truncate to avoid huge logs
+                        response_status_code=response.status_code,
+                        payload=payload,
+                        event_type="unexpected_response_format")
+        
+        return None, Exception(f"Invalid response from model provider: {error_msg}")
 
 async def handle_non_streaming_request(
     *,
@@ -181,15 +196,29 @@ async def handle_non_streaming_request(
 
     # If not retrying, return the original response
     if not retry_with_new_session:
-        logger.info("Non-streaming chat completion successful",
-                   request_id=request_id,
-                   session_id=session_id,
-                   event_type="chat_completion_success")
+        # Parse response BEFORE logging success
         response_content, parse_error = safe_parse_json_response(response, logger, request_id, messages, chat_params)
+        
         if response_content:
+            logger.info("Non-streaming chat completion successful",
+                       request_id=request_id,
+                       session_id=session_id,
+                       event_type="chat_completion_success")
             return JSONResponse(content=response_content, status_code=200)
         else:
-            return JSONResponse(status_code=500, content={"error": {"message": str(parse_error), "type": "unexpected_response_format", "session_id": session_id}})
+            logger.error("Non-streaming chat completion failed - invalid response format",
+                        request_id=request_id,
+                        session_id=session_id,
+                        error=str(parse_error),
+                        event_type="chat_completion_failed")
+            return JSONResponse(status_code=502, content={
+                "error": {
+                    "message": "The AI model returned an invalid response. This may be due to a model timeout or failure.",
+                    "type": "bad_gateway",
+                    "session_id": session_id,
+                    "details": str(parse_error)
+                }
+            })
 
     # If we need to retry with a new session, do that now
     if retry_with_new_session and new_session_id:
@@ -223,16 +252,30 @@ async def handle_non_streaming_request(
                 }
             )
 
-        # Return successful retry response
-        logger.info("Non-streaming chat completion successful after retry",
-                   request_id=request_id,
-                   session_id=new_session_id,
-                   original_session_id=session_id,
-                   event_type="chat_completion_success")
+        # Parse retry response BEFORE logging success
         retry_content, parse_error = safe_parse_json_response(retry_response, logger, request_id, messages, chat_params)
+        
         if retry_content:
+            logger.info("Non-streaming chat completion successful after retry",
+                       request_id=request_id,
+                       session_id=new_session_id,
+                       original_session_id=session_id,
+                       event_type="chat_completion_success")
             return JSONResponse(content=retry_content, status_code=200)
         else:
-            return JSONResponse(status_code=500, content={"error": {"message": str(parse_error), "type": "unexpected_response_format", "session_id": new_session_id}})
+            logger.error("Non-streaming chat completion failed after retry - invalid response format",
+                        request_id=request_id,
+                        session_id=new_session_id,
+                        original_session_id=session_id,
+                        error=str(parse_error),
+                        event_type="chat_completion_retry_failed")
+            return JSONResponse(status_code=502, content={
+                "error": {
+                    "message": "The AI model returned an invalid response after retry. This may be due to a model timeout or failure.",
+                    "type": "bad_gateway",
+                    "session_id": new_session_id,
+                    "details": str(parse_error)
+                }
+            })
 
 

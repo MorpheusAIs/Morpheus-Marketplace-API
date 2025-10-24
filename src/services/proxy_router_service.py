@@ -197,10 +197,23 @@ async def _execute_request(
             
             logger.debug("Proxy router response received",
                         status_code=response.status_code,
+                        content_length=len(response.content) if response.content else 0,
                         event_type="proxy_response")
             
-            # For successful responses, return immediately
+            # For successful responses, validate body before returning
             if response.status_code < 400:
+                # Check for empty response body
+                if not response.content or len(response.content) == 0:
+                    logger.error("Proxy router returned empty response body",
+                                status_code=response.status_code,
+                                url=url,
+                                method=method,
+                                event_type="proxy_empty_response")
+                    raise ProxyRouterServiceError(
+                        "Proxy router returned empty response body with 200 OK",
+                        status_code=response.status_code,
+                        error_type="empty_response"
+                    )
                 return response
             
             # For client/server errors, raise for status
