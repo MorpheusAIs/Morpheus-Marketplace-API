@@ -179,7 +179,7 @@ Both automation endpoints now clearly state in their Swagger descriptions:
 
 ## Related Documentation
 
-- **Authentication Reference:** `ai-docs/api_auth_endpoints.internal.md` - Complete endpoint authentication catalog
+- **Authentication Reference:** `ai-docs/API_AUTH_ENDPOINTS.md` - Complete endpoint authentication catalog
 - **Chat Auth Consistency:** `ai-docs/CHAT_STORAGE_AUTH_CONSISTENCY.md` - Similar fix for chat history endpoints
 
 ---
