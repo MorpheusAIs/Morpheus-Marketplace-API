@@ -5,16 +5,17 @@ from src.core.config import settings
 
 # Create async engine instance with explicit pool configuration
 # Configured for high-concurrency scenarios (rapid sequential requests)
+# Pool settings are now configurable via environment variables
 engine = create_async_engine(
     str(settings.DATABASE_URL), # Ensure URL is a string
-    pool_pre_ping=True,
+    pool_pre_ping=settings.DB_POOL_PRE_PING,
     echo=False, # Set to True for debugging SQL queries
     # Connection pool settings for handling rapid sequential requests
-    pool_size=20,              # Base pool size (increased from default 5)
-    max_overflow=30,           # Allow burst to 50 total connections
-    pool_timeout=30,           # Wait 30s for connection before raising error
-    pool_recycle=3600,         # Recycle connections after 1 hour
-    pool_reset_on_return='rollback',  # Reset connection state on return
+    pool_size=settings.DB_POOL_SIZE,              # Base pool size - configurable via DB_POOL_SIZE
+    max_overflow=settings.DB_MAX_OVERFLOW,        # Max overflow connections - configurable via DB_MAX_OVERFLOW
+    pool_timeout=settings.DB_POOL_TIMEOUT,        # Wait timeout for connection - configurable via DB_POOL_TIMEOUT
+    pool_recycle=settings.DB_POOL_RECYCLE,        # Recycle connections - configurable via DB_POOL_RECYCLE
+    pool_reset_on_return='rollback',              # Reset connection state on return
 )
 
 # Create sessionmaker
