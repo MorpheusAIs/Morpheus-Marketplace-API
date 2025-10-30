@@ -140,6 +140,16 @@ class Settings(BaseSettings):
     DB_POOL_RECYCLE: int = Field(default=int(os.getenv("DB_POOL_RECYCLE", "3600")))
     DB_POOL_PRE_PING: bool = Field(default=os.getenv("DB_POOL_PRE_PING", "true").lower() == "true")
 
+    # Redis Cache Settings (Optional - Two-Way Door)
+    # When REDIS_URL is not set, caching is automatically disabled and falls back to DB
+    # Default is disabled (false) for safety - must explicitly enable
+    REDIS_URL: Optional[str] = Field(default=os.getenv("REDIS_URL"))
+    ENABLE_REDIS_CACHE: bool = Field(default=os.getenv("ENABLE_REDIS_CACHE", "false").lower() == "true")
+    REDIS_API_KEY_TTL: int = Field(default=int(os.getenv("REDIS_API_KEY_TTL", "900")))  # 15 minutes
+    REDIS_SESSION_TTL: int = Field(default=int(os.getenv("REDIS_SESSION_TTL", "3600")))  # 1 hour (matches default session duration)
+    REDIS_CONNECT_TIMEOUT: int = Field(default=int(os.getenv("REDIS_CONNECT_TIMEOUT", "1")))  # 1 second
+    REDIS_SOCKET_TIMEOUT: int = Field(default=int(os.getenv("REDIS_SOCKET_TIMEOUT", "1")))  # 1 second
+
     # JWT Settings
     JWT_SECRET_KEY: str = Field(default=os.getenv("JWT_SECRET_KEY", "super_secret_key_change_me"))
     JWT_ALGORITHM: str = "HS256"

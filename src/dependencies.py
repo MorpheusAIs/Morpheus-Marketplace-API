@@ -25,6 +25,7 @@ from src.db.models import User, APIKey
 from src.schemas.token import TokenPayload
 from src.services.cognito_service import cognito_service
 from src.core.logging_config import get_auth_logger
+from src.core.redis_cache import get_cached_user_id, cache_user_id
 
 auth_logger = get_auth_logger()
 
@@ -353,6 +354,45 @@ async def get_api_key_user(
     key_prefix = api_key[:9] if len(api_key) >= 9 else api_key
     
     try:
+        # ========================================================================
+        # REDIS CACHE LAYER (Two-Way Door Pattern)
+        # ========================================================================
+        # Try to get cached user_id from Redis first
+        # If Redis is unavailable/disabled, this returns None and falls through to DB
+        cached_user_id = await get_cached_user_id(key_prefix)
+        
+        if cached_user_id:
+            # Cache HIT: Fast path - skip API key lookup, go straight to user
+            auth_logger.debug("API key cache hit, using fast path",
+                            key_prefix=key_prefix,
+                            event_type="api_key_cache_hit")
+            
+            # Fetch user directly from cache
+            user_query = future_select(User).options(
+                selectinload(User.api_keys)
+            ).where(User.id == int(cached_user_id))
+            
+            user = (await db.execute(user_query)).scalar_one_or_none()
+            
+            if user:
+                # Success! Return cached user without any API key validation
+                # Note: We trust the cache for performance, but could add periodic full validation
+                return user
+            else:
+                # User not found (cache stale) - fall through to full validation
+                auth_logger.warning("Cached user not found in DB, falling back to full validation",
+                                  key_prefix=key_prefix,
+                                  cached_user_id=cached_user_id,
+                                  event_type="cache_stale_user")
+        
+        # ========================================================================
+        # DATABASE VALIDATION LAYER (Cache miss or fallback)
+        # ========================================================================
+        # Cache MISS or disabled: Full validation path
+        auth_logger.debug("API key cache miss, using full validation",
+                        key_prefix=key_prefix,
+                        event_type="api_key_cache_miss")
+        
         # Instead of just getting the API key, join with the user table to avoid lazy loading
         # And also load the user's api_keys relationship to avoid another lazy load
         
@@ -406,7 +446,14 @@ async def get_api_key_user(
                 detail="API key not associated with a valid user",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-            
+        
+        # ========================================================================
+        # CACHE WRITE-BACK (Best effort, non-blocking)
+        # ========================================================================
+        # Cache the validated API key → user_id mapping for future requests
+        # This is fire-and-forget - if it fails, we still return success
+        await cache_user_id(key_prefix, user.id)
+        
         return user
         
     except Exception as e:

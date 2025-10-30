@@ -13,8 +13,35 @@ from ..crud import automation as automation_crud
 from ..services import proxy_router_service
 from ..core.model_routing import model_router
 from ..core.logging_config import get_api_logger
+from ..core.redis_cache import get_cached_session, cache_session, invalidate_session_cache
 
 logger = get_api_logger()
+
+def _serialize_session(session: Session) -> dict:
+    """Helper function to serialize a Session object to a JSON-compatible dict"""
+    return {
+        'id': session.id,
+        'api_key_id': session.api_key_id,
+        'user_id': session.user_id,
+        'model': session.model,
+        'type': session.type,
+        'created_at': session.created_at.isoformat() if session.created_at else None,
+        'expires_at': session.expires_at.isoformat() if session.expires_at else None,
+        'is_active': session.is_active
+    }
+
+async def _cache_session_object(session: Session) -> None:
+    """Helper function to cache a Session object (best effort, non-blocking)"""
+    if session and session.api_key_id:
+        session_data = _serialize_session(session)
+        # Calculate remaining TTL based on expiry time
+        if session.expires_at:
+            remaining_ttl = int((session.expires_at - datetime.utcnow()).total_seconds())
+            if remaining_ttl > 0:
+                await cache_session(session.api_key_id, session_data, ttl=remaining_ttl)
+            else:
+                logger.debug("Session already expired, not caching",
+                           session_id=session.id)
 
 async def get_automation_settings(
     db: AsyncSession,
@@ -57,12 +84,66 @@ async def get_session_for_api_key(
     session_duration: Optional[int] = None,
     model_type: Optional[str] = "LLM"
 ) -> Optional[Session]:
-    session = await session_crud.get_active_session_by_api_key(db, api_key_id)
-
     session_logger = logger.bind(api_key_id=api_key_id, requested_model=requested_model)
     
+    # ========================================================================
+    # REDIS CACHE LAYER (Two-Way Door Pattern)
+    # ========================================================================
+    # Try to get cached session from Redis first
+    cached_session_data = await get_cached_session(api_key_id)
+    
+    if cached_session_data:
+        session_logger.debug("Session cache HIT for API key",
+                           session_id=cached_session_data.get('id'),
+                           event_type="session_cache_hit")
+        
+        # Check if cached session is expired
+        expires_at = datetime.fromisoformat(cached_session_data['expires_at'])
+        if datetime.utcnow() > expires_at:
+            session_logger.info("Cached session is expired, invalidating cache",
+                               session_id=cached_session_data.get('id'),
+                               event_type="cached_session_expired")
+            await invalidate_session_cache(api_key_id)
+        else:
+            # Check if model matches
+            requested_model_id = await model_router.get_target_model(requested_model, model_type)
+            if cached_session_data['model'] == requested_model_id:
+                session_logger.info("Cached session is valid and model matches (fast path)",
+                                   session_id=cached_session_data.get('id'),
+                                   model_id=requested_model_id,
+                                   event_type="cached_session_valid")
+                # Reconstruct Session object from cached data
+                # Note: This is a "light" Session object without relationships loaded
+                # But that's fine for chat completion - we only need id, model, expires_at
+                session = Session(
+                    id=cached_session_data['id'],
+                    api_key_id=cached_session_data['api_key_id'],
+                    user_id=cached_session_data['user_id'],
+                    model=cached_session_data['model'],
+                    type=cached_session_data['type'],
+                    created_at=datetime.fromisoformat(cached_session_data['created_at']),
+                    expires_at=expires_at,
+                    is_active=cached_session_data['is_active']
+                )
+                return session
+            else:
+                session_logger.info("Cached session model mismatch, invalidating and creating new",
+                                   cached_model=cached_session_data['model'],
+                                   requested_model_id=requested_model_id,
+                                   event_type="cached_session_model_mismatch")
+                await close_session(db, cached_session_data['id'])
+                return await create_automated_session(db, api_key_id, user_id, requested_model, session_duration, model_type=model_type)
+    
+    # ========================================================================
+    # DATABASE VALIDATION LAYER (Cache miss or fallback)
+    # ========================================================================
+    session_logger.debug("Session cache MISS, querying database",
+                        event_type="session_cache_miss")
+    
+    session = await session_crud.get_active_session_by_api_key(db, api_key_id)
+    
     if session and session.is_active and not session.is_expired:
-        session_logger.info("Found active session for API key",
+        session_logger.info("Found active session in database",
                            session_id=session.id,
                            session_model=session.model,
                            event_type="active_session_found")
@@ -72,6 +153,10 @@ async def get_session_for_api_key(
                                session_id=session.id,
                                model_id=requested_model_id,
                                event_type="session_model_match")
+            
+            # Cache the session for next request
+            await _cache_session_object(session)
+            
             return session
         else:
             session_logger.info("Session model mismatch, closing and creating new session",
@@ -248,6 +333,10 @@ async def create_automated_session(
                               db_session_id=session.id if session else None,
                               target_model=target_model,
                               event_type="automated_session_created")
+            
+            # Cache the newly created session (best effort, non-blocking)
+            await _cache_session_object(session)
+            
             return session
             
         except proxy_router_service.ProxyRouterServiceError as e:
@@ -329,6 +418,11 @@ async def close_session(
             close_logger.info("Successfully marked session as inactive in database",
                              session_id=session_id,
                              event_type="session_marked_inactive")
+            
+            # Invalidate session cache (best effort, non-blocking)
+            if session.api_key_id:
+                await invalidate_session_cache(session.api_key_id)
+            
             return True
         close_logger.warning("Not marking session as inactive in DB due to proxy failure",
                             session_id=session_id,
