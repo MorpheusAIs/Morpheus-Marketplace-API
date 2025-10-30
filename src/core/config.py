@@ -131,6 +131,14 @@ class Settings(BaseSettings):
     DB_USER: str = Field(default=os.getenv("POSTGRES_USER", "morpheus_user"))
     DB_PASSWORD: str = Field(default=os.getenv("POSTGRES_PASSWORD", "secure_password_here"))
     DB_NAME: str = Field(default=os.getenv("POSTGRES_DB", "morpheus_db"))
+    
+    # SQLAlchemy Connection Pool Settings
+    # Adjust these based on your load requirements and RDS max_connections setting
+    DB_POOL_SIZE: int = Field(default=int(os.getenv("DB_POOL_SIZE", "20")))
+    DB_MAX_OVERFLOW: int = Field(default=int(os.getenv("DB_MAX_OVERFLOW", "30")))
+    DB_POOL_TIMEOUT: int = Field(default=int(os.getenv("DB_POOL_TIMEOUT", "30")))
+    DB_POOL_RECYCLE: int = Field(default=int(os.getenv("DB_POOL_RECYCLE", "3600")))
+    DB_POOL_PRE_PING: bool = Field(default=os.getenv("DB_POOL_PRE_PING", "true").lower() == "true")
 
     # JWT Settings
     JWT_SECRET_KEY: str = Field(default=os.getenv("JWT_SECRET_KEY", "super_secret_key_change_me"))

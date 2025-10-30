@@ -864,7 +864,7 @@ jobs:
           fi
 
   Create-Release:
-    name: Create Git Tags (Only After Successful Deployment)
+    name: Create GitHub Release (Only After Successful Deployment)
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       github.event_name == 'push' && 
@@ -880,67 +880,11 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Create Git Tag (After Successful Deployment)
-        uses: actions/github-script@v7
+      - name: Create release
+        id: create_release
+        uses: anzz1/action-create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const tag = '${{ needs.Generate-Tag.outputs.tag_name }}';
-            const sha = '${{ github.sha }}';
-            const branch = '${{ github.ref_name }}';
-            const isMain = branch === 'main';
-            const isTest = branch === 'test';
-            
-            try {
-              // Check if tag already exists
-              try {
-                await github.rest.git.getRef({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref: `tags/${tag}`
-                });
-                console.log(`⚠️ Tag ${tag} already exists, skipping creation`);
-                return;
-              } catch (error) {
-                if (error.status !== 404) throw error;
-                // Tag doesn't exist, proceed to create it
-              }
-              
-              // Create the tag
-              await github.rest.git.createRef({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: `refs/tags/${tag}`,
-                sha: sha
-              });
-              
-              // Determine environment and URLs
-              const environment = isMain ? 'Production' : 'Development';
-              const baseUrl = isMain ? 'https://api.mor.org' : 'https://api.dev.mor.org';
-              const tagType = isMain ? 'Production' : 'Test';
-              
-              console.log(`✅ Created ${tagType.toLowerCase()} tag: ${tag}`);
-              console.log(`📦 Container: ${{ needs.Generate-Tag.outputs.image_name }}:${tag}`);
-              console.log(`🚀 Deployed to: ${baseUrl}`);
-              
-              // Add to step summary
-              core.summary
-                .addHeading(`🏷️ ${tagType} Release Tagged`)
-                .addTable([
-                  [{data: 'Tag', header: true}, {data: 'Container Image', header: true}, {data: 'Environment', header: true}],
-                  [tag, `${{ needs.Generate-Tag.outputs.image_name }}:${tag}`, `${environment} (${baseUrl})`]
-                ])
-                .addLink('API Documentation', `${baseUrl}/docs`)
-                .addLink('Health Check', `${baseUrl}/health`);
-                
-              // Add latest tag info for main branch
-              if (isMain) {
-                core.summary.addRaw('\n**Latest Tag:** This container is also tagged as `:latest`');
-              }
-              
-              core.summary.write();
-                
-            } catch (error) {
-              console.error(`❌ Failed to create tag: ${error.message}`);
-              core.setFailed(`Failed to create tag: ${error.message}`);
-            }
+          tag_name: ${{ needs.Generate-Tag.outputs.tag_name }}
+          prerelease: ${{ github.ref != 'refs/heads/main' }}
