@@ -60,15 +60,20 @@ async def create_chat_completion(
     request_data: ChatCompletionRequest,
     request: Request,
     user: User = Depends(get_api_key_user),
-    db_api_key: APIKey = Depends(get_current_api_key),
-    db: AsyncSession = Depends(get_db)
+    db_api_key: APIKey = Depends(get_current_api_key)
 ):
     """
     Create a chat completion with automatic session creation if enabled.
     
     Supports both streaming and non-streaming responses based on the 'stream' parameter.
     Tool calling is supported but may work better with streaming enabled.
+    
+    Note: This endpoint uses short-lived DB connections for auth and session lookup
+    (released immediately) to avoid exhausting the connection pool during long-running
+    streaming requests.
     """
+    # Auth connections already released by the dependency functions
+    
     logger = get_api_logger()
     request_id = str(uuid.uuid4())[:8]  # Generate short request ID for tracing
     
@@ -154,13 +159,14 @@ async def create_chat_completion(
                            api_key_id=db_api_key.id,
                            requested_model=requested_model,
                            event_type="session_lookup_start")
-            session = await session_service.get_session_for_api_key(db, db_api_key.id, user.id, requested_model, model_type='LLM')
-            if session:
-                session_id = session.id
-                chat_logger.info("Session retrieved successfully",
-                               request_id=request_id,
-                               session_id=session_id,
-                               event_type="session_lookup_success")
+            async with get_db() as db:
+                session = await session_service.get_session_for_api_key(db, db_api_key.id, user.id, requested_model, model_type='LLM')
+                if session:
+                    session_id = session.id
+                    chat_logger.info("Session retrieved successfully",
+                                   request_id=request_id,
+                                   session_id=session_id,
+                                   event_type="session_lookup_success")
         except Exception as e:
             chat_logger.error("Error in session handling",
                             request_id=request_id,
@@ -197,6 +203,8 @@ async def create_chat_completion(
     log_tool_request_details(json_body, session_id, chat_logger)
     
     # Build streaming generator for response handling
+    # Note: stream_generator and handle_non_streaming_request will create their own
+    # short-lived DB sessions as needed, so we don't pass a db parameter
     stream_generator = build_stream_generator(
         logger=chat_logger,
         session_id=session_id,
@@ -204,7 +212,6 @@ async def create_chat_completion(
         requested_model=requested_model,
         db_api_key=db_api_key,
         user=user,
-        db=db,
     )
     
     # Handle request based on streaming preference
@@ -235,7 +242,6 @@ async def create_chat_completion(
                 db_api_key=db_api_key,
                 user=user,
                 requested_model=requested_model,
-                db=db,
                 session_id=session_id,
             )
         except Exception as e:

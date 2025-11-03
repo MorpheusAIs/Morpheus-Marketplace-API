@@ -3,6 +3,7 @@ import json
 from typing import Optional, Dict, Any, Tuple, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta, timezone
+from sqlalchemy import select
 
 from ..db.models import Session
 from ..db.models import UserAutomationSettings
@@ -13,6 +14,7 @@ from ..crud import automation as automation_crud
 from ..services import proxy_router_service
 from ..core.model_routing import model_router
 from ..core.logging_config import get_api_logger
+from ..db.models import APIKey
 
 logger = get_api_logger()
 
@@ -57,9 +59,40 @@ async def get_session_for_api_key(
     session_duration: Optional[int] = None,
     model_type: Optional[str] = "LLM"
 ) -> Optional[Session]:
-    session = await session_crud.get_active_session_by_api_key(db, api_key_id)
-
+    """
+    Get or create a session for an API key with row-level locking to prevent race conditions.
+    
+    Uses SELECT FOR UPDATE on the API key row to ensure only one concurrent request
+    can check/create a session at a time for the same API key. This prevents the race
+    condition where multiple concurrent requests all see "no session" and try to create
+    one simultaneously, resulting in wasted blockchain transactions.
+    """
+    
     session_logger = logger.bind(api_key_id=api_key_id, requested_model=requested_model)
+    
+    session_logger.debug("Acquiring row lock on API key",
+                        api_key_id=api_key_id,
+                        event_type="api_key_lock_acquire_start")
+    
+    # Lock the API key row - all concurrent requests will wait here in line
+    result = await db.execute(
+        select(APIKey)
+        .where(APIKey.id == api_key_id)
+        .with_for_update()
+    )
+    api_key = result.scalar_one_or_none()
+    
+    if not api_key:
+        session_logger.error("API key not found",
+                           api_key_id=api_key_id,
+                           event_type="api_key_not_found")
+        return None
+    
+    session_logger.debug("Row lock acquired on API key",
+                        api_key_id=api_key_id,
+                        event_type="api_key_lock_acquired")
+    
+    session = await session_crud.get_active_session_by_api_key(db, api_key_id)
     
     if session and session.is_active and not session.is_expired:
         session_logger.info("Found active session for API key",
@@ -82,7 +115,7 @@ async def get_session_for_api_key(
             await close_session(db, session.id)
             return await create_automated_session(db, api_key_id, user_id, requested_model, session_duration, model_type=model_type)
     
-    # No explicit logging here - create_automated_session will log with complete details
+    # No session found - create one (we still hold the lock, so no other request can interfere)
     return await create_automated_session(db, api_key_id, user_id, requested_model, session_duration, model_type=model_type)
 
 async def create_automated_session(

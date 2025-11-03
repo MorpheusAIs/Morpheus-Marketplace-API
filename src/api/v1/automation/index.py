@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 
-from ....db.database import get_db
+from ....db.database import get_db, get_db_session
 from ....dependencies import get_api_key_user, oauth2_scheme
 from ....db.models import User
 from ....crud import automation as automation_crud
@@ -40,7 +40,7 @@ class AutomationSettings(AutomationSettingsBase):
 
 @router.get("/settings", response_model=AutomationSettings)
 async def get_automation_settings(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     user: User = Depends(get_api_key_user)
 ):
     """
@@ -74,7 +74,7 @@ async def get_automation_settings(
 @router.put("/settings", response_model=AutomationSettings)
 async def update_automation_settings(
     automation_settings: AutomationSettingsBase,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     user: User = Depends(get_api_key_user)
 ):
     """

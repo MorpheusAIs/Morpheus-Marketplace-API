@@ -20,7 +20,7 @@ from src.core.config import settings
 from src.core.security import verify_api_key
 from src.crud import user as user_crud
 from src.crud import api_key as api_key_crud
-from src.db.database import get_db
+from src.db.database import get_db, get_db_session
 from src.db.models import User, APIKey
 from src.schemas.token import TokenPayload
 from src.services.cognito_service import cognito_service
@@ -50,7 +50,7 @@ api_key_header = APIKeyHeader(
 cognito_client = boto3.client('cognito-idp', region_name=settings.AWS_REGION)
 
 async def get_api_key_model(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     api_key: str = Depends(api_key_header)
 ) -> Optional[APIKey]:
     """
@@ -80,7 +80,7 @@ async def get_api_key_model(
     return db_api_key
 
 async def get_current_user(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     token: Optional[HTTPAuthorizationCredentials] = Depends(oauth2_scheme_optional)
 ) -> User:
     """
@@ -302,18 +302,17 @@ async def get_current_user(
         )
 
 async def get_api_key_user(
-    db: AsyncSession = Depends(get_db),
     api_key: str = Security(api_key_header)
 ) -> Optional[User]:
     """
     Validate an API key and return the associated user.
+    Uses a short-lived DB connection that is released immediately after auth.
     
     The API key is expected in the format: "Bearer sk-xxxxxx" or just "sk-xxxxxx"
     
     In local testing mode, bypasses API key validation and returns test user.
     
     Args:
-        db: Database session
         api_key: API key from Authorization header
         
     Returns:
@@ -327,7 +326,18 @@ async def get_api_key_user(
     if is_local_testing_mode():
         auth_logger.info("Using local testing mode - bypassing API key validation",
                         event_type="local_testing_bypass")
-        return await get_or_create_test_user(db)
+        async with get_db() as db:
+            user = await get_or_create_test_user(db)
+            user_dict = {
+                'id': user.id,
+                'email': user.email,
+                'name': user.name,
+                'is_active': user.is_active,
+                'cognito_user_id': user.cognito_user_id,
+                'created_at': user.created_at,
+                'updated_at': user.updated_at
+            }
+        return User(**user_dict)
     
     if not api_key:
         raise HTTPException(
@@ -353,61 +363,69 @@ async def get_api_key_user(
     key_prefix = api_key[:9] if len(api_key) >= 9 else api_key
     
     try:
-        # Instead of just getting the API key, join with the user table to avoid lazy loading
-        # And also load the user's api_keys relationship to avoid another lazy load
-        
-        # First get the API key and its user with a subquery
-        api_key_query = select(APIKey).where(APIKey.key_prefix == key_prefix)
-        db_api_key = (await db.execute(api_key_query)).scalar_one_or_none()
-        
-        if not db_api_key:
-            auth_logger.error("Could not find API key",
-                             key_prefix=key_prefix,
-                             event_type="api_key_not_found")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid API key",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        
-        # Validate the full API key
-        # For legacy keys (no encrypted_key), we can only verify the prefix
-        # For modern keys, verify against the stored hash
-        if db_api_key.encrypted_key is None:
-            # LEGACY KEY: Only prefix verification (prefix already matched to get here)
-            auth_logger.info("Legacy API key verified (prefix-only)",
-                           key_prefix=key_prefix,
-                           event_type="legacy_api_key_verified")
-        else:
-            # MODERN KEY: Full hash verification
-            if not verify_api_key(api_key, db_api_key.hashed_key):
-                auth_logger.error("API key hash validation failed",
+        # Use short-lived session for auth lookup
+        async with get_db() as db:
+            # Get the API key with user relationship eagerly loaded
+            api_key_query = select(APIKey).options(
+                joinedload(APIKey.user).selectinload(User.api_keys)
+            ).where(APIKey.key_prefix == key_prefix)
+            db_api_key = (await db.execute(api_key_query)).scalar_one_or_none()
+            
+            if not db_api_key:
+                auth_logger.error("Could not find API key",
                                  key_prefix=key_prefix,
-                                 event_type="api_key_validation_failed")
+                                 event_type="api_key_not_found")
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid API key",
                     headers={"WWW-Authenticate": "Bearer"},
                 )
-        
-        # Update last used timestamp
-        await api_key_crud.update_last_used(db, db_api_key)
-        
-        # Now get the user with api_keys loaded
-        user_query = future_select(User).options(
-            selectinload(User.api_keys)
-        ).where(User.id == db_api_key.user_id)
-        
-        user = (await db.execute(user_query)).scalar_one_or_none()
-        
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="API key not associated with a valid user",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
             
-        return user
+            # Validate the full API key
+            # For legacy keys (no encrypted_key), we can only verify the prefix
+            # For modern keys, verify against the stored hash
+            if db_api_key.encrypted_key is None:
+                # LEGACY KEY: Only prefix verification (prefix already matched to get here)
+                auth_logger.info("Legacy API key verified (prefix-only)",
+                               key_prefix=key_prefix,
+                               event_type="legacy_api_key_verified")
+            else:
+                # MODERN KEY: Full hash verification
+                if not verify_api_key(api_key, db_api_key.hashed_key):
+                    auth_logger.error("API key hash validation failed",
+                                     key_prefix=key_prefix,
+                                     event_type="api_key_validation_failed")
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Invalid API key",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            
+            # Update last used timestamp
+            await api_key_crud.update_last_used(db, db_api_key)
+            
+            # Get user (should already be loaded via joinedload)
+            user = db_api_key.user
+            
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="API key not associated with a valid user",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            
+            # Extract all needed attributes before session closes
+            user_dict = {
+                'id': user.id,
+                'email': user.email,
+                'name': user.name,
+                'is_active': user.is_active,
+                'cognito_user_id': user.cognito_user_id,
+                'created_at': user.created_at,
+                'updated_at': user.updated_at
+            }
+        
+        return User(**user_dict)
         
     except Exception as e:
         # Log the error
@@ -426,16 +444,15 @@ async def get_api_key_user(
         )
 
 async def get_current_api_key(
-    db: AsyncSession = Depends(get_db),
     api_key_str: str = Security(api_key_header)
 ) -> APIKey:
     """
     Validate an API key and return the APIKey object.
+    Uses a short-lived DB connection that is released immediately after auth.
     
     The API key is expected in the format: "Bearer sk-xxxxxx" or just "sk-xxxxxx"
     
     Args:
-        db: Database session
         api_key_str: API key from Authorization header
         
     Returns:
@@ -467,47 +484,64 @@ async def get_current_api_key(
     key_prefix = api_key_str[:9] if len(api_key_str) >= 9 else api_key_str
     
     try:
-        # Get the API key with its user relationship loaded
-        api_key_query = select(APIKey).options(
-            joinedload(APIKey.user)
-        ).where(APIKey.key_prefix == key_prefix, APIKey.is_active == True)
-        
-        db_api_key = (await db.execute(api_key_query)).scalar_one_or_none()
-        
-        if not db_api_key:
-            auth_logger.error("Could not find API key",
-                             key_prefix=key_prefix,
-                             event_type="api_key_not_found")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid API key",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        
-        # Validate the full API key
-        # For legacy keys (no encrypted_key), we can only verify the prefix
-        # For modern keys, verify against the stored hash
-        if db_api_key.encrypted_key is None:
-            # LEGACY KEY: Only prefix verification (prefix already matched to get here)
-            auth_logger.info("Legacy API key verified (prefix-only)",
-                           key_prefix=key_prefix,
-                           event_type="legacy_api_key_verified")
-        else:
-            # MODERN KEY: Full hash verification
-            if not verify_api_key(api_key_str, db_api_key.hashed_key):
-                auth_logger.error("API key hash validation failed",
+        # Use short-lived session for auth lookup
+        async with get_db() as db:
+            # Get the API key with its user relationship loaded
+            api_key_query = select(APIKey).options(
+                joinedload(APIKey.user)
+            ).where(APIKey.key_prefix == key_prefix, APIKey.is_active == True)
+            
+            db_api_key = (await db.execute(api_key_query)).scalar_one_or_none()
+            
+            if not db_api_key:
+                auth_logger.error("Could not find API key",
                                  key_prefix=key_prefix,
-                                 event_type="api_key_validation_failed")
+                                 event_type="api_key_not_found")
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid API key",
                     headers={"WWW-Authenticate": "Bearer"},
                 )
+            
+            # Validate the full API key
+            # For legacy keys (no encrypted_key), we can only verify the prefix
+            # For modern keys, verify against the stored hash
+            if db_api_key.encrypted_key is None:
+                # LEGACY KEY: Only prefix verification (prefix already matched to get here)
+                auth_logger.info("Legacy API key verified (prefix-only)",
+                               key_prefix=key_prefix,
+                               event_type="legacy_api_key_verified")
+            else:
+                # MODERN KEY: Full hash verification
+                if not verify_api_key(api_key_str, db_api_key.hashed_key):
+                    auth_logger.error("API key hash validation failed",
+                                     key_prefix=key_prefix,
+                                     event_type="api_key_validation_failed")
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Invalid API key",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            
+            # Update last used timestamp
+            await api_key_crud.update_last_used(db, db_api_key)
+            
+            # Extract all needed attributes before session closes
+            api_key_dict = {
+                'id': db_api_key.id,
+                'user_id': db_api_key.user_id,
+                'key_prefix': db_api_key.key_prefix,
+                'hashed_key': db_api_key.hashed_key,
+                'encrypted_key': db_api_key.encrypted_key,
+                'is_active': db_api_key.is_active,
+                'last_used_at': db_api_key.last_used_at,
+                'created_at': db_api_key.created_at,
+                'name': db_api_key.name,
+                'encryption_version': db_api_key.encryption_version,
+                'is_default': db_api_key.is_default
+            }
         
-        # Update last used timestamp
-        await api_key_crud.update_last_used(db, db_api_key)
-        
-        return db_api_key
+        return APIKey(**api_key_dict)
         
     except Exception as e:
         # Log the error
@@ -529,4 +563,4 @@ async def get_current_api_key(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 APIKeyUser = Annotated[User, Depends(get_api_key_user)]
 CurrentAPIKey = Annotated[APIKey, Depends(get_current_api_key)]
-DBSession = Annotated[AsyncSession, Depends(get_db)] 
+DBSession = Annotated[AsyncSession, Depends(get_db_session)] 

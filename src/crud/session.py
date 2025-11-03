@@ -58,7 +58,7 @@ async def deactivate_existing_sessions(
         .where(Session.api_key_id == api_key_id, Session.is_active == True)
         .values(is_active=False)
     )
-    await db.commit()
+    await db.flush()  # Flush to DB but don't commit (keeps lock held)
 
 async def get_session_by_id(db: AsyncSession, session_id: str) -> Optional[Session]:
     """
@@ -117,7 +117,7 @@ async def create_session(
     )
     
     db.add(session)
-    await db.commit()
+    await db.flush()  # Flush to DB but don't commit (keeps lock held)
     await db.refresh(session)
     
     return session
@@ -142,7 +142,7 @@ async def mark_session_inactive(
     
     if session:
         session.is_active = False
-        await db.commit()
+        await db.flush()  # Flush to DB but don't commit (keeps lock held)
         await db.refresh(session)
     
     return session
