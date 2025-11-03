@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from ....core.config import settings
-from ....db.database import get_db
+from ....db.database import get_db, get_db_session
 from ....dependencies import get_api_key_user, get_current_api_key, get_api_key_model
 from ....db.models import User, Session, APIKey
 from ....crud import session as session_crud
@@ -43,7 +43,7 @@ DIAMOND_CONTRACT_ADDRESS = os.getenv("DIAMOND_CONTRACT_ADDRESS", "0xb8C55cD613af
 @router.post("/approve")
 async def approve_spending(
     amount: int = Query(..., description="The amount to approve, consider bid price * duration for sessions"),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     user: User = Depends(get_api_key_user)
 ):
     """
@@ -117,7 +117,7 @@ async def create_bid_session(
     bid_id: str = Query(..., description="The blockchain ID (hex) of the bid to create a session for"),
     session_data: SessionDataRequest = Body(..., description="Session data including duration and payment options"),
     user: User = Depends(get_api_key_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     api_key: APIKey = Depends(get_api_key_model)
 ):
     """
@@ -313,7 +313,7 @@ async def create_model_session(
     session_data: SessionDataRequest = Body(..., description="Session data including duration and payment options"),
     user: User = Depends(get_api_key_user),
     api_key: APIKey = Depends(get_api_key_model),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Create a session with a provider using a model ID and associate it with the API key.
@@ -412,7 +412,7 @@ async def create_model_session(
 @router.post("/closesession")
 async def close_session(
     user: User = Depends(get_api_key_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     api_key: APIKey = Depends(get_api_key_model)
 ):
     """
@@ -472,7 +472,7 @@ async def close_session(
 @router.post("/pingsession")
 async def ping_session(
     user: User = Depends(get_api_key_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     api_key: APIKey = Depends(get_api_key_model)
 ):
     """

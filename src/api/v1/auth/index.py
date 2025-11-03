@@ -10,7 +10,7 @@ from ....crud import api_key as api_key_crud
 from ....crud import private_key as private_key_crud
 from ....crud import delegation as delegation_crud
 from ....crud import session as session_crud
-from ....db.database import get_db
+from ....db.database import get_db, get_db_session
 from ....schemas.user import UserDeletionResponse
 from ....schemas.api_key import APIKeyCreate, APIKeyResponse, APIKeyDB
 from ....schemas import private_key as private_key_schemas
@@ -34,7 +34,7 @@ router = APIRouter(tags=["Auth"])
 @router.get("/me", response_model=dict)
 async def get_current_user_info(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Get current user information.
@@ -65,7 +65,7 @@ async def get_current_user_info(
 async def create_api_key(
     api_key_in: APIKeyCreate,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Create a new API key for the current user.
@@ -94,7 +94,7 @@ async def create_api_key(
 @router.get("/keys", response_model=List[APIKeyDB])
 async def get_api_keys(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Get all API keys for the current user.
@@ -115,7 +115,7 @@ async def get_api_keys(
 async def delete_api_key(
     key_id: int,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Deactivate an API key.
@@ -151,7 +151,7 @@ async def delete_api_key(
 @router.post("/private-key", status_code=status.HTTP_201_CREATED, response_model=dict)
 async def store_private_key(
     private_key_data: private_key_schemas.PrivateKeyCreate,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -184,7 +184,7 @@ async def store_private_key(
 
 @router.get("/private-key", response_model=private_key_schemas.PrivateKeyStatus)
 async def get_private_key_status(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -203,7 +203,7 @@ async def get_private_key_status(
 
 @router.delete("/private-key", status_code=status.HTTP_200_OK, response_model=dict)
 async def delete_private_key(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -238,7 +238,7 @@ async def delete_private_key(
 @router.post("/delegation", response_model=delegation_schemas.DelegationRead)
 async def store_delegation(
     delegation_in: delegation_schemas.DelegationCreate,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -281,7 +281,7 @@ async def store_delegation(
 async def get_user_delegations(
     skip: int = 0,
     limit: int = 10,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -302,7 +302,7 @@ async def get_user_delegations(
 
 @router.get("/delegation/active", response_model=Optional[delegation_schemas.DelegationRead])
 async def get_active_user_delegation(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -322,7 +322,7 @@ async def get_active_user_delegation(
 @router.delete("/delegation/{delegation_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_delegation(
     delegation_id: int,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -356,7 +356,7 @@ async def delete_delegation(
 @router.delete("/register", response_model=UserDeletionResponse, status_code=status.HTTP_200_OK)
 async def delete_user_account(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Delete the current user's account and all associated data.
@@ -469,7 +469,7 @@ async def delete_user_account(
 @router.get("/keys/first", response_model=Optional[APIKeyDB])
 async def get_first_api_key(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Get the first (oldest) active API key for the current user.
@@ -483,7 +483,7 @@ async def get_first_api_key(
 @router.get("/keys/default", response_model=Optional[APIKeyDB])
 async def get_default_api_key(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Get the user's default API key. If no default is set, returns the first (oldest) active API key.
@@ -498,7 +498,7 @@ async def get_default_api_key(
 async def set_default_api_key(
     key_id: int,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Set an API key as the user's default. Clears any existing default.
@@ -518,7 +518,7 @@ async def set_default_api_key(
 @router.get("/keys/default/decrypted")
 async def get_default_api_key_decrypted(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Get the user's default API key with the full decrypted key for auto-selection.
