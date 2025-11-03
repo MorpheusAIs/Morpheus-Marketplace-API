@@ -8,7 +8,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime
 
-from ....db.database import get_db
+from ....db.database import get_db, get_db_session
 from ....db.models import User, MessageRole
 from ....dependencies import get_api_key_user, get_current_user, CurrentUser
 from ....crud import chat as chat_crud
@@ -20,7 +20,7 @@ router = APIRouter()
 # Dependency to get current user from API key authentication only
 # This ensures consistency with chat completions endpoint which also uses API key
 async def get_current_user_api_key_only(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     user: User = Depends(get_api_key_user)
 ) -> User:
     """
@@ -83,7 +83,7 @@ class ChatDetailResponse(BaseModel):
 @router.post("/chats", response_model=ChatResponse, status_code=status.HTTP_201_CREATED)
 async def create_chat(
     chat_data: ChatCreate,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Create a new chat conversation."""
@@ -101,7 +101,7 @@ async def create_chat(
 async def get_user_chats(
     skip: int = 0,
     limit: int = 50,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Get all chats for the current user."""
@@ -126,7 +126,7 @@ async def get_user_chats(
 @router.get("/chats/{chat_id}", response_model=ChatDetailResponse)
 async def get_chat(
     chat_id: str,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Get a specific chat with all messages."""
@@ -160,7 +160,7 @@ async def get_chat(
 async def update_chat(
     chat_id: str,
     chat_data: ChatUpdate,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Update chat title."""
@@ -180,7 +180,7 @@ async def update_chat(
 async def delete_chat(
     chat_id: str,
     archive_only: bool = True,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Delete or archive a chat."""
@@ -198,7 +198,7 @@ async def delete_chat(
 async def create_message(
     chat_id: str,
     message_data: MessageCreate,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Add a message to a chat."""
@@ -237,7 +237,7 @@ async def get_chat_messages(
     chat_id: str,
     skip: int = 0,
     limit: int = 100,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Get messages for a specific chat."""
@@ -259,7 +259,7 @@ async def get_chat_messages(
 @router.delete("/messages/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_message(
     message_id: str,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user_api_key_only)
 ):
     """Delete a specific message."""

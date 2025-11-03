@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from typing import AsyncGenerator
+from contextlib import asynccontextmanager
 from src.core.config import settings
 
 # Create async engine instance with explicit pool configuration
@@ -29,8 +30,44 @@ AsyncSessionLocal = sessionmaker(
 # Base class for declarative models
 Base = declarative_base()
 
-# Dependency to get DB session
+# Context manager version for manual usage (async with get_db_context() as db:)
+@asynccontextmanager
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Get a database session as a context manager.
+    
+    Usage - As context manager (short-lived, recommended for most cases):
+        async with get_db() as db:
+            result = await db.execute(query)
+            # Connection released when context exits
+    
+    This is the recommended approach for session management to avoid
+    connection pool exhaustion during long-running operations.
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+# FastAPI dependency version (for use with Depends())
+async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Get a database session for FastAPI dependency injection.
+    
+    Usage - As FastAPI dependency (request-scoped):
+        @router.post("/endpoint")
+        async def endpoint(db: AsyncSession = Depends(get_db_session)):
+            # Connection held for request duration
+            # Automatically committed/rolled back at end of request
+    
+    Note: This is NOT decorated with @asynccontextmanager because
+    FastAPI's Depends() expects a plain async generator, not a context manager.
+    """
     async with AsyncSessionLocal() as session:
         try:
             yield session

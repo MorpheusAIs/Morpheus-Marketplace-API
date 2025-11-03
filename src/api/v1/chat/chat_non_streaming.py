@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
+import httpx
 from fastapi.responses import JSONResponse
 
 from ....services import proxy_router_service
 from ....services import session_service
+from ....db.database import get_db
 
 def safe_parse_json_response(response: httpx.Response, logger, request_id: str, messages: list, chat_params: dict) -> Tuple[dict, Exception]:
     """Safely parse a JSON response from the proxy router."""
@@ -36,13 +38,15 @@ async def handle_non_streaming_request(
     db_api_key,
     user,
     requested_model: Optional[str],
-    db,
     session_id: str,
 ):
     """Perform the non-streaming proxy call with error parsing and retry semantics.
 
     This mirrors chat.py's original behavior and logging exactly.
     Returns a JSONResponse.
+    
+    Note: Uses short-lived DB connections for session creation to avoid
+    holding connections during long-running operations.
     """
 
     # Parse the request body to get messages and other parameters
@@ -120,22 +124,34 @@ async def handle_non_streaming_request(
                                    api_key_id=db_api_key.id,
                                    requested_model=requested_model,
                                    event_type="new_session_creation_start")
-                        new_session = await session_service.create_automated_session(
-                            db=db,
-                            api_key_id=db_api_key.id,
-                            user_id=user.id,
-                            requested_model=requested_model,
-                        )
-                        new_session_id = new_session.id
-                        logger.info("Created new session successfully",
-                                   request_id=request_id,
-                                   new_session_id=new_session_id,
-                                   event_type="new_session_created")
+                        # Use short-lived DB session for session creation
+                        # Use get_session_for_api_key instead of create_automated_session
+                        # to benefit from row-level locking and prevent race conditions
+                        async with get_db() as db:
+                            new_session = await session_service.get_session_for_api_key(
+                                db=db,
+                                api_key_id=db_api_key.id,
+                                user_id=user.id,
+                                requested_model=requested_model,
+                            )
+                            new_session_id = new_session.id if new_session else None
+                        # DB connection released here
+                        
+                        if new_session_id:
+                            logger.info("Created new session successfully",
+                                       request_id=request_id,
+                                       new_session_id=new_session_id,
+                                       event_type="new_session_created")
 
-                        # Add a small delay to ensure the session is fully registered
-                        logger.debug("Adding brief delay to ensure session is registered",
-                                    request_id=request_id)
-                        await asyncio.sleep(1.0)
+                            # Add a small delay to ensure the session is fully registered
+                            logger.debug("Adding brief delay to ensure session is registered",
+                                        request_id=request_id)
+                            await asyncio.sleep(1.0)
+                        else:
+                            logger.error("Failed to create new session - automation may be disabled",
+                                        request_id=request_id,
+                                        event_type="new_session_creation_failed")
+                            retry_with_new_session = False
                     except Exception as e:  # noqa: BLE001
                         logger.error("Failed to create new session",
                                     request_id=request_id,
