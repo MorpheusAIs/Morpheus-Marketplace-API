@@ -4,8 +4,8 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 
-from ....db.database import get_db, get_db_session
-from ....dependencies import get_api_key_user, oauth2_scheme
+from ....db.database import get_db_session
+from ....dependencies import get_current_user
 from ....db.models import User
 from ....crud import automation as automation_crud
 from ....core.config import settings as app_settings
@@ -40,14 +40,17 @@ class AutomationSettings(AutomationSettingsBase):
 
 @router.get("/settings", response_model=AutomationSettings)
 async def get_automation_settings(
-    db: AsyncSession = Depends(get_db_session),
-    user: User = Depends(get_api_key_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Get automation settings for the authenticated user.
+    
+    Requires JWT Bearer authentication with Cognito token.
+    Automation settings control automatic session creation behavior for all of the user's API keys.
     """
-    # Check if user exists
-    if not user:
+    # Check if user exists (should always be true after get_current_user)
+    if not current_user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
@@ -62,11 +65,11 @@ async def get_automation_settings(
         )
     
     # Get automation settings
-    user_settings = await automation_crud.get_automation_settings(db, user.id)
+    user_settings = await automation_crud.get_automation_settings(db, current_user.id)
     
     # If settings don't exist, create default settings
     if not user_settings:
-        user_settings = await automation_crud.create_automation_settings(db, user.id)
+        user_settings = await automation_crud.create_automation_settings(db, current_user.id)
     
     return user_settings
 
@@ -74,14 +77,17 @@ async def get_automation_settings(
 @router.put("/settings", response_model=AutomationSettings)
 async def update_automation_settings(
     automation_settings: AutomationSettingsBase,
-    db: AsyncSession = Depends(get_db_session),
-    user: User = Depends(get_api_key_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Update automation settings for the authenticated user.
+    
+    Requires JWT Bearer authentication with Cognito token.
+    Automation settings control automatic session creation behavior for all of the user's API keys.
     """
-    # Check if user exists
-    if not user:
+    # Check if user exists (should always be true after get_current_user)
+    if not current_user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
@@ -111,7 +117,7 @@ async def update_automation_settings(
     # Update automation settings
     updated_settings = await automation_crud.update_automation_settings(
         db,
-        user.id,
+        current_user.id,
         is_enabled=automation_settings.is_enabled,
         session_duration=automation_settings.session_duration
     )
