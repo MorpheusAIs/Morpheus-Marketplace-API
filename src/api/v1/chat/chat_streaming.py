@@ -7,6 +7,7 @@ from typing import Any, AsyncIterator, Callable, Dict, Optional
 
 from ....services import proxy_router_service
 from ....services import session_service
+from ....db.database import get_db
 
 
 def build_stream_generator(
@@ -17,12 +18,14 @@ def build_stream_generator(
     requested_model: Optional[str],
     db_api_key,
     user,
-    db,
 ) -> Callable[[], AsyncIterator[bytes]]:
     """Return a zero-arg async generator function that streams proxy responses.
 
     The emitted log messages and error texts are preserved 1:1 with the original
     implementation to ensure behavior parity.
+    
+    Note: Uses short-lived DB connections for session creation to avoid
+    holding connections during long-running streaming operations.
     """
 
     async def stream_generator() -> AsyncIterator[bytes]:
@@ -120,20 +123,27 @@ def build_stream_generator(
                                                           api_key_id=db_api_key.id,
                                                           requested_model=requested_model,
                                                           event_type="stream_new_session_creation_start")
-                                        new_session = await session_service.create_automated_session(
-                                            db=db,
-                                            api_key_id=db_api_key.id,
-                                            user_id=user.id,
-                                            requested_model=requested_model,
-                                        )
-                                        new_session_id = new_session.id
-                                        stream_logger.info("Created new session for stream retry",
-                                                          new_session_id=new_session_id,
-                                                          event_type="stream_new_session_created")
+                                        async with get_db() as db:
+                                            new_session = await session_service.get_session_for_api_key(
+                                                db=db,
+                                                api_key_id=db_api_key.id,
+                                                user_id=user.id,
+                                                requested_model=requested_model,
+                                            )
+                                            new_session_id = new_session.id if new_session else None
+                                        
+                                        if new_session_id:
+                                            stream_logger.info("Created new session for stream retry",
+                                                              new_session_id=new_session_id,
+                                                              event_type="stream_new_session_created")
 
-                                        # Add a small delay to ensure the session is fully registered
-                                        stream_logger.debug("Adding brief delay to ensure session is registered")
-                                        await asyncio.sleep(1.0)
+                                            # Add a small delay to ensure the session is fully registered
+                                            stream_logger.debug("Adding brief delay to ensure session is registered")
+                                            await asyncio.sleep(1.0)
+                                        else:
+                                            stream_logger.error("Failed to create new session - automation may be disabled",
+                                                               event_type="stream_new_session_creation_failed")
+                                            retry_with_new_session = False
                                     except Exception as e:  # noqa: BLE001
                                         stream_logger.error("Failed to create new session",
                                                            error=str(e),

@@ -31,7 +31,6 @@ async def create_embeddings(
     request_data: EmbeddingRequest,
     request: Request,
     user: User = Depends(get_api_key_user),
-    db: AsyncSession = Depends(get_db),
     db_api_key: APIKey = Depends(get_current_api_key),
 ):
     """
@@ -39,6 +38,9 @@ async def create_embeddings(
     
     This endpoint creates embeddings using the Morpheus Network providers.
     It automatically manages sessions and routes requests to the appropriate embedding model.
+    
+    Note: Uses short-lived DB connections for auth and session lookup to optimize
+    connection pool usage.
     """
     request_id = str(uuid.uuid4())[:8]  # Generate short request ID for tracing
     embeddings_logger = logger.bind(endpoint="create_embeddings", 
@@ -63,9 +65,12 @@ async def create_embeddings(
                            api_key_id=db_api_key.id,
                            requested_model=requested_model,
                            event_type="session_lookup_start")
-                session = await session_service.get_session_for_api_key(db, db_api_key.id, user.id, requested_model, model_type='EMBEDDINGS')
-                if session:
-                    session_id = session.id
+                async with get_db() as db:
+                    session = await session_service.get_session_for_api_key(db, db_api_key.id, user.id, requested_model, model_type='EMBEDDINGS')
+                    if session:
+                        session_id = session.id
+                
+                if session_id:
                     embeddings_logger.info("Session retrieved successfully",
                                 request_id=request_id,
                                 session_id=session_id,
