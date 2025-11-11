@@ -709,9 +709,12 @@ async def chatCompletionsStream(
             ) as response:
                 # Check for errors
                 if response.status_code >= 400:
+                    # Read the error response body to get detailed error information
+                    error_body = await response.aread()
+                    error_text = error_body.decode("utf-8", errors="replace")
                     error_type = "server_error" if response.status_code >= 500 else "client_error"
                     raise ProxyRouterServiceError(
-                        f"Chat completions stream failed: HTTP {response.status_code}",
+                        f"HTTP {response.status_code}: {error_text}",
                         status_code=response.status_code,
                         error_type=error_type
                     )
