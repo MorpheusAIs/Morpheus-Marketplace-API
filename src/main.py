@@ -1397,20 +1397,32 @@ def custom_openapi():
         }
     }
     
-    # Apply security to all API endpoints (except excluded ones)
+    # Apply security schemes based on actual endpoint authentication
+    # FastAPI auto-detects security from dependencies, but we need to ensure correct mapping
     for path_key, path_item in openapi_schema["paths"].items():
         # Skip certain endpoints that should remain unauthenticated
-        if path_key in ["/", "/health", "/docs", "/api-docs"] or path_key.startswith("/docs/"):
+        if path_key in ["/", "/health", "/docs", "/api-docs", "/cors-check"] or path_key.startswith("/docs/") or path_key.startswith("/exchange-token"):
             continue
-            
-        # Apply all authentication methods to API endpoints
+        
+        # Determine security based on path patterns (matching actual implementation)
         for method, operation in path_item.items():
             if method in ["get", "post", "put", "delete", "patch"]:
-                operation["security"] = [
-                    {"OAuth2": ["openid", "email", "profile"]},
-                    {"BearerAuth": []},
-                    {"APIKeyAuth": []}
-                ]
+                # Models endpoints: No authentication (public)
+                if path_key.startswith("/api/v1/models"):
+                    # Remove any security that FastAPI might have added
+                    if "security" in operation:
+                        del operation["security"]
+                # Auth and Automation endpoints: OAuth2/BearerAuth only (JWT tokens from Cognito)
+                elif path_key.startswith("/api/v1/auth/") or path_key.startswith("/api/v1/automation/"):
+                    operation["security"] = [
+                        {"OAuth2": ["openid", "email", "profile"]},
+                        {"BearerAuth": []}
+                    ]
+                # Default: All other endpoints use APIKeyAuth only
+                else:
+                    operation["security"] = [
+                        {"APIKeyAuth": []}
+                    ]
 
     app.openapi_schema = openapi_schema
     return app.openapi_schema
