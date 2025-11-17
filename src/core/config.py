@@ -187,6 +187,8 @@ class Settings(BaseSettings):
     ACTIVE_MODELS_URL: str = Field(default=os.getenv("ACTIVE_MODELS_URL", "https://active.dev.mor.org/active_models.json"))
     DEFAULT_FALLBACK_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_MODEL", "mistral-31-24b"))
     DEFAULT_FALLBACK_EMBEDDINGS_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_EMBEDDINGS_MODEL", "text-embedding-bge-m3"))
+    DEFAULT_FALLBACK_TTS_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_TTS_MODEL", "tts-kokoro"))
+    DEFAULT_FALLBACK_STT_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_STT_MODEL", "whisper-1"))
     
     # Legacy Model Sync Settings (deprecated - kept for compatibility)
     MODEL_SYNC_ON_STARTUP: bool = Field(default=False)  # Disabled by default

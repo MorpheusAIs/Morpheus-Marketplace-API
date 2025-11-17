@@ -15,7 +15,7 @@ import uuid
 import socket
 import platform
 
-from src.api.v1 import models, chat, session, auth, automation, chat_history, embeddings
+from src.api.v1 import models, chat, session, auth, automation, chat_history, embeddings, audio
 
 from src.core.config import settings
 from src.core.version import get_version, get_version_info
@@ -436,6 +436,7 @@ app.include_router(session, prefix=f"{settings.API_V1_STR}/session")
 app.include_router(automation, prefix=f"{settings.API_V1_STR}/automation")
 app.include_router(chat_history, prefix=f"{settings.API_V1_STR}/chat-history")
 app.include_router(embeddings, prefix=f"{settings.API_V1_STR}")
+app.include_router(audio, prefix=f"{settings.API_V1_STR}")
 
 # Default routes - using standard APIRoute for these endpoints to avoid dependency resolution issues
 # Reset the route_class temporarily for these specific routes
@@ -531,7 +532,10 @@ async def health_check():
             "model_count": model_count,
             "cache_info": model_cache_info,
             "active_models_url": settings.ACTIVE_MODELS_URL,
-            "default_fallback_model": settings.DEFAULT_FALLBACK_MODEL
+            "default_fallback_model": settings.DEFAULT_FALLBACK_MODEL,
+            "default_fallback_tts_model": settings.DEFAULT_FALLBACK_TTS_MODEL,
+            "default_fallback_stt_model": settings.DEFAULT_FALLBACK_STT_MODEL,
+            "default_fallback_embeddings_model": settings.DEFAULT_FALLBACK_EMBEDDINGS_MODEL,
         },
         "container": {
             "id": CONTAINER_ID,
@@ -584,6 +588,9 @@ async def model_health_check():
             "service_config": {
                 "active_models_url": settings.ACTIVE_MODELS_URL,
                 "default_fallback_model": settings.DEFAULT_FALLBACK_MODEL,
+                "default_fallback_tts_model": settings.DEFAULT_FALLBACK_TTS_MODEL,
+                "default_fallback_stt_model": settings.DEFAULT_FALLBACK_STT_MODEL,
+                "default_fallback_embeddings_model": settings.DEFAULT_FALLBACK_EMBEDDINGS_MODEL,
                 "cache_duration_seconds": cache_stats.get("cache_duration", "unknown")
             },
             "cache_stats": cache_stats,
