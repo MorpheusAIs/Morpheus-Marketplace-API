@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import io
+from httpx import Request
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Optional, Any
+from typing import AsyncIterator, Dict, Optional, Any, List
 
 import httpx
 from ..core.config import settings
@@ -110,6 +112,8 @@ async def _execute_request(
     headers: Optional[Dict[str, str]] = None,
     json_data: Optional[Dict[str, Any]] = None,
     params: Optional[Dict[str, Any]] = None,
+    files: Optional[List] = None,
+    data: Optional[Dict[str, Any]] = None,
     timeout: float = 120.0,  # INCREASED from 30s for large token responses
     max_retries: int = 3,
     user_id: Optional[int] = None,
@@ -124,6 +128,8 @@ async def _execute_request(
         headers: Additional request headers
         json_data: Request body as JSON
         params: Query parameters
+        files: List of files for multipart/form-data [(field, (filename, file, content_type))]
+        data: Form data for multipart/form-data
         timeout: Request timeout
         max_retries: Maximum number of retry attempts
         user_id: User ID for private key authentication
@@ -185,14 +191,28 @@ async def _execute_request(
                         method=method,
                         attempt=attempt+1,
                         max_retries=max_retries)
+            
+            # Build request kwargs
+            request_kwargs = {
+                "headers": request_headers,
+                "auth": auth,
+                "timeout": timeout
+            }
+            
+            # Add body based on type
+            if json_data is not None:
+                request_kwargs["json"] = json_data
+            if params is not None:
+                request_kwargs["params"] = params
+            if files is not None:
+                request_kwargs["files"] = files
+            if data is not None:
+                request_kwargs["data"] = data
+            
             response = await client.request(
                 method,
                 url,
-                headers=request_headers,
-                json=json_data,
-                params=params,
-                auth=auth,
-                timeout=timeout
+                **request_kwargs
             )
             
             logger.debug("Proxy router response received",
@@ -795,6 +815,195 @@ async def embeddings(
         if isinstance(e, ProxyRouterServiceError):
             raise
         raise ProxyRouterServiceError(f"Failed to send embeddings request: {str(e)}")
+
+
+async def audio_transcription(
+    *,
+    session_id: str,
+    file: Optional[Any] = None,
+    s3_presigned_url: Optional[str] = None,
+    prompt: Optional[str] = None,
+    temperature: Optional[float] = None,
+    language: Optional[str] = None,
+    response_format: Optional[str] = "json",
+    timestamp_granularities: Optional[List[str]] = None,
+    output_content: Optional[str] = None,
+    enable_diarization: Optional[bool] = False
+) -> httpx.Response:
+    """
+    Send an audio transcription request to the proxy router.
+    
+    Args:
+        session_id: Session ID for the transcription request
+        file: Audio file to transcribe (UploadFile object)
+        s3_presigned_url: Pre-signed URL for secure file access
+        prompt: Optional text to guide the transcription
+        temperature: Temperature for sampling (0.0 - 1.0)
+        language: Language of the audio (ISO-639-1 format)
+        response_format: Response format (json, text, srt, verbose_json, vtt)
+        timestamp_granularities: List of timestamp granularities (word, segment)
+        output_content: Output content type
+        enable_diarization: Enable speaker diarization
+        
+    Returns:
+        httpx.Response: The response object
+        
+    Raises:
+        ProxyRouterServiceError: If the request fails
+    """
+    logger.info("Audio transcription request",
+               session_id=session_id,
+               response_format=response_format,
+               event_type="audio_transcription_request_start")
+    
+    headers = {
+        "session_id": session_id,
+    }
+    
+    # Prepare multipart form data
+    files = {}
+    data = {}
+    
+    if file:
+        # Handle file upload
+        files["file"] = (file.filename, file.file, file.content_type)
+    
+    if s3_presigned_url:
+        data["s3_presigned_url"] = s3_presigned_url
+    
+    if prompt:
+        data["prompt"] = prompt
+    
+    if temperature is not None:
+        data["temperature"] = str(temperature)
+    
+    if language:
+        data["language"] = language
+    
+    if response_format:
+        data["response_format"] = response_format
+    
+    if timestamp_granularities:
+        for granularity in timestamp_granularities:
+            data["timestamp_granularities[]"] = granularity
+    
+    if output_content:
+        data["output_content"] = output_content
+    
+    if enable_diarization is not None:
+        data["enable_diarization"] = str(enable_diarization).lower()
+    
+    try:
+        # Prepare multipart files
+        multipart_files = []
+        
+        if file:
+            multipart_files.append(("file", (file.filename, file.file, file.content_type)))
+        else:
+            multipart_files.append(("_multipart", ("", io.BytesIO(b""), "application/octet-stream")))
+        
+        # Use _execute_request for retry logic and error handling
+        response = await _execute_request(
+            "POST",
+            "v1/audio/transcriptions",
+            headers=headers,
+            files=multipart_files,
+            data=data,
+            timeout=120.0,
+            max_retries=3
+        )
+        
+        logger.info("Audio transcription response received",
+                   status_code=response.status_code,
+                   event_type="audio_transcription_response_received")
+        
+        return response
+            
+    except Exception as e:
+        logger.error("Audio transcription request error",
+                    session_id=session_id,
+                    error=str(e),
+                    event_type="audio_transcription_request_error")
+        if isinstance(e, ProxyRouterServiceError):
+            raise
+        raise ProxyRouterServiceError(f"Failed to send audio transcription request: {str(e)}")
+
+
+async def audio_speech(
+    *,
+    session_id: str,
+    input: str,
+    voice: Optional[str] = None,
+    response_format: Optional[str] = None,
+    speed: Optional[float] = None
+) -> httpx.Response:
+    """
+    Send an audio speech (TTS) request to the proxy router.
+    
+    Args:
+        session_id: Session ID for the speech request
+        input: Text to convert to speech
+        voice: Voice to use for speech generation (optional)
+        response_format: Audio format (mp3, opus, aac, flac, wav, pcm) (optional)
+        speed: Speech speed (0.25 - 4.0) (optional)
+        
+    Returns:
+        httpx.Response: The response object with binary audio data
+        
+    Raises:
+        ProxyRouterServiceError: If the request fails
+    """
+    logger.info("Audio speech request",
+               session_id=session_id,
+               response_format=response_format,
+               voice=voice,
+               speed=speed,
+               event_type="audio_speech_request_start")
+    
+    # Build the request payload with only required field
+    payload = {
+        "input": input
+    }
+    
+    # Add optional parameters if provided
+    if voice:
+        payload["voice"] = voice
+    if response_format:
+        payload["response_format"] = response_format
+    if speed is not None:
+        payload["speed"] = speed
+
+    # Build headers
+    headers = {
+        "Content-Type": "application/json",
+        "session_id": session_id,
+    }
+    
+    try:
+        # Use _execute_request for retry logic and error handling
+        response = await _execute_request(
+            "POST",
+            "v1/audio/speech",
+            headers=headers,
+            json_data=payload,
+            timeout=120.0,
+            max_retries=3
+        )
+        
+        logger.info("Audio speech response received",
+                   status_code=response.status_code,
+                   event_type="audio_speech_response_received")
+        
+        return response
+            
+    except Exception as e:
+        logger.error("Audio speech request error",
+                    session_id=session_id,
+                    error=str(e),
+                    event_type="audio_speech_request_error")
+        if isinstance(e, ProxyRouterServiceError):
+            raise
+        raise ProxyRouterServiceError(f"Failed to send audio speech request: {str(e)}")
 
 
 async def getAllModels() -> httpx.Response:

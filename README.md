@@ -167,6 +167,8 @@ DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhos
 ACTIVE_MODELS_URL=https://active.dev.mor.org/active_models.json
 DEFAULT_FALLBACK_MODEL=mistral-31-24b
 DEFAULT_FALLBACK_EMBEDDINGS_MODEL=text-embedding-bge-m3
+DEFAULT_FALLBACK_TTS_MODEL=tts-kokoro
+DEFAULT_FALLBACK_STT_MODEL=whisper-1
 
 # JWT
 JWT_SECRET_KEY=generate_this_with_openssl_rand_-hex_32
@@ -541,6 +543,40 @@ curl http://localhost:8000/api/v1/models
 # Test health checks
 curl http://localhost:8000/health
 ```
+
+## Load Testing
+
+A comprehensive load testing tool is available to test API performance and database operations:
+
+```bash
+# Install dependencies
+pip install -r load_test_requirements.txt
+
+# Run load test
+python load_test.py \
+  --url https://api.morpheus.example.com \
+  --bearer-token "eyJ..." \
+  --users 50 \
+  --duration 120
+```
+
+The load testing script focuses on endpoints that don't depend on the proxy-router:
+- ✅ Authentication and API key management
+- ✅ Chat history CRUD operations
+- ✅ Automation settings
+- ✅ Model listing and health checks
+- ❌ Session management (requires proxy-router)
+- ❌ Chat completions (requires proxy-router)
+- ❌ Embeddings (requires proxy-router)
+
+**Features:**
+- Realistic user behavior simulation
+- Detailed performance metrics (p50, p95, p99)
+- JSON and console output
+- Concurrent user support (configurable)
+- Progress tracking
+
+**See [LOAD_TEST_README.md](LOAD_TEST_README.md) for complete documentation.**
 
 ## Development and Contributing
 
