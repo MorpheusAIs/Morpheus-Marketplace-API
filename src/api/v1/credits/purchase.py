@@ -16,7 +16,7 @@ from decimal import Decimal
 from datetime import datetime
 import uuid
 
-from ....db.database import get_db
+from ....db.database import get_db, get_db_session
 from ....dependencies import get_current_user
 from ....db.models import User
 from ....crud import api_credits
@@ -48,8 +48,7 @@ router = APIRouter()
 @router.post("/purchase/stripe", response_model=StripePurchaseResponse)
 async def create_stripe_payment(
     request: StripePurchaseRequest,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Create a Stripe payment intent for purchasing API credits.
@@ -73,7 +72,7 @@ async def create_stripe_payment(
     credits_amount = Decimal(str(request.amount_usd))
 
     try:
-        # Create Stripe payment intent
+        # Create Stripe payment intent (3rd party call - no DB connection held)
         payment_intent = await stripe_service.create_payment_intent(
             amount_usd=request.amount_usd,
             user_id=current_user.id,
@@ -81,22 +80,23 @@ async def create_stripe_payment(
             payment_method_id=request.payment_method_id
         )
 
-        # Store payment intent in database
-        db_payment_intent = PaymentIntent(
-            id=str(uuid.uuid4()),
-            user_id=current_user.id,
-            provider=PaymentProvider.stripe,
-            external_id=payment_intent["id"],
-            amount_usd=Decimal(str(request.amount_usd)),
-            credits_amount=credits_amount,
-            status=PaymentStatus.pending,
-            currency="USD",
-            payment_method="card",
-            metadata={"payment_method_id": request.payment_method_id}
-        )
+        # Store payment intent in database using context manager
+        async with get_db() as db:
+            db_payment_intent = PaymentIntent(
+                id=str(uuid.uuid4()),
+                user_id=current_user.id,
+                provider=PaymentProvider.stripe,
+                external_id=payment_intent["id"],
+                amount_usd=Decimal(str(request.amount_usd)),
+                credits_amount=credits_amount,
+                status=PaymentStatus.pending,
+                currency="USD",
+                payment_method="card",
+                metadata={"payment_method_id": request.payment_method_id}
+            )
 
-        db.add(db_payment_intent)
-        await db.commit()
+            db.add(db_payment_intent)
+            # Commit happens automatically on context exit
 
         logger.info("Created Stripe payment intent",
                    user_id=current_user.id,
@@ -125,8 +125,7 @@ async def create_stripe_payment(
 @router.post("/purchase/coinbase", response_model=CoinbasePurchaseResponse)
 async def create_coinbase_payment(
     request: CoinbasePurchaseRequest,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Create a Coinbase Commerce charge for purchasing API credits.
@@ -149,7 +148,7 @@ async def create_coinbase_payment(
     credits_amount = Decimal(str(request.amount_usd))
 
     try:
-        # Create Coinbase Commerce charge
+        # Create Coinbase Commerce charge (3rd party call - no DB connection held)
         charge = await coinbase_service.create_charge(
             amount_usd=request.amount_usd,
             user_id=current_user.id,
@@ -157,25 +156,26 @@ async def create_coinbase_payment(
             crypto_currency=request.crypto_currency
         )
 
-        # Store payment intent in database
-        db_payment_intent = PaymentIntent(
-            id=str(uuid.uuid4()),
-            user_id=current_user.id,
-            provider=PaymentProvider.coinbase,
-            external_id=charge["id"],
-            amount_usd=Decimal(str(request.amount_usd)),
-            credits_amount=credits_amount,
-            status=PaymentStatus.pending,
-            currency="USD",
-            payment_method="crypto",
-            metadata={
-                "crypto_currency": request.crypto_currency,
-                "hosted_url": charge["hosted_url"]
-            }
-        )
+        # Store payment intent in database using context manager
+        async with get_db() as db:
+            db_payment_intent = PaymentIntent(
+                id=str(uuid.uuid4()),
+                user_id=current_user.id,
+                provider=PaymentProvider.coinbase,
+                external_id=charge["id"],
+                amount_usd=Decimal(str(request.amount_usd)),
+                credits_amount=credits_amount,
+                status=PaymentStatus.pending,
+                currency="USD",
+                payment_method="crypto",
+                metadata={
+                    "crypto_currency": request.crypto_currency,
+                    "hosted_url": charge["hosted_url"]
+                }
+            )
 
-        db.add(db_payment_intent)
-        await db.commit()
+            db.add(db_payment_intent)
+            # Commit happens automatically on context exit
 
         logger.info("Created Coinbase Commerce charge",
                    user_id=current_user.id,
@@ -204,8 +204,7 @@ async def create_coinbase_payment(
 @router.post("/purchase/mor", response_model=MORPurchaseResponse)
 async def purchase_with_mor(
     request: MORPurchaseRequest,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Purchase API credits with MOR tokens.
@@ -219,7 +218,7 @@ async def purchase_with_mor(
         - mor_price_usd: Price of MOR in USD
     """
     try:
-        # Verify MOR transaction
+        # Verify MOR transaction (3rd party blockchain call - no DB connection held)
         verification = await mor_payment_service.verify_transaction(
             transaction_hash=request.transaction_hash,
             expected_amount=request.mor_amount,
@@ -232,24 +231,26 @@ async def purchase_with_mor(
                 detail="Invalid MOR transaction"
             )
 
-        # Get MOR price in USD
+        # Get MOR price in USD (3rd party call - no DB connection held)
         mor_price_usd = await mor_payment_service.get_mor_price_usd()
         credits_amount = Decimal(str(request.mor_amount)) * Decimal(str(mor_price_usd))
 
-        # Add credits
-        transaction = await api_credits.add_credits(
-            db=db,
-            user_id=current_user.id,
-            amount=credits_amount,
-            transaction_type=CreditTransactionType.purchase_mor,
-            payment_method="mor",
-            payment_id=request.transaction_hash,
-            payment_metadata={
-                "mor_amount": str(request.mor_amount),
-                "mor_price_usd": str(mor_price_usd)
-            },
-            description=f"Purchased with {request.mor_amount} MOR"
-        )
+        # Add credits using context manager
+        async with get_db() as db:
+            transaction = await api_credits.add_credits(
+                db=db,
+                user_id=current_user.id,
+                amount=credits_amount,
+                transaction_type=CreditTransactionType.purchase_mor,
+                payment_method="mor",
+                payment_id=request.transaction_hash,
+                payment_metadata={
+                    "mor_amount": str(request.mor_amount),
+                    "mor_price_usd": str(mor_price_usd)
+                },
+                description=f"Purchased with {request.mor_amount} MOR"
+            )
+            # Commit happens automatically on context exit
 
         logger.info("Purchased credits with MOR",
                    user_id=current_user.id,
@@ -281,7 +282,7 @@ async def purchase_with_mor(
 async def stripe_webhook(
     request: Request,
     stripe_signature: str = Header(None),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Handle Stripe webhook events.
@@ -293,6 +294,7 @@ async def stripe_webhook(
     payload = await request.body()
 
     try:
+        # Verify webhook (3rd party call, but we need db for queries after)
         event = await stripe_service.verify_webhook(
             payload=payload,
             signature=stripe_signature
@@ -369,7 +371,7 @@ async def stripe_webhook(
 async def coinbase_webhook(
     request: Request,
     x_cc_webhook_signature: str = Header(None),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Handle Coinbase Commerce webhook events.
@@ -381,6 +383,7 @@ async def coinbase_webhook(
     payload = await request.body()
 
     try:
+        # Verify webhook (3rd party call, but we need db for queries after)
         event = await coinbase_service.verify_webhook(
             payload=payload,
             signature=x_cc_webhook_signature
