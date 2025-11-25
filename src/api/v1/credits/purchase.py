@@ -10,8 +10,10 @@ POST /api/v1/credits/webhook/coinbase - Coinbase webhook handler
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from typing import Optional
 from decimal import Decimal
+from datetime import datetime
 import uuid
 
 from ....db.database import get_db
