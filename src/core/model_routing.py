@@ -9,6 +9,8 @@ logger = get_models_logger()
 # Get default model from settings
 DEFAULT_MODEL = getattr(settings, 'DEFAULT_FALLBACK_MODEL', "mistral-31-24b")
 DEFAULT_EMBEDDINGS_MODEL = getattr(settings, 'DEFAULT_FALLBACK_EMBEDDINGS_MODEL', "text-embedding-bge-m3")
+DEFAULT_TTS_MODEL = getattr(settings, 'DEFAULT_FALLBACK_TTS_MODEL', "tts-kokoro")
+DEFAULT_STT_MODEL = getattr(settings, 'DEFAULT_FALLBACK_STT_MODEL', "whisper-1")
 
 class ModelRouter:
     """
@@ -91,7 +93,17 @@ class ModelRouter:
             model_mapping = await direct_model_service.get_model_mapping()
             model_mapping_type = await direct_model_service.get_model_mapping_type()
 
-            default_model = DEFAULT_MODEL if type == "LLM" else DEFAULT_EMBEDDINGS_MODEL
+            match type:
+                case "LLM":
+                    default_model = DEFAULT_MODEL
+                case "EMBEDDINGS":
+                    default_model = DEFAULT_EMBEDDINGS_MODEL
+                case "TTS":
+                    default_model = DEFAULT_TTS_MODEL
+                case "STT":
+                    default_model = DEFAULT_STT_MODEL
+                case _:
+                    default_model = DEFAULT_MODEL
             
             # First try the explicitly defined default
             if default_model in model_mapping:
