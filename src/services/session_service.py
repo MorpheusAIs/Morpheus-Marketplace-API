@@ -18,6 +18,15 @@ from ..db.models import APIKey
 
 logger = get_api_logger()
 
+
+class AutomationDisabledException(Exception):
+    """Raised when session automation is disabled for a user."""
+    def __init__(self, user_id: int):
+        self.user_id = user_id
+        super().__init__(
+            f"Session automation is disabled. Please enable it in your Account settings to use Chat."
+        )
+
 async def get_automation_settings(
     db: AsyncSession,
     user_id: int
@@ -147,7 +156,7 @@ async def create_automated_session(
             logger.info("Automation is disabled for user",
                        user_id=user_id,
                        event_type="automation_disabled")
-            return None
+            raise AutomationDisabledException(user_id)
         
         # Automation is enabled - create a new session
         logger.info("Automation enabled for user - creating new session",
