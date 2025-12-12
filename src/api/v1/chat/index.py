@@ -26,6 +26,7 @@ from ....crud import api_key as api_key_crud
 from ....core.config import settings
 from ....core.model_routing import model_router
 from ....services import session_service
+from ....services.session_service import AutomationDisabledException
 from ....core.logging_config import get_api_logger
 from ....services.proxy_router_service import (
     healthcheck,
@@ -167,6 +168,15 @@ async def create_chat_completion(
                                    request_id=request_id,
                                    session_id=session_id,
                                    event_type="session_lookup_success")
+        except AutomationDisabledException as e:
+            chat_logger.warning("Session automation is disabled for user",
+                              request_id=request_id,
+                              user_id=e.user_id,
+                              event_type="automation_disabled_error")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Session automation is disabled. Please enable it in your Account settings to use Chat."
+            )
         except Exception as e:
             chat_logger.error("Error in session handling",
                             request_id=request_id,
