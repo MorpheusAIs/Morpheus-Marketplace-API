@@ -117,11 +117,11 @@ setup_fresh_instance() {
         sudo sed -i 's/^MODEL_SYNC_INTERVAL_HOURS=.*/MODEL_SYNC_INTERVAL_HOURS=12/' .env
         sudo sed -i 's|^ACTIVE_MODELS_URL=.*|ACTIVE_MODELS_URL=https://active.mor.org/active_models.json|' .env
 
-        # Contract Settings (TESTNET)
-        sudo sed -i 's/^DIAMOND_CONTRACT_ADDRESS=.*/DIAMOND_CONTRACT_ADDRESS=0xb8C55cD613af947E73E262F0d3C54b7211Af16CF/' .env
-        sudo sed -i 's/^CONTRACT_ADDRESS=.*/CONTRACT_ADDRESS=0x34a285a1b1c166420df5b6630132542923b5b27e/' .env
-        sudo sed -i 's|^BLOCKSCOUT_API_URL=.*|BLOCKSCOUT_API_URL="https://arbitrum-sepolia.blockscout.com/api/v2"|' .env
-        sudo sed -i 's/^CHAIN_ID=.*/CHAIN_ID=421614/' .env
+        # Contract Settings (BASE Sepolia TESTNET)
+        sudo sed -i 's/^DIAMOND_CONTRACT_ADDRESS=.*/DIAMOND_CONTRACT_ADDRESS=0x6e4d0B775E3C3b02683A6F277Ac80240C4aFF930/' .env
+        sudo sed -i 's/^CONTRACT_ADDRESS=.*/CONTRACT_ADDRESS=0x5C80Ddd187054E1E4aBBfFCD750498e81d34FfA3/' .env
+        sudo sed -i 's|^BLOCKSCOUT_API_URL=.*|BLOCKSCOUT_API_URL="https://base-sepolia.blockscout.com/api/v2"|' .env
+        sudo sed -i 's/^CHAIN_ID=.*/CHAIN_ID=84532/' .env
         sudo sed -i 's/^ENVIRONMENT=.*/ENVIRONMENT=development/' .env
 
         # Placeholder for FALLBACK_PRIVATE_KEY
