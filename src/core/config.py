@@ -190,6 +190,11 @@ class Settings(BaseSettings):
     DEFAULT_FALLBACK_TTS_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_TTS_MODEL", "tts-kokoro"))
     DEFAULT_FALLBACK_STT_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_STT_MODEL", "whisper-1"))
     
+    # Billing Admin Settings
+    # Secret key required for admin billing operations (staking settings, manual topups)
+    # If not set, admin endpoints will be disabled
+    BILLING_ADMIN_SECRET: str | None = Field(default=os.getenv("BILLING_ADMIN_SECRET"))
+    
     # Legacy Model Sync Settings (deprecated - kept for compatibility)
     MODEL_SYNC_ON_STARTUP: bool = Field(default=False)  # Disabled by default
     MODEL_SYNC_INTERVAL_HOURS: int = Field(default=int(os.getenv("MODEL_SYNC_INTERVAL_HOURS", "1")))

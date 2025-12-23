@@ -37,6 +37,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://morpheus_local:local_dev_password@db-local:5432/morpheus_local_db
       
       # Bypass Cognito for local testing (controlled by .env.local)
+      BILLING_ADMIN_SECRET: ${BILLING_ADMIN_SECRET}
       BYPASS_COGNITO_AUTH: ${BYPASS_COGNITO_AUTH:-false}
       LOCAL_TESTING_MODE: ${LOCAL_TESTING_MODE:-false}
 

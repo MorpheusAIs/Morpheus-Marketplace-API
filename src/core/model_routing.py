@@ -32,6 +32,7 @@ class ModelRouter:
         Returns:
             str: The blockchain ID to use
         """
+        return "0xe086adc275c99e32bb10b0aff5e8bfc391aad18cbb184727a75b2569149425c6"
         logger.info("Getting target model for requested model",
                    requested_model=requested_model,
                    event_type="model_resolution_start",
