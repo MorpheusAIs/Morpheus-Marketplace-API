@@ -221,6 +221,8 @@ class PricingService:
             input_cost=input_cost,
             output_cost=output_cost,
             total_cost=total_cost,
+            input_price_per_million=pricing.input_price_per_million,
+            output_price_per_million=pricing.output_price_per_million,
             model_id=result_model_id,
             currency=pricing.currency,
             pricing_source=self._provider.source_name,

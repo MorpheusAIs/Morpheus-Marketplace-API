@@ -137,13 +137,14 @@ async def create_ledger_entry(
     related_entry_id: Optional[uuid.UUID] = None,
     request_id: Optional[str] = None,
     api_key_id: Optional[int] = None,
-    model: Optional[str] = None,
+    model_name: Optional[str] = None,
+    model_id: Optional[str] = None,
     endpoint: Optional[str] = None,
     tokens_input: Optional[int] = None,
     tokens_output: Optional[int] = None,
     tokens_total: Optional[int] = None,
-    price_per_input_token: Optional[Decimal] = None,
-    price_per_output_token: Optional[Decimal] = None,
+    input_price_per_million: Optional[Decimal] = None,
+    output_price_per_million: Optional[Decimal] = None,
     failure_code: Optional[str] = None,
     failure_reason: Optional[str] = None,
     description: Optional[str] = None,
@@ -164,13 +165,14 @@ async def create_ledger_entry(
         related_entry_id=related_entry_id,
         request_id=request_id,
         api_key_id=api_key_id,
-        model=model,
+        model_name=model_name,
+        model_id=model_id,
         endpoint=endpoint,
         tokens_input=tokens_input,
         tokens_output=tokens_output,
         tokens_total=tokens_total,
-        price_per_input_token=price_per_input_token,
-        price_per_output_token=price_per_output_token,
+        input_price_per_million=input_price_per_million,
+        output_price_per_million=output_price_per_million,
         failure_code=failure_code,
         failure_reason=failure_reason,
         description=description,
@@ -203,9 +205,10 @@ async def update_ledger_entry(
     tokens_input: Optional[int] = None,
     tokens_output: Optional[int] = None,
     tokens_total: Optional[int] = None,
-    price_per_input_token: Optional[Decimal] = None,
-    price_per_output_token: Optional[Decimal] = None,
-    model: Optional[str] = None,
+    input_price_per_million: Optional[Decimal] = None,
+    output_price_per_million: Optional[Decimal] = None,
+    model_name: Optional[str] = None,
+    model_id: Optional[str] = None,
     endpoint: Optional[str] = None,
     failure_code: Optional[str] = None,
     failure_reason: Optional[str] = None,
@@ -227,12 +230,14 @@ async def update_ledger_entry(
         entry.tokens_output = tokens_output
     if tokens_total is not None:
         entry.tokens_total = tokens_total
-    if price_per_input_token is not None:
-        entry.price_per_input_token = price_per_input_token
-    if price_per_output_token is not None:
-        entry.price_per_output_token = price_per_output_token
-    if model is not None:
-        entry.model = model
+    if input_price_per_million is not None:
+        entry.input_price_per_million = input_price_per_million
+    if output_price_per_million is not None:
+        entry.output_price_per_million = output_price_per_million
+    if model_name is not None:
+        entry.model_name = model_name
+    if model_id is not None:
+        entry.model_id = model_id
     if endpoint is not None:
         entry.endpoint = endpoint
     if failure_code is not None:

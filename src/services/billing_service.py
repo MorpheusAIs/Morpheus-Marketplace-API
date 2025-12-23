@@ -19,6 +19,7 @@ from src.schemas.billing import (
     BalanceResponse, PaidBalanceInfo, StakingBalanceInfo,
     StakingRefreshResponse,
 )
+from src.services.pricing import get_pricing_service, PricingService
 from src.core.logging_config import get_core_logger
 
 logger = get_core_logger()
@@ -28,7 +29,20 @@ class BillingService:
     """
     Service layer for credit/billing operations.
     All methods requiring atomicity perform ledger + cache updates in a single transaction.
+    
+    Use billing_service.pricing for cost calculations:
+        cost = await billing_service.pricing.calculate_cost(...)
+        estimate = await billing_service.pricing.estimate_usage(...)
     """
+    
+    def __init__(self, pricing_service: Optional[PricingService] = None):
+        """
+        Initialize the billing service.
+        
+        Args:
+            pricing_service: Optional pricing service instance. Defaults to global singleton.
+        """
+        self.pricing = pricing_service or get_pricing_service()
     
     # === Balance Operations ===
     
@@ -91,7 +105,6 @@ class BillingService:
         
         # Create idempotency key for today's refresh
         idempotency_key = f"staking:{user_id}:{today.isoformat()}"
-        event_key = idempotency_key
         
         # Check if ledger entry already exists (double-check idempotency)
         existing_entry = await credits_crud.get_ledger_entry_by_idempotency_key(db, idempotency_key)
@@ -124,7 +137,6 @@ class BillingService:
             idempotency_key=idempotency_key,
             amount_paid=Decimal("0"),
             amount_staking=daily_amount,  # Positive for credit
-            event_key=event_key,
             description=f"Daily staking refresh for {today.isoformat()}",
         )
         
@@ -182,9 +194,17 @@ class BillingService:
                 hold_amount=existing.amount_paid,
                 success=True,
             )
+            
+        estimated_cost = await self.pricing.estimate_usage(
+            input_tokens=request.tokens_input,
+            output_tokens=request.tokens_output,
+            model_name=request.model_name,
+            model_id=request.model_id,
+            db=db,
+        )
         
         # Hold amount is negative (debit)
-        hold_amount = -abs(request.estimated_max_cost)
+        hold_amount = -abs(estimated_cost.total_cost)
         
         # Create ledger entry
         entry = await credits_crud.create_ledger_entry(
@@ -197,7 +217,8 @@ class BillingService:
             amount_staking=Decimal("0"),
             request_id=request.request_id,
             api_key_id=request.api_key_id,
-            model=request.model,
+            model_name=request.model_name,
+            model_id=request.model_id,
             endpoint=request.endpoint,
         )
         
@@ -268,10 +289,20 @@ class BillingService:
                 success=True,
             )
         
-        # Calculate actual cost
-        input_cost = request.tokens_input * request.price_per_input_token
-        output_cost = request.tokens_output * request.price_per_output_token
-        total_cost = input_cost + output_cost
+        # Get pricing from pricing service
+        model_name = request.model_name or hold_entry.model_name
+        model_id = request.model_id or hold_entry.model_id
+        usage_cost = await self.pricing.calculate_cost(
+            input_tokens=request.tokens_input,
+            output_tokens=request.tokens_output,
+            model_name=model_name,
+            model_id=model_id,
+            db=db,
+        )
+        
+        total_cost = usage_cost.total_cost
+        input_price_per_million = usage_cost.input_price_per_million
+        output_price_per_million = usage_cost.output_price_per_million
         
         # Get current balance for staking-first logic
         balance = await credits_crud.get_or_create_balance(db, user_id)
@@ -295,9 +326,10 @@ class BillingService:
             tokens_input=request.tokens_input,
             tokens_output=request.tokens_output,
             tokens_total=request.tokens_total,
-            price_per_input_token=request.price_per_input_token,
-            price_per_output_token=request.price_per_output_token,
-            model=request.model or hold_entry.model,
+            input_price_per_million=input_price_per_million,
+            output_price_per_million=output_price_per_million,
+            model_name=model_name,
+            model_id=request.model_id,
             endpoint=request.endpoint or hold_entry.endpoint,
         )
         

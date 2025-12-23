@@ -33,13 +33,23 @@ class ModelPricing:
     effective_from: Optional[datetime] = None
     metadata: dict = field(default_factory=dict)
     
+    @property
+    def input_price_per_token(self) -> Decimal:
+        """Price per single input token (for DB storage)."""
+        return self.input_price_per_million / Decimal("1000000")
+    
+    @property
+    def output_price_per_token(self) -> Decimal:
+        """Price per single output token (for DB storage)."""
+        return self.output_price_per_million / Decimal("1000000")
+    
     def calculate_input_cost(self, tokens: int) -> Decimal:
         """Calculate cost for input tokens."""
-        return (Decimal(tokens) / Decimal("1000000")) * self.input_price_per_million
+        return Decimal(tokens) * self.input_price_per_token
     
     def calculate_output_cost(self, tokens: int) -> Decimal:
         """Calculate cost for output tokens."""
-        return (Decimal(tokens) / Decimal("1000000")) * self.output_price_per_million
+        return Decimal(tokens) * self.output_price_per_token
     
     def calculate_total_cost(self, input_tokens: int, output_tokens: int) -> Decimal:
         """Calculate total cost for both input and output tokens."""
@@ -93,6 +103,8 @@ class UsageCost:
         input_cost: Cost for input tokens
         output_cost: Cost for output tokens
         total_cost: Total cost
+        input_price_per_million: Price per 1M input tokens (for DB storage)
+        output_price_per_million: Price per 1M output tokens (for DB storage)
         currency: Currency code
         pricing_source: Source of pricing data
         calculated_at: Timestamp of calculation
@@ -103,6 +115,8 @@ class UsageCost:
     input_cost: Decimal
     output_cost: Decimal
     total_cost: Decimal
+    input_price_per_million: Decimal
+    output_price_per_million: Decimal
     model_id: Optional[str] = None
     currency: str = "USD"
     pricing_source: str = "unknown"

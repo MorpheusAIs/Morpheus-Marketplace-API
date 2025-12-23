@@ -226,7 +226,8 @@ class UsageHoldRequest(BaseModel):
     request_id: str
     estimated_max_cost: Decimal
     api_key_id: Optional[int] = None
-    model: Optional[str] = None
+    model_name: Optional[str] = None  # Human-readable model name
+    model_id: Optional[str] = None  # Hex32 blockchain model identifier
     endpoint: Optional[str] = None
 
 
@@ -244,9 +245,8 @@ class UsageFinalizeRequest(BaseModel):
     tokens_input: int
     tokens_output: int
     tokens_total: int
-    price_per_input_token: Decimal  # Keep as Decimal for input validation
-    price_per_output_token: Decimal  # Keep as Decimal for input validation
-    model: Optional[str] = None
+    model_name: Optional[str] = None  # Human-readable model name for pricing lookup
+    model_id: Optional[str] = None  # Hex32 blockchain model ID for pricing lookup
     endpoint: Optional[str] = None
 
 

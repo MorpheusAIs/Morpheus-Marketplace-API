@@ -48,18 +48,18 @@ class CreditLedger(Base):
     # Idempotency
     idempotency_key = Column(TEXT, nullable=False, unique=True)
     related_entry_id = Column(UUID(as_uuid=True), ForeignKey("credits_ledger.id", ondelete="SET NULL"), nullable=True)
-    event_key = Column(TEXT, nullable=True)
     
     # Usage metadata (nullable for non-usage entries)
     request_id = Column(TEXT, nullable=True)
     api_key_id = Column(Integer, ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True)
-    model = Column(TEXT, nullable=True)
+    model_name = Column(TEXT, nullable=True)  # Human-readable model name
+    model_id = Column(String(66), nullable=True)  # Hex32 blockchain model identifier
     endpoint = Column(TEXT, nullable=True)
     tokens_input = Column(Integer, nullable=True)
     tokens_output = Column(Integer, nullable=True)
     tokens_total = Column(Integer, nullable=True)
-    price_per_input_token = Column(Numeric(20, 12), nullable=True)
-    price_per_output_token = Column(Numeric(20, 12), nullable=True)
+    input_price_per_million = Column(Numeric(20, 8), nullable=True)
+    output_price_per_million = Column(Numeric(20, 8), nullable=True)
     failure_code = Column(TEXT, nullable=True)
     failure_reason = Column(TEXT, nullable=True)
     description = Column(TEXT, nullable=True)
