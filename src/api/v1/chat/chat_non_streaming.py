@@ -1,8 +1,16 @@
+"""
+Non-streaming chat completion handler.
+
+This module provides non-streaming response handling with:
+- Session expiry detection and automatic retry
+- Proper error propagation using custom exceptions
+"""
+
 from __future__ import annotations
 
 import asyncio
 import json
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import httpx
 from fastapi.responses import JSONResponse
@@ -10,25 +18,115 @@ from fastapi.responses import JSONResponse
 from ....services import proxy_router_service
 from ....services import session_service
 from ....db.database import get_db
+from .chat_exceptions import (
+    RequestParseError,
+    SessionExpiredError,
+    SessionCreationError,
+    ProxyError,
+    GatewayError,
+)
 
-def safe_parse_json_response(response: httpx.Response, logger, request_id: str, messages: list, chat_params: dict) -> Tuple[dict, Exception]:
-    """Safely parse a JSON response from the proxy router."""
+
+def _parse_request(body: bytes) -> Tuple[list, dict]:
+    """Parse request body into messages and chat params."""
+    try:
+        request_data = json.loads(body.decode("utf-8"))
+        messages = request_data.get("messages", [])
+        chat_params = {
+            k: v for k, v in request_data.items() 
+            if k not in ["messages", "stream", "session_id"]
+        }
+        return messages, chat_params
+    except Exception as e:
+        raise RequestParseError(message=f"Invalid JSON in request body: {e}") from e
+
+
+def _parse_response(response: httpx.Response, logger, request_id: str) -> Tuple[Optional[dict], Optional[str]]:
+    """Parse JSON response from proxy. Returns (content, error_message)."""
     try:
         return response.json(), None
     except Exception as e:
-        payload = {
-            "messages": messages,
-            "stream": False,
-            **chat_params
-        }
-        logger.error("Unexpected response format",
-                    request_id=request_id,
-                    error=str(e),
-                    response_text=response.text,
-                    response_status_code=response.status_code,
-                    payload=payload,
-                    event_type="unexpected_response_format")
-        return None, Exception(f"Unexpected response format from provider: '{response.text}'")
+        logger.error(
+            "Unexpected response format",
+            request_id=request_id,
+            error=str(e),
+            response_text=response.text,
+            status_code=response.status_code,
+            event_type="unexpected_response_format",
+        )
+        return None, f"Unexpected response format from provider: '{response.text}'"
+
+
+def _is_session_expired(error_content: str) -> bool:
+    """Check if error indicates session expiration."""
+    return "session expired" in error_content.lower()
+
+
+def _make_error_response(status_code: int, message: str, error_type: str = "proxy_error", **extra) -> JSONResponse:
+    """Create a standardized error JSONResponse."""
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"message": message, "type": error_type, **extra}},
+    )
+
+
+async def _make_proxy_request(session_id: str, messages: list, chat_params: dict) -> httpx.Response:
+    """Make a chat completion request to the proxy router."""
+    return await proxy_router_service.chatCompletions(
+        session_id=session_id,
+        messages=messages,
+        **chat_params,
+    )
+
+
+async def _create_new_session(
+    db_api_key,
+    user,
+    requested_model: Optional[str],
+    logger,
+    request_id: str,
+) -> Optional[str]:
+    """Create a new session to replace an expired one."""
+    logger.info(
+        "Creating new session to replace expired session",
+        user_id=user.id,
+        api_key_id=db_api_key.id,
+        requested_model=requested_model,
+        event_type="new_session_creation_start",
+    )
+    
+    try:
+        async with get_db() as db:
+            new_session = await session_service.get_session_for_api_key(
+                db=db,
+                api_key_id=db_api_key.id,
+                user_id=user.id,
+                requested_model=requested_model,
+            )
+            if not new_session:
+                logger.error(
+                    "Failed to create new session - automation may be disabled",
+                    event_type="new_session_creation_failed",
+                )
+                return None
+            
+            logger.info(
+                "Created new session successfully",
+                new_session_id=new_session.id,
+                event_type="new_session_created",
+            )
+            
+            await asyncio.sleep(1.0)  # Brief delay to ensure session is registered
+            return new_session.id
+            
+    except Exception as e:
+        logger.error(
+            "Failed to create new session",
+            error=str(e),
+            event_type="new_session_creation_failed",
+        )
+        return None
+
 
 async def handle_non_streaming_request(
     *,
@@ -39,216 +137,124 @@ async def handle_non_streaming_request(
     user,
     requested_model: Optional[str],
     session_id: str,
-):
-    """Perform the non-streaming proxy call with error parsing and retry semantics.
-
-    This mirrors chat.py's original behavior and logging exactly.
-    Returns a JSONResponse.
+) -> JSONResponse:
+    """
+    Handle non-streaming proxy call with error parsing and retry on session expiry.
     
     Note: Uses short-lived DB connections for session creation to avoid
     holding connections during long-running operations.
     """
-
-    # Parse the request body to get messages and other parameters
+    # Parse request
     try:
-        request_data = json.loads(body.decode('utf-8'))
-        messages = request_data.get('messages', [])
-        # Extract other parameters (tools, model, etc.)
-        chat_params = {k: v for k, v in request_data.items() if k not in ['messages', 'stream', 'session_id']}
-    except Exception as e:
-        logger.error("Failed to parse request body",
-                    request_id=request_id,
-                    error=str(e),
-                    event_type="request_parse_error")
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": {
-                    "message": f"Invalid JSON in request body: {str(e)}",
-                    "type": "invalid_request",
-                }
-            }
-        )
+        messages, chat_params = _parse_request(body)
+    except RequestParseError as e:
+        return e.to_response()
 
-    # First attempt with original session
+    # First attempt
     try:
-        response = await proxy_router_service.chatCompletions(
-            session_id=session_id,
-            messages=messages,
-            **chat_params
-        )
+        response = await _make_proxy_request(session_id, messages, chat_params)
     except proxy_router_service.ProxyRouterServiceError as e:
-        logger.error("Proxy router error on initial request",
-                    request_id=request_id,
-                    error=str(e),
-                    error_type=e.error_type,
-                    session_id=session_id,
-                    event_type="proxy_router_error")
-        return JSONResponse(
-            status_code=e.get_http_status_code(),
-            content={
-                "error": {
-                    "message": str(e),
-                    "type": e.error_type,
-                }
-            }
+        logger.error(
+            "Proxy router error on initial request",
+            error=str(e),
+            error_type=e.error_type,
+            session_id=session_id,
+            event_type="proxy_router_error",
+        )
+        return _make_error_response(e.get_http_status_code(), str(e), e.error_type)
+
+    # Handle success
+    if response.status_code == 200:
+        content, error = _parse_response(response, logger, request_id)
+        if content:
+            logger.info(
+                "Non-streaming chat completion successful",
+                session_id=session_id,
+                event_type="chat_completion_success",
+            )
+            return JSONResponse(content=content, status_code=200)
+        return _make_error_response(500, error, "unexpected_response_format", session_id=session_id)
+
+    # Handle error response
+    error_content = response.text
+    logger.error(
+        "Proxy router error response",
+        status_code=response.status_code,
+        session_id=session_id,
+        event_type="proxy_error_response",
+    )
+
+    # Check for session expired - attempt retry
+    if _is_session_expired(error_content) and db_api_key and user:
+        logger.warning(
+            "Detected session expired error, will create new session and retry",
+            session_id=session_id,
+            event_type="session_expired_detected",
+        )
+        
+        new_session_id = await _create_new_session(db_api_key, user, requested_model, logger, request_id)
+        if new_session_id:
+            return await _retry_with_new_session(
+                new_session_id=new_session_id,
+                original_session_id=session_id,
+                messages=messages,
+                chat_params=chat_params,
+                logger=logger,
+                request_id=request_id,
+            )
+
+    # Return original error
+    try:
+        error_json = json.loads(error_content)
+        return JSONResponse(status_code=response.status_code, content=error_json)
+    except json.JSONDecodeError:
+        return _make_error_response(
+            response.status_code,
+            f"Proxy router error: {error_content}",
+            status=response.status_code,
         )
 
-    # Check if this is a session expired error
-    retry_with_new_session = False
-    new_session_id: Optional[str] = None
 
-    # Check response status
-    if response.status_code != 200:
-        logger.error("Proxy router error response",
-                    request_id=request_id,
-                    status_code=response.status_code,
-                    session_id=session_id,
-                    event_type="proxy_error_response")
-        try:
-            error_content = response.text
+async def _retry_with_new_session(
+    new_session_id: str,
+    original_session_id: str,
+    messages: list,
+    chat_params: dict,
+    logger,
+    request_id: str,
+) -> JSONResponse:
+    """Retry the request with a new session."""
+    logger.info(
+        "Retrying request with new session",
+        new_session_id=new_session_id,
+        original_session_id=original_session_id,
+        event_type="session_retry_start",
+    )
 
-            # Check if this is a session expired error
-            if "session expired" in error_content.lower():
-                logger.warning("Detected session expired error, will create new session and retry",
-                              request_id=request_id,
-                              session_id=session_id,
-                              event_type="session_expired_detected")
-                retry_with_new_session = True
+    try:
+        response = await _make_proxy_request(new_session_id, messages, chat_params)
+    except proxy_router_service.ProxyRouterServiceError as e:
+        logger.error(
+            "Retry request failed",
+            new_session_id=new_session_id,
+            error=str(e),
+            error_type=e.error_type,
+            event_type="session_retry_failed",
+        )
+        return _make_error_response(
+            e.get_http_status_code(),
+            f"Retry after session refresh failed: {e}",
+            "retry_failed",
+        )
 
-                if db_api_key and user:
-                    try:
-                        logger.info("Creating new session to replace expired session",
-                                   request_id=request_id,
-                                   user_id=user.id,
-                                   api_key_id=db_api_key.id,
-                                   requested_model=requested_model,
-                                   event_type="new_session_creation_start")
-                        # Use short-lived DB session for session creation
-                        # Use get_session_for_api_key instead of create_automated_session
-                        # to benefit from row-level locking and prevent race conditions
-                        async with get_db() as db:
-                            new_session = await session_service.get_session_for_api_key(
-                                db=db,
-                                api_key_id=db_api_key.id,
-                                user_id=user.id,
-                                requested_model=requested_model,
-                            )
-                            new_session_id = new_session.id if new_session else None
-                        # DB connection released here
-                        
-                        if new_session_id:
-                            logger.info("Created new session successfully",
-                                       request_id=request_id,
-                                       new_session_id=new_session_id,
-                                       event_type="new_session_created")
-
-                            # Add a small delay to ensure the session is fully registered
-                            logger.debug("Adding brief delay to ensure session is registered",
-                                        request_id=request_id)
-                            await asyncio.sleep(1.0)
-                        else:
-                            logger.error("Failed to create new session - automation may be disabled",
-                                        request_id=request_id,
-                                        event_type="new_session_creation_failed")
-                            retry_with_new_session = False
-                    except Exception as e:  # noqa: BLE001
-                        logger.error("Failed to create new session",
-                                    request_id=request_id,
-                                    error=str(e),
-                                    event_type="new_session_creation_failed")
-                        retry_with_new_session = False
-
-            # If not retrying, return error to client
-            if not retry_with_new_session:
-                try:
-                    error_json = json.loads(error_content)
-                    return JSONResponse(
-                        status_code=response.status_code, content=error_json
-                    )
-                except Exception:
-                    return JSONResponse(
-                        status_code=response.status_code,
-                        content={
-                            "error": {
-                                "message": f"Proxy router error: {error_content}",
-                                "type": "proxy_error",
-                                "status": response.status_code,
-                            }
-                        },
-                    )
-        except Exception as e:  # noqa: BLE001
-            logger.error("Error parsing error response",
-                        request_id=request_id,
-                        error=str(e),
-                        session_id=session_id,
-                        event_type="error_response_parse_failed")
-            retry_with_new_session = False
-            return JSONResponse(
-                status_code=response.status_code,
-                content={
-                    "error": {
-                        "message": f"Proxy router error: {response.text}",
-                        "type": "proxy_error",
-                        "status": response.status_code,
-                    }
-                },
-            )
-
-    # If not retrying, return the original response
-    if not retry_with_new_session:
-        logger.info("Non-streaming chat completion successful",
-                   request_id=request_id,
-                   session_id=session_id,
-                   event_type="chat_completion_success")
-        response_content, parse_error = safe_parse_json_response(response, logger, request_id, messages, chat_params)
-        if response_content:
-            return JSONResponse(content=response_content, status_code=200)
-        else:
-            return JSONResponse(status_code=500, content={"error": {"message": str(parse_error), "type": "unexpected_response_format", "session_id": session_id}})
-
-    # If we need to retry with a new session, do that now
-    if retry_with_new_session and new_session_id:
-        logger.info("Retrying request with new session",
-                   request_id=request_id,
-                   new_session_id=new_session_id,
-                   original_session_id=session_id,
-                   event_type="session_retry_start")
-
-        # Make the retry request with new session
-        try:
-            retry_response = await proxy_router_service.chatCompletions(
-                session_id=new_session_id,
-                messages=messages,
-                **chat_params
-            )
-        except proxy_router_service.ProxyRouterServiceError as e:
-            logger.error("Retry request failed",
-                        request_id=request_id,
-                        new_session_id=new_session_id,
-                        error=str(e),
-                        error_type=e.error_type,
-                        event_type="session_retry_failed")
-            return JSONResponse(
-                status_code=e.get_http_status_code(),
-                content={
-                    "error": {
-                        "message": f"Retry after session refresh failed: {str(e)}",
-                        "type": "retry_failed",
-                    }
-                }
-            )
-
-        # Return successful retry response
-        logger.info("Non-streaming chat completion successful after retry",
-                   request_id=request_id,
-                   session_id=new_session_id,
-                   original_session_id=session_id,
-                   event_type="chat_completion_success")
-        retry_content, parse_error = safe_parse_json_response(retry_response, logger, request_id, messages, chat_params)
-        if retry_content:
-            return JSONResponse(content=retry_content, status_code=200)
-        else:
-            return JSONResponse(status_code=500, content={"error": {"message": str(parse_error), "type": "unexpected_response_format", "session_id": new_session_id}})
-
-
+    content, error = _parse_response(response, logger, request_id)
+    if content:
+        logger.info(
+            "Non-streaming chat completion successful after retry",
+            session_id=new_session_id,
+            original_session_id=original_session_id,
+            event_type="chat_completion_success",
+        )
+        return JSONResponse(content=content, status_code=200)
+    
+    return _make_error_response(500, error, "unexpected_response_format", session_id=new_session_id)

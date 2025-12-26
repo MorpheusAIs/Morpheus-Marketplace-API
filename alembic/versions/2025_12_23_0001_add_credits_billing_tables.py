@@ -56,7 +56,7 @@ def upgrade() -> None:
         sa.Column('entry_type', postgresql.ENUM('purchase', 'staking_refresh', 'usage_hold', 'usage_charge', 'refund', 'adjustment', name='ledger_entry_type', create_type=False), nullable=False),
         sa.Column('amount_paid', sa.Numeric(precision=20, scale=8), nullable=False, server_default='0'),
         sa.Column('amount_staking', sa.Numeric(precision=20, scale=8), nullable=False, server_default='0'),
-        sa.Column('idempotency_key', sa.Text(), nullable=False),
+        sa.Column('idempotency_key', sa.Text(), nullable=True),
         sa.Column('related_entry_id', postgresql.UUID(as_uuid=True), nullable=True),
         # Usage metadata
         sa.Column('request_id', sa.Text(), nullable=True),
@@ -80,7 +80,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
         sa.ForeignKeyConstraint(['api_key_id'], ['api_keys.id'], ondelete='SET NULL'),
         sa.ForeignKeyConstraint(['related_entry_id'], ['credits_ledger.id'], ondelete='SET NULL'),
-        sa.UniqueConstraint('idempotency_key', name='uq_credits_ledger_idempotency_key'),
+        sa.UniqueConstraint('user_id', 'idempotency_key', name='uq_credits_ledger_idempotency_key'),
     )
     
     # Create indexes for credits_ledger

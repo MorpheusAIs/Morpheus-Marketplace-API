@@ -16,6 +16,7 @@ import socket
 import platform
 
 from src.api.v1 import models, chat, session, auth, automation, chat_history, embeddings, audio, billing
+from src.api.v1.chat.chat_exceptions import ChatError
 
 from src.core.config import settings
 from src.core.version import get_version, get_version_info
@@ -165,6 +166,13 @@ async def enforce_https(request: Request, call_next):
         )
     
     return await call_next(request)
+
+# Error handler for custom ChatError exceptions
+@app.exception_handler(ChatError)
+async def chat_error_handler(request: Request, exc: ChatError):
+    """Handle ChatError exceptions with structured responses."""
+    return exc.to_response()
+
 
 # Error handler for OpenAI-compatible error responses
 @app.exception_handler(Exception)

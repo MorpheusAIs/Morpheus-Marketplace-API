@@ -177,42 +177,71 @@ class BillingService:
     ) -> UsageHoldResponse:
         """
         Create a usage hold at the start of a request.
-        Creates a ledger entry with pending status and updates the balance cache.
-        """
-        idempotency_key = f"hold:{request.request_id}"
         
-        # Check for existing hold (idempotency)
-        existing = await credits_crud.get_ledger_entry_by_idempotency_key(db, idempotency_key)
+        This method:
+        1. Estimates cost using pricing service
+        2. Checks if user has sufficient balance
+        3. Creates a hold if balance is sufficient
+        
+        The ledger entry ID is provided by the caller for easy tracking.
+        Returns UsageHoldResponse with success=False and error if insufficient balance.
+        """
+        # Check for existing hold (idempotency by entry ID)
+        existing = await credits_crud.get_ledger_entry_by_id(db, request.ledger_entry_id)
         if existing:
             logger.info(
                 "Usage hold already exists",
                 user_id=user_id,
                 request_id=request.request_id,
+                ledger_entry_id=str(request.ledger_entry_id),
             )
             return UsageHoldResponse(
                 ledger_entry_id=existing.id,
                 hold_amount=existing.amount_paid,
                 success=True,
             )
-            
-        estimated_cost = await self.pricing.estimate_usage(
-            input_tokens=request.tokens_input,
-            output_tokens=request.tokens_output,
+        
+        # Estimate cost using pricing service
+        estimate = await self.pricing.estimate_usage(
+            estimated_input_tokens=request.estimated_input_tokens,
+            estimated_output_tokens=request.estimated_output_tokens,
             model_name=request.model_name,
             model_id=request.model_id,
             db=db,
         )
         
-        # Hold amount is negative (debit)
-        hold_amount = -abs(estimated_cost.total_cost)
+        estimated_cost = estimate.estimated_total_cost
         
-        # Create ledger entry
+        # Check balance
+        balance = await credits_crud.get_or_create_balance(db, user_id)
+        available = balance.total_available
+        
+        if available < estimated_cost:
+            logger.warning(
+                "Insufficient balance for usage hold",
+                user_id=user_id,
+                request_id=request.request_id,
+                ledger_entry_id=str(request.ledger_entry_id),
+                available=str(available),
+                estimated_cost=str(estimated_cost),
+            )
+            return UsageHoldResponse(
+                success=False,
+                error="insufficient_balance",
+                estimated_cost=estimated_cost,
+                available_balance=available,
+            )
+        
+        # Hold amount is negative (debit)
+        hold_amount = -abs(estimated_cost)
+        
+        # Create ledger entry with the provided ID
         entry = await credits_crud.create_ledger_entry(
             db=db,
             user_id=user_id,
             entry_type=LedgerEntryType.usage_hold,
             status=LedgerStatus.pending,
-            idempotency_key=idempotency_key,
+            entry_id=request.ledger_entry_id,
             amount_paid=hold_amount,  # Negative for hold
             amount_staking=Decimal("0"),
             request_id=request.request_id,
@@ -234,12 +263,15 @@ class BillingService:
             user_id=user_id,
             request_id=request.request_id,
             hold_amount=str(hold_amount),
+            estimated_cost=str(estimated_cost),
             ledger_entry_id=str(entry.id),
         )
         
         return UsageHoldResponse(
             ledger_entry_id=entry.id,
             hold_amount=hold_amount,
+            estimated_cost=estimated_cost,
+            available_balance=available,
             success=True,
         )
     
@@ -254,19 +286,17 @@ class BillingService:
         Updates the SAME ledger row and adjusts the balance cache.
         Implements staking-first spending strategy.
         """
-        hold_key = f"hold:{request.request_id}"
-        
-        # Find the hold entry
-        hold_entry = await credits_crud.get_ledger_entry_by_idempotency_key(db, hold_key)
+        # Find the hold entry by ID
+        hold_entry = await credits_crud.get_ledger_entry_by_id(db, request.ledger_entry_id)
         
         if not hold_entry:
             logger.error(
                 "Usage hold not found for finalization",
                 user_id=user_id,
-                request_id=request.request_id,
+                ledger_entry_id=str(request.ledger_entry_id),
             )
             return UsageFinalizeResponse(
-                ledger_entry_id=uuid.uuid4(),  # Placeholder
+                ledger_entry_id=request.ledger_entry_id,
                 amount_paid=Decimal("0"),
                 amount_staking=Decimal("0"),
                 amount_total=Decimal("0"),
@@ -279,7 +309,7 @@ class BillingService:
             logger.info(
                 "Usage already finalized",
                 user_id=user_id,
-                request_id=request.request_id,
+                ledger_entry_id=str(request.ledger_entry_id),
             )
             return UsageFinalizeResponse(
                 ledger_entry_id=hold_entry.id,
@@ -348,11 +378,10 @@ class BillingService:
         logger.info(
             "Finalized usage",
             user_id=user_id,
-            request_id=request.request_id,
+            ledger_entry_id=str(hold_entry.id),
             total_cost=str(total_cost),
             paid_charge=str(paid_charge),
             staking_charge=str(staking_charge),
-            ledger_entry_id=str(hold_entry.id),
         )
         
         return UsageFinalizeResponse(
@@ -372,19 +401,17 @@ class BillingService:
         """
         Void a usage hold when a request fails before producing billable output.
         """
-        hold_key = f"hold:{request.request_id}"
-        
-        # Find the hold entry
-        hold_entry = await credits_crud.get_ledger_entry_by_idempotency_key(db, hold_key)
+        # Find the hold entry by ID
+        hold_entry = await credits_crud.get_ledger_entry_by_id(db, request.ledger_entry_id)
         
         if not hold_entry:
             logger.warning(
                 "Usage hold not found for void",
                 user_id=user_id,
-                request_id=request.request_id,
+                ledger_entry_id=str(request.ledger_entry_id),
             )
             return UsageVoidResponse(
-                ledger_entry_id=uuid.uuid4(),  # Placeholder
+                ledger_entry_id=request.ledger_entry_id,
                 voided=False,
                 error="Hold not found",
             )
@@ -427,7 +454,6 @@ class BillingService:
         logger.info(
             "Voided usage hold",
             user_id=user_id,
-            request_id=request.request_id,
             ledger_entry_id=str(hold_entry.id),
         )
         

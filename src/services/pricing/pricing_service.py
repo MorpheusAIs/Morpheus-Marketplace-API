@@ -26,7 +26,7 @@ except ImportError:
     logger = logging.getLogger(__name__)
 
 # Default estimated output tokens when not provided
-DEFAULT_ESTIMATED_OUTPUT_TOKENS = 500
+DEFAULT_ESTIMATED_OUTPUT_TOKENS = 2048
 
 
 class PricingService:
@@ -97,7 +97,7 @@ class PricingService:
         
         Args:
             estimated_input_tokens: Estimated number of input tokens
-            estimated_output_tokens: Estimated output tokens (defaults to 500)
+            estimated_output_tokens: Estimated output tokens (defaults to 2048)
             model_name: Human-readable model name (e.g., "llama-3.3-70b")
             model_id: Hex32 blockchain model identifier
             db: Optional database session for DB-backed providers

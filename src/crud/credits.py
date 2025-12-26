@@ -96,12 +96,26 @@ async def set_staking_daily_amount(db: AsyncSession, user_id: int, amount: Decim
 
 # === Ledger Entry Operations ===
 
+async def get_ledger_entry_by_id(
+    db: AsyncSession,
+    entry_id: uuid.UUID
+) -> Optional[CreditLedger]:
+    """
+    Get a ledger entry by its ID.
+    """
+    result = await db.execute(
+        select(CreditLedger).where(CreditLedger.id == entry_id)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_ledger_entry_by_idempotency_key(
     db: AsyncSession, 
     idempotency_key: str
 ) -> Optional[CreditLedger]:
     """
     Get a ledger entry by idempotency key.
+    Used for Stripe/Coinbase purchase deduplication.
     """
     result = await db.execute(
         select(CreditLedger).where(CreditLedger.idempotency_key == idempotency_key)
@@ -131,9 +145,10 @@ async def create_ledger_entry(
     user_id: int,
     entry_type: LedgerEntryType,
     status: LedgerStatus,
-    idempotency_key: str,
     amount_paid: Decimal = Decimal("0"),
     amount_staking: Decimal = Decimal("0"),
+    entry_id: Optional[uuid.UUID] = None,
+    idempotency_key: Optional[str] = None,
     related_entry_id: Optional[uuid.UUID] = None,
     request_id: Optional[str] = None,
     api_key_id: Optional[int] = None,
@@ -152,9 +167,13 @@ async def create_ledger_entry(
 ) -> CreditLedger:
     """
     Create a new ledger entry.
+    
+    Args:
+        entry_id: Optional pre-generated UUID for the entry. If not provided, one is generated.
+        idempotency_key: Optional key for deduplication (used for Stripe/Coinbase purchases).
     """
     entry = CreditLedger(
-        id=uuid.uuid4(),
+        id=entry_id or uuid.uuid4(),
         user_id=user_id,
         currency=currency,
         status=status,
@@ -185,11 +204,11 @@ async def create_ledger_entry(
     logger.info(
         "Created ledger entry",
         user_id=user_id,
+        entry_id=str(entry.id),
         entry_type=entry_type.value,
         status=status.value,
         amount_paid=str(amount_paid),
         amount_staking=str(amount_staking),
-        idempotency_key=idempotency_key,
     )
     
     return entry

@@ -45,8 +45,8 @@ class CreditLedger(Base):
     amount_paid = Column(Numeric(20, 8), nullable=False, default=0)
     amount_staking = Column(Numeric(20, 8), nullable=False, default=0)
     
-    # Idempotency
-    idempotency_key = Column(TEXT, nullable=False, unique=True)
+    # Idempotency (optional - used for Stripe/Coinbase purchases)
+    idempotency_key = Column(TEXT, nullable=True, unique=True)
     related_entry_id = Column(UUID(as_uuid=True), ForeignKey("credits_ledger.id", ondelete="SET NULL"), nullable=True)
     
     # Usage metadata (nullable for non-usage entries)

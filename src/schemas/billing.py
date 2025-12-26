@@ -90,19 +90,20 @@ class LedgerEntryResponse(BaseModel):
     amount_paid: DecimalStr
     amount_staking: DecimalStr
     amount_total: DecimalStr
-    idempotency_key: str
+    idempotency_key: Optional[str] = None  # Optional - used for Stripe/Coinbase purchases
     related_entry_id: Optional[uuid.UUID] = None
     
     # Usage metadata
     request_id: Optional[str] = None
     api_key_id: Optional[int] = None
-    model: Optional[str] = None
+    model_name: Optional[str] = None
+    model_id: Optional[str] = None
     endpoint: Optional[str] = None
     tokens_input: Optional[int] = None
     tokens_output: Optional[int] = None
     tokens_total: Optional[int] = None
-    price_per_input_token: Optional[DecimalStr] = None
-    price_per_output_token: Optional[DecimalStr] = None
+    input_price_per_million: Optional[DecimalStr] = None
+    output_price_per_million: Optional[DecimalStr] = None
     failure_code: Optional[str] = None
     failure_reason: Optional[str] = None
     description: Optional[str] = None
@@ -152,7 +153,8 @@ class UsageEntryResponse(BaseModel):
     """Single usage entry for usage list."""
     id: uuid.UUID
     created_at: datetime
-    model: Optional[str] = None
+    model_name: Optional[str] = None
+    model_id: Optional[str] = None
     endpoint: Optional[str] = None
     tokens_input: Optional[int] = None
     tokens_output: Optional[int] = None
@@ -223,8 +225,10 @@ class ManualTopupResponse(BaseModel):
 
 class UsageHoldRequest(BaseModel):
     """Internal request to create a usage hold."""
-    request_id: str
-    estimated_max_cost: Decimal
+    ledger_entry_id: uuid.UUID  # Pre-generated ID for the ledger entry
+    request_id: str  # Trace ID for logging/debugging
+    estimated_input_tokens: int
+    estimated_output_tokens: int = 500  # Default estimate
     api_key_id: Optional[int] = None
     model_name: Optional[str] = None  # Human-readable model name
     model_id: Optional[str] = None  # Hex32 blockchain model identifier
@@ -233,15 +237,17 @@ class UsageHoldRequest(BaseModel):
 
 class UsageHoldResponse(BaseModel):
     """Internal response from creating a usage hold."""
-    ledger_entry_id: uuid.UUID
-    hold_amount: DecimalStr
+    ledger_entry_id: Optional[uuid.UUID] = None
+    hold_amount: Optional[DecimalStr] = None
+    estimated_cost: Optional[DecimalStr] = None
+    available_balance: Optional[DecimalStr] = None
     success: bool
     error: Optional[str] = None
 
 
 class UsageFinalizeRequest(BaseModel):
     """Internal request to finalize usage."""
-    request_id: str
+    ledger_entry_id: uuid.UUID  # ID of the hold entry to finalize
     tokens_input: int
     tokens_output: int
     tokens_total: int
@@ -262,7 +268,7 @@ class UsageFinalizeResponse(BaseModel):
 
 class UsageVoidRequest(BaseModel):
     """Internal request to void a usage hold."""
-    request_id: str
+    ledger_entry_id: uuid.UUID  # ID of the hold entry to void
     failure_code: Optional[str] = None
     failure_reason: Optional[str] = None
 
