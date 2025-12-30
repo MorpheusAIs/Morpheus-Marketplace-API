@@ -2,7 +2,7 @@
 Credit ledger and account balance models for the billing system.
 """
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, TEXT, Enum, Numeric, Date
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -48,6 +48,11 @@ class CreditLedger(Base):
     # Idempotency (optional - used for Stripe/Coinbase purchases)
     idempotency_key = Column(TEXT, nullable=True, unique=True)
     related_entry_id = Column(UUID(as_uuid=True), ForeignKey("credits_ledger.id", ondelete="SET NULL"), nullable=True)
+    
+    # Payment source metadata (for purchases from any provider)
+    payment_source = Column(String(50), nullable=True)  # e.g., "stripe", "coinbase", "manual"
+    external_transaction_id = Column(String(255), nullable=True, index=True)  # Primary transaction ID for lookups
+    payment_metadata = Column(JSONB, nullable=True)  # Provider-specific data (flexible schema)
     
     # Usage metadata (nullable for non-usage entries)
     request_id = Column(TEXT, nullable=True)

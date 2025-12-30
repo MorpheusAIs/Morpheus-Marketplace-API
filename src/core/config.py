@@ -195,6 +195,11 @@ class Settings(BaseSettings):
     # If not set, admin endpoints will be disabled
     BILLING_ADMIN_SECRET: str | None = Field(default=os.getenv("BILLING_ADMIN_SECRET"))
     
+    # Stripe Settings
+    # Required for processing Stripe payments and webhooks
+    STRIPE_SECRET_KEY: str | None = Field(default=os.getenv("STRIPE_SECRET_KEY"))
+    STRIPE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("STRIPE_WEBHOOK_SECRET"))
+    
     # Legacy Model Sync Settings (deprecated - kept for compatibility)
     MODEL_SYNC_ON_STARTUP: bool = Field(default=False)  # Disabled by default
     MODEL_SYNC_INTERVAL_HOURS: int = Field(default=int(os.getenv("MODEL_SYNC_INTERVAL_HOURS", "1")))

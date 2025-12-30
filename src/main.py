@@ -15,7 +15,7 @@ import uuid
 import socket
 import platform
 
-from src.api.v1 import models, chat, session, auth, automation, chat_history, embeddings, audio, billing
+from src.api.v1 import models, chat, session, auth, automation, chat_history, embeddings, audio, billing, webhooks
 from src.api.v1.chat.chat_exceptions import ChatError
 
 from src.core.config import settings
@@ -446,6 +446,7 @@ app.include_router(chat_history, prefix=f"{settings.API_V1_STR}/chat-history")
 app.include_router(embeddings, prefix=f"{settings.API_V1_STR}")
 app.include_router(audio, prefix=f"{settings.API_V1_STR}")
 app.include_router(billing, prefix=f"{settings.API_V1_STR}/billing")
+app.include_router(webhooks, prefix=f"{settings.API_V1_STR}/webhooks")
 
 # Default routes - using standard APIRoute for these endpoints to avoid dependency resolution issues
 # Reset the route_class temporarily for these specific routes
@@ -1416,7 +1417,8 @@ def custom_openapi():
     # Apply security to all API endpoints (except excluded ones)
     for path_key, path_item in openapi_schema["paths"].items():
         # Skip certain endpoints that should remain unauthenticated
-        if path_key in ["/", "/health", "/docs", "/api-docs"] or path_key.startswith("/docs/"):
+        # Webhooks have their own signature verification
+        if path_key in ["/", "/health", "/docs", "/api-docs"] or path_key.startswith("/docs/") or path_key.startswith(f"{settings.API_V1_STR}/webhooks"):
             continue
             
         # Apply all authentication methods to API endpoints

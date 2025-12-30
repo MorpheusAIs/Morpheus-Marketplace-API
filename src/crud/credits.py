@@ -123,6 +123,29 @@ async def get_ledger_entry_by_idempotency_key(
     return result.scalar_one_or_none()
 
 
+async def get_ledger_entry_by_external_transaction(
+    db: AsyncSession,
+    external_transaction_id: str,
+    payment_source: Optional[str] = None
+) -> Optional[CreditLedger]:
+    """
+    Get a ledger entry by external transaction ID.
+    Used for deduplication during webhook processing for any payment provider.
+    
+    Args:
+        external_transaction_id: The provider's primary transaction ID
+        payment_source: Optional filter by payment source (e.g., "stripe", "coinbase")
+    """
+    query = select(CreditLedger).where(
+        CreditLedger.external_transaction_id == external_transaction_id
+    )
+    if payment_source:
+        query = query.where(CreditLedger.payment_source == payment_source)
+    
+    result = await db.execute(query)
+    return result.scalar_one_or_none()
+
+
 async def get_ledger_entry_by_request_id(
     db: AsyncSession,
     user_id: int,
@@ -164,6 +187,10 @@ async def create_ledger_entry(
     failure_reason: Optional[str] = None,
     description: Optional[str] = None,
     currency: str = "USD",
+    # Payment metadata (for any provider)
+    payment_source: Optional[str] = None,
+    external_transaction_id: Optional[str] = None,
+    payment_metadata: Optional[dict] = None,
 ) -> CreditLedger:
     """
     Create a new ledger entry.
@@ -171,6 +198,11 @@ async def create_ledger_entry(
     Args:
         entry_id: Optional pre-generated UUID for the entry. If not provided, one is generated.
         idempotency_key: Optional key for deduplication (used for Stripe/Coinbase purchases).
+        payment_source: Payment provider source (e.g., "stripe", "coinbase", "manual").
+        external_transaction_id: Primary transaction ID from the payment provider (indexed for lookups).
+        payment_metadata: Provider-specific metadata as a dict (stored as JSONB).
+            Example for Stripe: {"checkout_session_id": "cs_xxx", "payment_intent_id": "pi_xxx"}
+            Example for Coinbase: {"charge_id": "xxx", "charge_code": "xxx"}
     """
     entry = CreditLedger(
         id=entry_id or uuid.uuid4(),
@@ -195,6 +227,10 @@ async def create_ledger_entry(
         failure_code=failure_code,
         failure_reason=failure_reason,
         description=description,
+        # Payment metadata (any provider)
+        payment_source=payment_source,
+        external_transaction_id=external_transaction_id,
+        payment_metadata=payment_metadata,
     )
     
     db.add(entry)

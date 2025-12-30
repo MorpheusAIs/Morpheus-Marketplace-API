@@ -93,6 +93,13 @@ class LedgerEntryResponse(BaseModel):
     idempotency_key: Optional[str] = None  # Optional - used for Stripe/Coinbase purchases
     related_entry_id: Optional[uuid.UUID] = None
     
+    # Payment source fields
+    payment_source: Optional[str] = None  # stripe, coinbase, manual, etc.
+    external_transaction_id: Optional[str] = None  # For Stripe: checkout_session_id or invoice_id
+    # For Coinbase: charge_id
+    # For others: their primary transaction identifier
+    payment_metadata: Optional[dict] = None  # JSONB column for provider-specific metadata
+    
     # Usage metadata
     request_id: Optional[str] = None
     api_key_id: Optional[int] = None
