@@ -1,7 +1,7 @@
 """Add credits billing tables
 
 Revision ID: add_credits_billing
-Revises: fix_enum_name_2025
+Revises: social_login_prep_2025
 Create Date: 2025-12-23 00:01:00.000000
 
 This migration adds the credits_ledger and credit_account_balances tables
@@ -15,7 +15,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'add_credits_billing'
-down_revision: Union[str, None] = 'fix_enum_name_2025'
+down_revision: Union[str, None] = 'social_login_prep_2025'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
