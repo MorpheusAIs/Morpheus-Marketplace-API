@@ -4,7 +4,7 @@ from datetime import datetime
 
 # Shared properties
 class UserBase(BaseModel):
-    email: EmailStr
+    email: Optional[EmailStr] = None  # Optional: may not be provided by some auth methods (social, magic link, phone)
     name: Optional[str] = None
     is_active: Optional[bool] = True
 

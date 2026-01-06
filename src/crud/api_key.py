@@ -246,13 +246,25 @@ async def update_last_used(db: AsyncSession, api_key: APIKey) -> APIKey:
     """
     Update the last_used_at timestamp of an API key.
     
+    Rate-limited to once every 5 minutes to avoid row-level lock contention
+    when multiple concurrent requests use the same API key.
+    
     Args:
         db: Database session
         api_key: APIKey object
         
     Returns:
-        Updated APIKey object
+        APIKey object (updated or unchanged)
     """
+    # Skip update if last_used_at was updated within the last 5 minutes
+    # This prevents row-level lock contention on high-traffic API keys
+    if api_key.last_used_at:
+        now_utc = datetime.datetime.now(timezone.utc)
+        last_used_utc = api_key.last_used_at.replace(tzinfo=timezone.utc) if api_key.last_used_at.tzinfo is None else api_key.last_used_at
+        time_since_update = now_utc - last_used_utc
+        if time_since_update.total_seconds() < 300:  # 5 minutes
+            return api_key
+    
     # Get current UTC time as timezone-aware datetime
     now_with_tz = datetime.datetime.now(timezone.utc)
     

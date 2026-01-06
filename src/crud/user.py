@@ -205,21 +205,25 @@ async def update_user_from_cognito(
         # Prepare update data
         update_data = {}
         
-        # Update email if we have a real email from Cognito
-        if email and email != db_user.cognito_user_id:
+        # Update email if we have a real email from Cognito and it's different
+        if email and email != db_user.email:
             update_data['email'] = email
-            update_data['name'] = email  # Use email as name since no name fields are collected
+            # Only update name if it's currently empty
+            if not db_user.name:
+                update_data['name'] = email  # Use email as name since no name fields are collected
         
         # Apply updates if we have any
         if update_data:
             logger.info("Updating user with Cognito data",
                        user_id=db_user.id,
                        update_fields=list(update_data.keys()),
+                       new_email=email or 'not_provided',
                        event_type="cognito_user_data_update")
             return await update_user(db, db_user=db_user, user_in=update_data)
         
         logger.debug("No updates needed from Cognito",
                     user_id=db_user.id,
+                    has_email=bool(email),
                     event_type="cognito_no_updates_needed")
         return db_user
         

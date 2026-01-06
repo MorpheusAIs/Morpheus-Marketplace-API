@@ -35,7 +35,9 @@ The execution order is determined by the `revision` and `down_revision` fields i
     ↓
 13. add_encrypted_api_keys (2025_09_23_0855) ✅ Now has date prefix
     ↓
-14. fix_enum_name_2025 (2025_10_06_1500) ← NEW - fixes enum mismatch
+14. fix_enum_name_2025 (2025_10_06_1500) - fixes enum mismatch
+    ↓
+15. social_login_prep_2025 (2025_12_02_1400) ← NEW - prepares for social login
 ```
 
 ## All Files Now Have Date Prefixes ✅
@@ -96,15 +98,25 @@ alembic show <revision_id>
 
 Current state:
 ```
-Current version: add_encrypted_api_keys
-Next migration:  fix_enum_name_2025
+Current version: fix_enum_name_2025
+Next migration:  social_login_prep_2025
 ```
 
 When you deploy, Alembic will automatically:
-1. See current version is `add_encrypted_api_keys`
-2. Find the next migration in the chain: `fix_enum_name_2025`
+1. See current version is `fix_enum_name_2025`
+2. Find the next migration in the chain: `social_login_prep_2025`
 3. Run that migration
-4. Update `alembic_version` table to `fix_enum_name_2025`
+4. Update `alembic_version` table to `social_login_prep_2025`
+
+## Latest Migration
+
+**social_login_prep_2025** (2025-12-02 14:00:00)
+- Makes email column nullable (some auth methods don't provide email)
+- Removes UNIQUE constraint on email (same email can exist across different providers)
+- Keeps non-unique index on email for performance
+- Makes name column nullable for consistency
+- Prepares database for social login (Google, Facebook, GitHub) and alternative auth (magic link, phone)
+- cognito_user_id remains the ONLY unique identifier
 
 ## Summary
 
