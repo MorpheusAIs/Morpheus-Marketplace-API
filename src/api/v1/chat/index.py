@@ -21,7 +21,7 @@ from ....dependencies import get_api_key_user, get_current_api_key
 from ....db.database import get_db
 from ....db.models import User, APIKey
 from ....core.model_routing import model_router
-from ....services import session_service
+from ....services import session_routing_service, NoSessionAvailableError, SessionOpenError
 from ....services.billing_service import billing_service
 from ....services.token_estimation_service import token_estimation_service
 from ....schemas.billing import UsageHoldRequest, UsageFinalizeRequest, UsageVoidRequest
@@ -138,12 +138,15 @@ async def create_chat_completion(
         )
     
     body = json.dumps(json_body).encode("utf-8")
-    
-    chat_logger.info(
-        "Original request details",
-        session_id=session_id,
+        
+    # Create billing hold
+    ledger_entry_id, model_id, token_estimate = await _create_billing_hold(
+        request_id=request_id,
         requested_model=requested_model,
-        event_type="request_details",
+        json_body=json_body,
+        db_api_key=db_api_key,
+        user=user,
+        chat_logger=chat_logger,
     )
     
     # Get or create session
@@ -156,21 +159,18 @@ async def create_chat_completion(
         request_id=request_id,
     )
     
+    chat_logger.info(
+        "Original request details",
+        session_id=session_id,
+        requested_model=requested_model,
+        event_type="request_details",
+    )
+    
     # Apply request fixes for tool calling compatibility
     fix_tool_choice_structure(json_body, chat_logger)
     remove_tool_choice_from_tools(json_body, chat_logger)
     normalize_assistant_tool_call_messages(json_body, chat_logger)
     log_tool_request_details(json_body, session_id, chat_logger)
-    
-    # Create billing hold
-    ledger_entry_id, model_id, token_estimate = await _create_billing_hold(
-        request_id=request_id,
-        requested_model=requested_model,
-        json_body=json_body,
-        db_api_key=db_api_key,
-        user=user,
-        chat_logger=chat_logger,
-    )
     
     # Handle request based on streaming preference
     if should_stream:
@@ -208,36 +208,43 @@ async def _resolve_session(
     chat_logger,
     request_id: str,
 ) -> str:
-    """Resolve or create a session for the request."""
+    """Resolve or create a session for the request using the Session Routing Service."""
     if session_id:
         return session_id
     
     chat_logger.info(
-        "No session_id in request, attempting to retrieve or create one",
+        "No session_id in request, routing to session via SessionRoutingService",
         api_key_id=db_api_key.id,
         requested_model=requested_model,
-        event_type="session_lookup_start",
+        event_type="session_routing_start",
     )
     
     try:
         async with get_db() as db:
-            session = await session_service.get_session_for_api_key(
-                db, db_api_key.id, user.id, requested_model, model_type="LLM"
+            routed_session_id = await session_routing_service.route_request(
+                db=db,
+                user_id=user.id,
+                requested_model=requested_model,
+                model_type="LLM"
             )
-            if session:
-                chat_logger.info(
-                    "Session retrieved successfully",
-                    session_id=session.id,
-                    event_type="session_lookup_success",
-                )
-                return session.id
+            chat_logger.info(
+                "Session routed successfully",
+                session_id=routed_session_id,
+                event_type="session_routing_success",
+            )
+            return routed_session_id
+    except NoSessionAvailableError as e:
+        raise SessionNotFoundError() from e
+    except SessionOpenError as e:
+        raise SessionCreationError(
+            message=f"Error opening session: {e.message}",
+            session_id=None,
+        ) from e
     except Exception as e:
         raise SessionCreationError(
             message=f"Error handling session: {e}",
             session_id=session_id,
         ) from e
-    
-    raise SessionNotFoundError()
 
 
 async def _create_billing_hold(
@@ -405,6 +412,24 @@ async def _handle_non_streaming_request(
             chat_logger=chat_logger,
         )
         raise GatewayError(message=f"Error in API gateway: {e}", session_id=session_id) from e
+    
+    finally:
+        # Release the session after non-streaming request completes
+        try:
+            async with get_db() as db:
+                await session_routing_service.release_session(db, session_id)
+                chat_logger.debug(
+                    "Session released after non-streaming request",
+                    session_id=session_id,
+                    event_type="session_released",
+                )
+        except Exception as release_err:
+            chat_logger.warning(
+                "Failed to release session",
+                session_id=session_id,
+                error=str(release_err),
+                event_type="session_release_error",
+            )
 
 
 async def _finalize_billing(

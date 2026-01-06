@@ -17,6 +17,7 @@ import platform
 
 from src.api.v1 import models, chat, session, auth, automation, chat_history, embeddings, audio, billing, webhooks
 from src.api.v1.chat.chat_exceptions import ChatError
+from src.services import session_routing_service
 
 from src.core.config import settings
 from src.core.version import get_version, get_version_info
@@ -340,6 +341,18 @@ async def startup_event():
                     event_type="background_task_error")
         logger.warning("Continuing startup without background session cleanup")
     
+    # Start session routing automation loop
+    try:
+        await session_routing_service.start_automation_loop()
+        logger.info("Started session routing automation loop",
+                   interval_seconds=settings.SESSION_AUTOMATION_INTERVAL_SECONDS,
+                   event_type="session_routing_automation_started")
+    except Exception as e:
+        logger.error("Failed to start session routing automation",
+                    error=str(e),
+                    event_type="session_routing_automation_error")
+        logger.warning("Continuing startup without session routing automation")
+    
     logger.info("Application startup complete", event_type="startup_complete")
 
 @app.on_event("shutdown")
@@ -349,6 +362,13 @@ async def shutdown_event():
     """
     logger.info("Application shutdown initiated", event_type="shutdown_start")
     logger.info("Direct model service requires no cleanup (stateless)")
+    
+    # Stop session routing automation loop
+    try:
+        await session_routing_service.stop_automation_loop()
+        logger.info("Session routing automation loop stopped", event_type="session_routing_automation_stopped")
+    except Exception as e:
+        logger.warning("Error stopping session routing automation", error=str(e), event_type="session_routing_automation_stop_error")
     
     # Close proxy router HTTP client
     try:

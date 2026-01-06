@@ -14,7 +14,7 @@ from alembic import context
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import Base from your models and the settings
-from src.db.models import Base # Assuming Base is defined in models.py
+from src.db.models import Base  # Import Base from models package
 from src.core.config import settings # Import your application settings
 
 # this is the Alembic Config object, which provides

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Dict, Optional, TYPE_CHECKING
 
 from ....services import proxy_router_service
-from ....services import session_service
+from ....services import session_routing_service
 from ....services.billing_service import billing_service
 from ....schemas.billing import UsageFinalizeRequest, UsageVoidRequest
 from ....db.database import get_db
@@ -275,6 +275,23 @@ def build_stream_generator(
             yield _format_sse_error("gateway_error", f"Error in API gateway streaming: {e}", session_id=session_id)
         
         finally:
+            # Release the session after streaming completes
+            try:
+                async with get_db() as db:
+                    await session_routing_service.release_session(db, session_id)
+                    stream_logger.debug(
+                        "Session released after streaming",
+                        session_id=session_id,
+                        event_type="session_released_after_stream",
+                    )
+            except Exception as release_err:
+                stream_logger.warning(
+                    "Failed to release session after streaming",
+                    session_id=session_id,
+                    error=str(release_err),
+                    event_type="session_release_error",
+                )
+            
             if billing_enabled and ledger_entry_id and billing_params:
                 if stream_completed_successfully and accumulator:
                     await _finalize_streaming_billing(
@@ -469,35 +486,39 @@ async def _handle_session_retry(
     logger: "BoundLogger",
     accumulator: Optional[StreamingUsageAccumulator] = None,
 ) -> AsyncIterator[bytes | StreamResult]:
-    """Handle session expiry by creating new session and retrying."""
+    """Handle session expiry by routing to a new session and retrying."""
     logger.info(
-        "Creating new session to replace expired session",
+        "Routing to new session to replace expired session",
         user_id=user.id,
         api_key_id=db_api_key.id,
         requested_model=requested_model,
         event_type="stream_new_session_creation_start",
     )
     
+    new_session_id = None
     try:
         async with get_db() as db:
-            new_session = await session_service.get_session_for_api_key(
+            # Release the old session first
+            await session_routing_service.release_session(db, original_session_id)
+            
+            # Route to a new session
+            new_session_id = await session_routing_service.route_request(
                 db=db,
-                api_key_id=db_api_key.id,
                 user_id=user.id,
                 requested_model=requested_model,
+                model_type="LLM",
             )
-            new_session_id = new_session.id if new_session else None
         
         if not new_session_id:
             logger.error(
-                "Failed to create new session - automation may be disabled",
+                "Failed to route to new session",
                 event_type="stream_new_session_creation_failed",
             )
             yield StreamResult(success=False, error="Failed to create new session")
             return
         
         logger.info(
-            "Created new session for stream retry",
+            "Routed to new session for stream retry",
             new_session_id=new_session_id,
             event_type="stream_new_session_created",
         )
@@ -522,11 +543,24 @@ async def _handle_session_retry(
             
     except Exception as e:
         logger.error(
-            "Failed to create new session",
+            "Failed to route to new session",
             error=str(e),
             event_type="stream_new_session_creation_failed",
         )
         yield StreamResult(success=False, error=str(e))
+    finally:
+        # Release the new session after retry completes
+        if new_session_id:
+            try:
+                async with get_db() as db:
+                    await session_routing_service.release_session(db, new_session_id)
+            except Exception as release_err:
+                logger.warning(
+                    "Failed to release retry session",
+                    session_id=new_session_id,
+                    error=str(release_err),
+                    event_type="session_release_error",
+                )
 
 
 __all__ = [

@@ -16,7 +16,7 @@ import httpx
 from fastapi.responses import JSONResponse
 
 from ....services import proxy_router_service
-from ....services import session_service
+from ....services import session_routing_service
 from ....db.database import get_db
 from .chat_exceptions import (
     RequestParseError,
@@ -85,10 +85,11 @@ async def _create_new_session(
     requested_model: Optional[str],
     logger,
     request_id: str,
+    original_session_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Create a new session to replace an expired one."""
+    """Create a new session to replace an expired one using SessionRoutingService."""
     logger.info(
-        "Creating new session to replace expired session",
+        "Routing to new session to replace expired session",
         user_id=user.id,
         api_key_id=db_api_key.id,
         requested_model=requested_model,
@@ -97,31 +98,37 @@ async def _create_new_session(
     
     try:
         async with get_db() as db:
-            new_session = await session_service.get_session_for_api_key(
+            # Release the old session first if provided
+            if original_session_id:
+                await session_routing_service.release_session(db, original_session_id)
+            
+            # Route to a new session
+            new_session_id = await session_routing_service.route_request(
                 db=db,
-                api_key_id=db_api_key.id,
                 user_id=user.id,
                 requested_model=requested_model,
+                model_type="LLM",
             )
-            if not new_session:
+            
+            if not new_session_id:
                 logger.error(
-                    "Failed to create new session - automation may be disabled",
+                    "Failed to route to new session",
                     event_type="new_session_creation_failed",
                 )
                 return None
             
             logger.info(
-                "Created new session successfully",
-                new_session_id=new_session.id,
+                "Routed to new session successfully",
+                new_session_id=new_session_id,
                 event_type="new_session_created",
             )
             
             await asyncio.sleep(1.0)  # Brief delay to ensure session is registered
-            return new_session.id
+            return new_session_id
             
     except Exception as e:
         logger.error(
-            "Failed to create new session",
+            "Failed to route to new session",
             error=str(e),
             event_type="new_session_creation_failed",
         )
@@ -192,7 +199,7 @@ async def handle_non_streaming_request(
             event_type="session_expired_detected",
         )
         
-        new_session_id = await _create_new_session(db_api_key, user, requested_model, logger, request_id)
+        new_session_id = await _create_new_session(db_api_key, user, requested_model, logger, request_id, session_id)
         if new_session_id:
             return await _retry_with_new_session(
                 new_session_id=new_session_id,

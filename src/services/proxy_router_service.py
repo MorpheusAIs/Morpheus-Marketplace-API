@@ -9,7 +9,6 @@ from typing import AsyncIterator, Dict, Optional, Any, List
 
 import httpx
 from ..core.config import settings
-from ..crud import private_key as private_key_crud
 from ..core.logging_config import get_proxy_logger
 import base64
 
@@ -116,8 +115,6 @@ async def _execute_request(
     data: Optional[Dict[str, Any]] = None,
     timeout: float = 120.0,  # INCREASED from 30s for large token responses
     max_retries: int = 3,
-    user_id: Optional[int] = None,
-    db = None,
 ) -> httpx.Response:
     """
     Execute a request to the proxy router with retry logic and authentication.
@@ -132,8 +129,6 @@ async def _execute_request(
         data: Form data for multipart/form-data
         timeout: Request timeout
         max_retries: Maximum number of retry attempts
-        user_id: User ID for private key authentication
-        db: Database session for private key lookup
         
     Returns:
         httpx.Response: The response object
@@ -148,29 +143,7 @@ async def _execute_request(
     
     # Build headers with authentication
     request_headers = headers or {}
-    
-    # Add private key if user_id and db are provided
-    if user_id and db:
-        logger.debug("Retrieving private key for user",
-                    user_id=user_id,
-                    event_type="private_key_lookup")
-        private_key, using_fallback = await private_key_crud.get_private_key_with_fallback(db, user_id)
         
-        if not private_key:
-            logger.error("No private key found and no fallback configured",
-                        user_id=user_id,
-                        event_type="private_key_error")
-            raise ProxyRouterServiceError(
-                "Private key not found and no fallback key configured",
-                status_code=401,
-                error_type="authentication_error"
-            )
-        
-        request_headers["X-Private-Key"] = private_key
-        logger.debug("Added private key to request",
-                    using_fallback=using_fallback,
-                    event_type="private_key_added")
-    
     # Set up basic auth
     auth = (settings.PROXY_ROUTER_USERNAME, settings.PROXY_ROUTER_PASSWORD)
     
@@ -302,8 +275,6 @@ async def openSession(
     *,
     target_model: str,
     session_duration: int = 3600,
-    user_id: int,
-    db,
     failover: bool = False,
     direct_payment: bool = False,
 ) -> Dict[str, Any]:
@@ -313,8 +284,7 @@ async def openSession(
     Args:
         target_model: Blockchain ID of the model (hex string starting with 0x)
         session_duration: Session duration in seconds
-        user_id: User ID for private key authentication
-        db: Database session for private key lookup
+        user_id: User ID for logging
         failover: Whether to enable failover
         direct_payment: Whether to use direct payment
         
@@ -350,8 +320,6 @@ async def openSession(
             f"blockchain/models/{target_model}/session",
             headers=headers,
             json_data=session_data,
-            user_id=user_id,
-            db=db,
             max_retries=3
         )
         
@@ -512,7 +480,6 @@ async def createBidSession(
     bid_id: str,
     session_data: Dict[str, Any],
     user_id: int,
-    db,
     chain_id: Optional[str] = None,
     contract_address: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -522,8 +489,7 @@ async def createBidSession(
     Args:
         bid_id: ID of the bid to create session for
         session_data: Session configuration data
-        user_id: User ID for private key authentication
-        db: Database session for private key lookup
+        user_id: User ID for logging
         chain_id: Blockchain chain ID (optional)
         contract_address: Contract address (optional)
         
@@ -551,8 +517,6 @@ async def createBidSession(
             f"blockchain/bids/{bid_id}/session",
             headers=headers,
             json_data=session_data,
-            user_id=user_id,
-            db=db,
             max_retries=3
         )
         
@@ -1073,7 +1037,6 @@ async def approveSpending(
     spender: str,
     amount: int,
     user_id: int,
-    db
 ) -> httpx.Response:
     """
     Approve a contract to spend MOR tokens on behalf of the user.
@@ -1081,8 +1044,7 @@ async def approveSpending(
     Args:
         spender: The contract address to approve as spender
         amount: The amount to approve
-        user_id: User ID for private key authentication
-        db: Database session for private key lookup
+        user_id: User ID for logging
         
     Returns:
         httpx.Response: The response object
@@ -1107,8 +1069,6 @@ async def approveSpending(
             "POST",
             "blockchain/approve",
             params=params,
-            user_id=user_id,
-            db=db,
             timeout=30.0,
             max_retries=3
         )

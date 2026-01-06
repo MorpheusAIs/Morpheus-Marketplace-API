@@ -180,6 +180,16 @@ class Settings(BaseSettings):
     # Automation feature flag
     AUTOMATION_FEATURE_ENABLED: bool = Field(default=os.getenv("AUTOMATION_FEATURE_ENABLED", "False").lower() == "true")
     
+    # Session Routing Service Configuration
+    # Interval in seconds for automated activity loop (session scaling)
+    SESSION_AUTOMATION_INTERVAL_SECONDS: int = Field(default=int(os.getenv("SESSION_AUTOMATION_INTERVAL_SECONDS", "30")))
+    # Grace period before closing idle sessions (prevents thrashing)
+    SESSION_IDLE_GRACE_SECONDS: int = Field(default=int(os.getenv("SESSION_IDLE_GRACE_SECONDS", "300")))
+    # Default session duration when creating new sessions (in seconds)
+    SESSION_DEFAULT_DURATION_SECONDS: int = Field(default=int(os.getenv("SESSION_DEFAULT_DURATION_SECONDS", "1800")))
+    # Comma-separated list of preferred models (keep at least one idle session)
+    SESSION_PREFERRED_MODELS: str = Field(default=os.getenv("SESSION_PREFERRED_MODELS", ""))
+    
     # Delegation
     GATEWAY_DELEGATE_ADDRESS: str = "0xGatewayDelegateAccountAddressPlaceholder" # Placeholder
     

@@ -15,8 +15,9 @@ from .user_private_key import UserPrivateKey
 from .user_automation_settings import UserAutomationSettings
 from .delegation import Delegation
 
-# Session model
+# Session models
 from .session import Session
+from .routed_session import RoutedSession, SessionState
 
 # Chat models
 from .chat import Chat, Message, MessageRole
@@ -41,6 +42,8 @@ __all__ = [
     "Delegation",
     # Session
     "Session",
+    "RoutedSession",
+    "SessionState",
     # Chat
     "Chat",
     "Message",

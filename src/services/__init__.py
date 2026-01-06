@@ -10,6 +10,14 @@ from .pricing import (
     UsageCost,
 )
 
+from .session_routing_service import (
+    SessionRoutingService,
+    session_routing_service,
+    SessionRoutingError,
+    NoSessionAvailableError,
+    SessionOpenError,
+)
+
 __all__ = [
     "PricingService",
     "get_pricing_service",
@@ -18,4 +26,10 @@ __all__ = [
     "ModelPricing",
     "UsageEstimate",
     "UsageCost",
+    # Session Routing Service
+    "SessionRoutingService",
+    "session_routing_service",
+    "SessionRoutingError",
+    "NoSessionAvailableError",
+    "SessionOpenError",
 ]
