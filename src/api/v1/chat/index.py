@@ -148,14 +148,24 @@ async def create_chat_completion(
         chat_logger=chat_logger,
     )
     
-    # Get or create session
-    session_id = await _resolve_session(
-        db_api_key=db_api_key,
-        user=user,
-        requested_model=requested_model,
-        chat_logger=chat_logger,
-        request_id=request_id,
-    )
+    # Get or create session (void billing hold on failure)
+    try:
+        session_id = await _resolve_session(
+            db_api_key=db_api_key,
+            user=user,
+            requested_model=requested_model,
+            chat_logger=chat_logger,
+            request_id=request_id,
+        )
+    except Exception as e:
+        await _void_billing_hold(
+            user_id=user.id,
+            ledger_entry_id=ledger_entry_id,
+            failure_code="session_error",
+            failure_reason=str(e),
+            chat_logger=chat_logger,
+        )
+        raise
     
     chat_logger.info(
         "Original request details",
@@ -233,12 +243,10 @@ async def _resolve_session(
     except SessionOpenError as e:
         raise SessionCreationError(
             message=f"Error opening session: {e.message}",
-            session_id=None,
         ) from e
     except Exception as e:
         raise SessionCreationError(
             message=f"Error handling session: {e}",
-            session_id=session_id,
         ) from e
 
 
