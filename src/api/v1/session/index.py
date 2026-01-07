@@ -43,7 +43,7 @@ DIAMOND_CONTRACT_ADDRESS = os.getenv("DIAMOND_CONTRACT_ADDRESS", "0xb8C55cD613af
 @router.post("/approve")
 async def approve_spending(
     amount: int = Query(..., description="The amount to approve, consider bid price * duration for sessions"),
-    db: AsyncSession = Depends(get_db_session),
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_api_key_user)
 ):
     """

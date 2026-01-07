@@ -37,7 +37,12 @@ services:
       DATABASE_URL: postgresql+asyncpg://morpheus_local:local_dev_password@db-local:5432/morpheus_local_db
       
       # Bypass Cognito for local testing (controlled by .env.local)
+      BILLING_ADMIN_SECRET: ${BILLING_ADMIN_SECRET}
       BYPASS_COGNITO_AUTH: ${BYPASS_COGNITO_AUTH:-false}
+
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+
       LOCAL_TESTING_MODE: ${LOCAL_TESTING_MODE:-false}
 
       # Cognito authentication (ensure these are passed from .env.local)
@@ -61,6 +66,12 @@ services:
       PROXY_ROUTER_URL: ${PROXY_ROUTER_URL:-http://router.dev.mor.org:8082}
       PROXY_ROUTER_USERNAME: admin
       PROXY_ROUTER_PASSWORD: admin
+      
+      # Session automation settings
+      SESSION_AUTOMATION_INTERVAL_SECONDS: ${SESSION_AUTOMATION_INTERVAL_SECONDS:-30}
+      SESSION_IDLE_GRACE_SECONDS: ${SESSION_IDLE_GRACE_SECONDS:-300}
+      SESSION_DEFAULT_DURATION_SECONDS: ${SESSION_DEFAULT_DURATION_SECONDS:-1800}
+      SESSION_PREFERRED_MODELS: ${SESSION_PREFERRED_MODELS:-}
       
       # JWT settings (local values)
       JWT_SECRET_KEY: local-testing-secret-key-not-for-production
