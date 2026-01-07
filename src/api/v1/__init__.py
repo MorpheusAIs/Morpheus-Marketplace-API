@@ -10,6 +10,8 @@ from .automation.index import router as automation_router
 from .chat_history.index import router as chat_history_router
 from .embeddings.index import router as embeddings_router
 from .audio.index import router as audio_router
+from .billing.index import router as billing_router
+from .webhooks.stripe import stripe_webhook_router
 
 # Create routers with the fixed dependency route class
 models = APIRouter()
@@ -38,3 +40,11 @@ auth.include_router(auth_router)
 # Chat history router
 chat_history = APIRouter()
 chat_history.include_router(chat_history_router)
+
+# Billing router
+billing = APIRouter()
+billing.include_router(billing_router)
+
+# Webhooks router
+webhooks = APIRouter()
+webhooks.include_router(stripe_webhook_router)

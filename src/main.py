@@ -15,7 +15,9 @@ import uuid
 import socket
 import platform
 
-from src.api.v1 import models, chat, session, auth, automation, chat_history, embeddings, audio
+from src.api.v1 import models, chat, session, auth, automation, chat_history, embeddings, audio, billing, webhooks
+from src.api.v1.chat.chat_exceptions import ChatError
+from src.services import session_routing_service
 
 from src.core.config import settings
 from src.core.version import get_version, get_version_info
@@ -165,6 +167,13 @@ async def enforce_https(request: Request, call_next):
         )
     
     return await call_next(request)
+
+# Error handler for custom ChatError exceptions
+@app.exception_handler(ChatError)
+async def chat_error_handler(request: Request, exc: ChatError):
+    """Handle ChatError exceptions with structured responses."""
+    return exc.to_response()
+
 
 # Error handler for OpenAI-compatible error responses
 @app.exception_handler(Exception)
@@ -332,6 +341,18 @@ async def startup_event():
                     event_type="background_task_error")
         logger.warning("Continuing startup without background session cleanup")
     
+    # Start session routing automation loop
+    try:
+        await session_routing_service.start_automation_loop()
+        logger.info("Started session routing automation loop",
+                   interval_seconds=settings.SESSION_AUTOMATION_INTERVAL_SECONDS,
+                   event_type="session_routing_automation_started")
+    except Exception as e:
+        logger.error("Failed to start session routing automation",
+                    error=str(e),
+                    event_type="session_routing_automation_error")
+        logger.warning("Continuing startup without session routing automation")
+    
     logger.info("Application startup complete", event_type="startup_complete")
 
 @app.on_event("shutdown")
@@ -341,6 +362,13 @@ async def shutdown_event():
     """
     logger.info("Application shutdown initiated", event_type="shutdown_start")
     logger.info("Direct model service requires no cleanup (stateless)")
+    
+    # Stop session routing automation loop
+    try:
+        await session_routing_service.stop_automation_loop()
+        logger.info("Session routing automation loop stopped", event_type="session_routing_automation_stopped")
+    except Exception as e:
+        logger.warning("Error stopping session routing automation", error=str(e), event_type="session_routing_automation_stop_error")
     
     # Close proxy router HTTP client
     try:
@@ -437,6 +465,8 @@ app.include_router(automation, prefix=f"{settings.API_V1_STR}/automation")
 app.include_router(chat_history, prefix=f"{settings.API_V1_STR}/chat-history")
 app.include_router(embeddings, prefix=f"{settings.API_V1_STR}")
 app.include_router(audio, prefix=f"{settings.API_V1_STR}")
+app.include_router(billing, prefix=f"{settings.API_V1_STR}/billing")
+app.include_router(webhooks, prefix=f"{settings.API_V1_STR}/webhooks")
 
 # Default routes - using standard APIRoute for these endpoints to avoid dependency resolution issues
 # Reset the route_class temporarily for these specific routes
@@ -1408,7 +1438,7 @@ def custom_openapi():
     # FastAPI auto-detects security from dependencies, but we need to ensure correct mapping
     for path_key, path_item in openapi_schema["paths"].items():
         # Skip certain endpoints that should remain unauthenticated
-        if path_key in ["/", "/health", "/docs", "/api-docs", "/cors-check"] or path_key.startswith("/docs/") or path_key.startswith("/exchange-token"):
+        if path_key in ["/", "/health", "/docs", "/api-docs", "/cors-check"] or path_key.startswith("/docs/") or path_key.startswith("/exchange-token") or path_key.startswith(f"{settings.API_V1_STR}/webhooks"):
             continue
         
         # Determine security based on path patterns (matching actual implementation)

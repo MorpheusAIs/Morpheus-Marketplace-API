@@ -243,8 +243,6 @@ async def create_automated_session(
             response = await proxy_router_service.openSession(
                 target_model=target_model,
                 session_duration=session_duration,
-                user_id=user_id,
-                db=db,
                 failover=False,
                 direct_payment=False
             )

@@ -13,7 +13,7 @@ from ....crud import session as session_crud
 from ....crud import api_key as api_key_crud
 from ....core.config import settings
 from ....core.model_routing import async_model_router
-from ....services import session_service
+from ....services import session_routing_service, NoSessionAvailableError, SessionOpenError
 from ....services import proxy_router_service
 from ....db.database import get_db
 from ....dependencies import get_api_key_user, get_current_api_key
@@ -60,21 +60,43 @@ async def create_embeddings(
 
         if not session_id:
             try:
-                embeddings_logger.info("No session_id in request, attempting to retrieve or create one",
+                embeddings_logger.info("No session_id in request, routing to session via SessionRoutingService",
                            request_id=request_id,
                            api_key_id=db_api_key.id,
                            requested_model=requested_model,
-                           event_type="session_lookup_start")
+                           event_type="session_routing_start")
                 async with get_db() as db:
-                    session = await session_service.get_session_for_api_key(db, db_api_key.id, user.id, requested_model, model_type='EMBEDDINGS')
-                    if session:
-                        session_id = session.id
+                    session_id = await session_routing_service.route_request(
+                        db=db,
+                        user_id=user.id,
+                        requested_model=requested_model,
+                        model_type='EMBEDDINGS'
+                    )
                 
                 if session_id:
-                    embeddings_logger.info("Session retrieved successfully",
+                    embeddings_logger.info("Session routed successfully",
                                 request_id=request_id,
                                 session_id=session_id,
-                                event_type="session_lookup_success")
+                                event_type="session_routing_success")
+            except NoSessionAvailableError as e:
+                embeddings_logger.error("No session available",
+                                request_id=request_id,
+                                error=str(e),
+                                event_type="no_session_available")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No session available for embeddings request"
+                )
+            except SessionOpenError as e:
+                embeddings_logger.error("Failed to open session",
+                                request_id=request_id,
+                                error=str(e),
+                                event_type="session_open_error",
+                                exc_info=True)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error opening session: {e.message}"
+                )
             except Exception as e:
                 embeddings_logger.error("Error in session handling",
                                 request_id=request_id,
@@ -151,6 +173,21 @@ async def create_embeddings(
                 status_code=e.get_http_status_code(),
                 detail=f"Embeddings request failed: {e.message}"
             )
+        
+        finally:
+            # Release the session after request completes
+            if session_id:
+                try:
+                    async with get_db() as db:
+                        await session_routing_service.release_session(db, session_id)
+                        embeddings_logger.debug("Session released",
+                                               session_id=session_id,
+                                               event_type="session_released")
+                except Exception as release_err:
+                    embeddings_logger.warning("Failed to release session",
+                                             session_id=session_id,
+                                             error=str(release_err),
+                                             event_type="session_release_error")
     
     except HTTPException:
         raise
