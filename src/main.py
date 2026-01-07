@@ -1450,7 +1450,7 @@ def custom_openapi():
                     if "security" in operation:
                         del operation["security"]
                 # Auth and Automation endpoints: OAuth2/BearerAuth only (JWT tokens from Cognito)
-                elif path_key.startswith("/api/v1/auth/") or path_key.startswith("/api/v1/automation/"):
+                elif path_key.startswith("/api/v1/auth/") or path_key.startswith("/api/v1/automation/") or path_key.startswith("/api/v1/billing/"):
                     operation["security"] = [
                         {"OAuth2": ["openid", "email", "profile"]},
                         {"BearerAuth": []}

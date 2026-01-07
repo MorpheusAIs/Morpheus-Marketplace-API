@@ -121,7 +121,6 @@ async def create_chat_completion(
     
     json_body["stream"] = should_stream
 
-    session_id = json_body.pop("session_id", None)
     requested_model = json_body.pop("model", None)
     
     if json_body.get("tools"):
@@ -151,7 +150,6 @@ async def create_chat_completion(
     
     # Get or create session
     session_id = await _resolve_session(
-        session_id=session_id,
         db_api_key=db_api_key,
         user=user,
         requested_model=requested_model,
@@ -201,7 +199,6 @@ async def create_chat_completion(
 
 
 async def _resolve_session(
-    session_id: Optional[str],
     db_api_key: APIKey,
     user: User,
     requested_model: Optional[str],
@@ -209,9 +206,7 @@ async def _resolve_session(
     request_id: str,
 ) -> str:
     """Resolve or create a session for the request using the Session Routing Service."""
-    if session_id:
-        return session_id
-    
+
     chat_logger.info(
         "No session_id in request, routing to session via SessionRoutingService",
         api_key_id=db_api_key.id,
