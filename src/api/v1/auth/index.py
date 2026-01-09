@@ -367,8 +367,9 @@ async def delete_user_account(
     3. Delete private key data (via cascade)
     4. Delete automation settings (via cascade)
     5. Delete delegation data (via cascade)
-    6. Delete the user account
-    7. Delete/deactivate the Cognito identity
+    6. Delete wallet links (via cascade)
+    7. Delete the user account
+    8. Delete/deactivate the Cognito identity
     
     Requires JWT Bearer authentication.
     """
@@ -422,7 +423,8 @@ async def delete_user_account(
             "api_keys": api_keys_deleted,
             "private_key": True,  # Will be deleted via cascade if it exists
             "automation_settings": True,  # Will be deleted via cascade if it exists
-            "delegations": True  # Will be deleted via cascade if any exist
+            "delegations": True,  # Will be deleted via cascade if any exist
+            "wallet_links": True  # Will be deleted via cascade if any exist
         }
         
         # Use timezone-aware datetime and convert to naive for consistency

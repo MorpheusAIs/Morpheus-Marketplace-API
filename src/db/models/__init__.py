@@ -30,6 +30,10 @@ from .credits import (
     LedgerEntryType,
 )
 
+# Wallet models
+from .wallet_link import WalletLink
+from .wallet_nonce import WalletNonce, NONCE_TTL_SECONDS
+
 # Export all models for easy importing
 __all__ = [
     # Base
@@ -53,5 +57,9 @@ __all__ = [
     "CreditAccountBalance",
     "LedgerStatus",
     "LedgerEntryType",
+    # Wallet
+    "WalletLink",
+    "WalletNonce",
+    "NONCE_TTL_SECONDS",
 ]
 

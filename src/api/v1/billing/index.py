@@ -14,6 +14,7 @@ from ....db.database import get_db_session
 from ....db.models import User, LedgerEntryType
 from ....dependencies import get_current_user, get_api_key_user
 from ....services.billing_service import billing_service
+from ....services.staking_service import staking_service
 from ....crud import credits as credits_crud
 from ....schemas.billing import (
     BalanceResponse,
@@ -409,22 +410,51 @@ async def trigger_staking_refresh(
     _admin_verified: bool = Depends(verify_billing_admin_secret),
 ):
     """
-    Trigger a staking refresh for today.
+    Trigger the daily staking sync from Builders API.
     
     **Admin/Dev endpoint** - Requires X-Admin-Secret header.
     
-    This operation is idempotent - calling it multiple times on the same day
-    will only refresh once.
+    This operation:
+    1. Fetches all stakers from Builders API
+    2. Updates staked_amount for all linked wallets
+    3. Calculates daily credits for each user (total_staked / 100)
+    4. Creates ledger entries (transactions) for each user refresh
+    5. Updates user balances
     
-    The staking bucket resets to the configured daily amount (does not accumulate).
+    Idempotent: Users already refreshed today will be skipped.
+    The staking bucket resets to the calculated daily amount (does not accumulate).
     """
     logger.info(
-        "Staking refresh triggered by admin",
+        "Staking sync triggered by admin",
         user_id=current_user.id,
-        event_type="billing_admin_staking_refresh"
+        event_type="billing_admin_staking_sync"
     )
-    result = await billing_service.refresh_staking(db, current_user.id)
-    return result
+    
+    try:
+        summary = await staking_service.run_daily_sync(db)
+        
+        return StakingRefreshResponse(
+            success=summary.get("success", True),
+            message="Staking sync completed successfully",
+            stakers_fetched=summary.get("stakers_fetched"),
+            total_wallets=summary.get("total_wallets"),
+            wallets_updated=summary.get("wallets_updated"),
+            users_processed=summary.get("users_processed"),
+            users_skipped=summary.get("users_skipped"),
+            users_failed=summary.get("users_failed"),
+            duration_seconds=summary.get("duration_seconds"),
+        )
+    except Exception as e:
+        logger.error(
+            "Staking sync failed",
+            user_id=current_user.id,
+            error=str(e),
+            event_type="billing_admin_staking_sync_failed"
+        )
+        return StakingRefreshResponse(
+            success=False,
+            message=f"Staking sync failed: {str(e)}",
+        )
 
 
 # === Manual Credit Top-up (Admin/Dev endpoint) ===

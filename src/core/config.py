@@ -207,6 +207,15 @@ class Settings(BaseSettings):
     # If not set, admin endpoints will be disabled
     BILLING_ADMIN_SECRET: str | None = Field(default=os.getenv("BILLING_ADMIN_SECRET"))
     
+    # Builders API Settings (for MOR staking data)
+    # Used to fetch staker information for credit allocation
+    BUILDERS_API_URL: str = Field(
+        default=os.getenv("BUILDERS_API_URL", "https://dashboard.mor.org/api")
+    )
+    BUILDERS_SUBNET_ID: str = Field(
+        default=os.getenv("BUILDERS_SUBNET_ID", "")
+    )
+    
     # Stripe Settings
     # Required for processing Stripe payments and webhooks
     STRIPE_SECRET_KEY: str | None = Field(default=os.getenv("STRIPE_SECRET_KEY"))

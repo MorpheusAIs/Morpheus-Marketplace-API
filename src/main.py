@@ -15,9 +15,10 @@ import uuid
 import socket
 import platform
 
-from src.api.v1 import models, chat, session, auth, automation, chat_history, embeddings, audio, billing, webhooks
+from src.api.v1 import models, chat, session, auth, automation, chat_history, embeddings, audio, billing, webhooks, wallet
 from src.api.v1.chat.chat_exceptions import ChatError
 from src.services import session_routing_service
+from src.services.staking_service import staking_service
 
 from src.core.config import settings
 from src.core.version import get_version, get_version_info
@@ -195,6 +196,62 @@ async def openai_exception_handler(request: Request, exc: Exception):
         }
     )
 
+# Background task to run daily staking sync at 0:05 UTC
+async def daily_staking_sync():
+    """
+    Background task to sync staking data and update user balances daily.
+    Runs at 0:05 UTC every day.
+    """
+    from src.db.database import AsyncSessionLocal
+    from datetime import datetime, timezone, timedelta
+    import traceback
+    
+    staking_sync_logger = get_core_logger().bind(component="staking_sync")
+    staking_sync_logger.info("Starting daily staking sync task")
+    
+    while True:
+        try:
+            # Calculate time until next 0:05 UTC
+            now = datetime.now(timezone.utc)
+            target_time = now.replace(hour=0, minute=5, second=0, microsecond=0)
+            
+            # If we've already passed 0:05 today, schedule for tomorrow
+            if now >= target_time:
+                target_time = target_time + timedelta(days=1)
+            
+            wait_seconds = (target_time - now).total_seconds()
+            
+            staking_sync_logger.info(
+                "Waiting for next staking sync",
+                next_run=target_time.isoformat(),
+                wait_seconds=int(wait_seconds)
+            )
+            
+            # Wait until 0:05 UTC
+            await asyncio.sleep(wait_seconds)
+            
+            staking_sync_logger.info("Starting daily staking sync", event_type="staking_sync_start")
+            
+            # Run the sync
+            async with AsyncSessionLocal() as db:
+                summary = await staking_service.run_daily_sync(db)
+                staking_sync_logger.info(
+                    "Daily staking sync completed",
+                    **summary,
+                    event_type="staking_sync_complete"
+                )
+                
+        except Exception as e:
+            staking_sync_logger.error(
+                "Error in daily staking sync task",
+                error=str(e),
+                traceback=traceback.format_exc(),
+                event_type="staking_sync_error"
+            )
+            # Wait 1 hour before retrying on error
+            await asyncio.sleep(3600)
+
+
 # Background task to clean up expired sessions
 async def cleanup_expired_sessions():
     """
@@ -341,6 +398,17 @@ async def startup_event():
                     event_type="background_task_error")
         logger.warning("Continuing startup without background session cleanup")
     
+    # Start the daily staking sync task
+    try:
+        asyncio.create_task(daily_staking_sync())
+        logger.info("Started background task for daily staking sync",
+                   event_type="staking_sync_task_start")
+    except Exception as e:
+        logger.error("Failed to start staking sync task",
+                    error=str(e),
+                    event_type="staking_sync_task_error")
+        logger.warning("Continuing startup without staking sync")
+    
     # Start session routing automation loop
     try:
         await session_routing_service.start_automation_loop()
@@ -377,6 +445,13 @@ async def shutdown_event():
         logger.info("Proxy router HTTP client closed successfully", event_type="http_client_shutdown")
     except Exception as e:
         logger.warning("Error closing proxy router HTTP client", error=str(e), event_type="http_client_shutdown_error")
+    
+    # Close staking service HTTP client
+    try:
+        await staking_service.close()
+        logger.info("Staking service HTTP client closed successfully", event_type="staking_service_shutdown")
+    except Exception as e:
+        logger.warning("Error closing staking service HTTP client", error=str(e), event_type="staking_service_shutdown_error")
     
     logger.info("Application shutdown complete", event_type="shutdown_complete")
 
@@ -467,6 +542,7 @@ app.include_router(embeddings, prefix=f"{settings.API_V1_STR}")
 app.include_router(audio, prefix=f"{settings.API_V1_STR}")
 app.include_router(billing, prefix=f"{settings.API_V1_STR}/billing")
 app.include_router(webhooks, prefix=f"{settings.API_V1_STR}/webhooks")
+app.include_router(wallet, prefix=f"{settings.API_V1_STR}/auth/wallet")
 
 # Default routes - using standard APIRoute for these endpoints to avoid dependency resolution issues
 # Reset the route_class temporarily for these specific routes
@@ -1447,6 +1523,11 @@ def custom_openapi():
                 # Models endpoints: No authentication (public)
                 if path_key.startswith("/api/v1/models"):
                     # Remove any security that FastAPI might have added
+                    if "security" in operation:
+                        del operation["security"]
+                # Wallet check endpoint: No authentication (public)
+                elif path_key.startswith("/api/v1/auth/wallet/check/"):
+                    # Remove any security for public wallet availability check
                     if "security" in operation:
                         del operation["security"]
                 # Auth and Automation endpoints: OAuth2/BearerAuth only (JWT tokens from Cognito)
