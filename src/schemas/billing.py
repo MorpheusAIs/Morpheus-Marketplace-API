@@ -202,10 +202,17 @@ class StakingSettingsResponse(BaseModel):
 
 class StakingRefreshResponse(BaseModel):
     """Response for POST /billing/staking/refresh."""
-    credits_added: DecimalStr
-    new_balance: StakingBalanceInfo
-    already_refreshed: bool = Field(default=False, description="True if already refreshed today")
+    success: bool = Field(default=True, description="Whether the sync completed successfully")
     message: str
+    
+    # Sync summary (from Builders API sync)
+    stakers_fetched: Optional[int] = Field(None, description="Number of stakers fetched from Builders API")
+    total_wallets: Optional[int] = Field(None, description="Total linked wallets in system")
+    wallets_updated: Optional[int] = Field(None, description="Wallets with stake changes")
+    users_processed: Optional[int] = Field(None, description="Users with balance updated")
+    users_skipped: Optional[int] = Field(None, description="Users already refreshed today")
+    users_failed: Optional[int] = Field(None, description="Users that failed to sync")
+    duration_seconds: Optional[float] = Field(None, description="Sync duration in seconds")
     
     model_config = ConfigDict(from_attributes=True)
 
