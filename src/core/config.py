@@ -190,7 +190,7 @@ class Settings(BaseSettings):
     # Default session duration when creating new sessions (in seconds)
     SESSION_DEFAULT_DURATION_SECONDS: int = Field(default=int(os.getenv("SESSION_DEFAULT_DURATION_SECONDS", "1800")))
     # Comma-separated list of preferred models (keep at least one idle session)
-    SESSION_PREFERRED_MODELS: str = Field(default=os.getenv("SESSION_PREFERRED_MODELS", "0xf9b52917dbdaeba78cd33a12eb58bb3b8dda12fdecc1d99059d552043cdb9823"))
+    SESSION_PREFERRED_MODELS: str = Field(default=os.getenv("SESSION_PREFERRED_MODELS"))
     
     # Delegation
     GATEWAY_DELEGATE_ADDRESS: str = "0xGatewayDelegateAccountAddressPlaceholder" # Placeholder
@@ -210,7 +210,7 @@ class Settings(BaseSettings):
     # Stripe Settings
     # Required for processing Stripe payments and webhooks
     STRIPE_SECRET_KEY: str | None = Field(default=os.getenv("STRIPE_SECRET_KEY"))
-    STRIPE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("STRIPE_WEBHOOK_SECRET", "whsec_29c372d4ecc5043a65415fac823937377ac76fd7bc0f0f686d9036ddf8ca189a"))
+    STRIPE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("STRIPE_WEBHOOK_SECRET"))
     
     # Legacy Model Sync Settings (deprecated - kept for compatibility)
     MODEL_SYNC_ON_STARTUP: bool = Field(default=False)  # Disabled by default
