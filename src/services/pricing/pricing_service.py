@@ -152,6 +152,8 @@ class PricingService:
             currency=pricing.currency,
             confidence=1.0 if pricing.model_name != "default" else 0.5,
             pricing_source=self._provider.source_name,
+            input_price_per_million=pricing.input_price_per_million,
+            output_price_per_million=pricing.output_price_per_million,
         )
     
     async def calculate_cost(

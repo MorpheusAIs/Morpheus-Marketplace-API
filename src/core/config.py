@@ -139,6 +139,8 @@ class Settings(BaseSettings):
     DB_POOL_TIMEOUT: int = Field(default=int(os.getenv("DB_POOL_TIMEOUT", "30")))
     DB_POOL_RECYCLE: int = Field(default=int(os.getenv("DB_POOL_RECYCLE", "3600")))
     DB_POOL_PRE_PING: bool = Field(default=os.getenv("DB_POOL_PRE_PING", "true").lower() == "true")
+    
+    DEFAULT_BALANCE_AMOUNT: int = Field(default=int(os.getenv("DEFAULT_BALANCE_AMOUNT", "10")))
 
     # JWT Settings
     JWT_SECRET_KEY: str = Field(default=os.getenv("JWT_SECRET_KEY", "super_secret_key_change_me"))
@@ -188,7 +190,7 @@ class Settings(BaseSettings):
     # Default session duration when creating new sessions (in seconds)
     SESSION_DEFAULT_DURATION_SECONDS: int = Field(default=int(os.getenv("SESSION_DEFAULT_DURATION_SECONDS", "1800")))
     # Comma-separated list of preferred models (keep at least one idle session)
-    SESSION_PREFERRED_MODELS: str = Field(default=os.getenv("SESSION_PREFERRED_MODELS", ""))
+    SESSION_PREFERRED_MODELS: str = Field(default=os.getenv("SESSION_PREFERRED_MODELS"))
     
     # Delegation
     GATEWAY_DELEGATE_ADDRESS: str = "0xGatewayDelegateAccountAddressPlaceholder" # Placeholder
