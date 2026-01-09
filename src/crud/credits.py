@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func, and_, extract
 from sqlalchemy.orm import selectinload
 
+from src.core.config import settings
 from src.db.models import CreditLedger, CreditAccountBalance, LedgerStatus, LedgerEntryType
 from src.core.logging_config import get_core_logger
 
@@ -30,7 +31,7 @@ async def get_or_create_balance(db: AsyncSession, user_id: int) -> CreditAccount
     if not balance:
         balance = CreditAccountBalance(
             user_id=user_id,
-            paid_posted_balance=Decimal("0"),
+            paid_posted_balance=Decimal(settings.DEFAULT_BALANCE_AMOUNT),
             paid_pending_holds=Decimal("0"),
             staking_daily_amount=Decimal("0"),
             staking_available=Decimal("0"),

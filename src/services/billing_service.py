@@ -248,6 +248,11 @@ class BillingService:
             api_key_id=request.api_key_id,
             model_name=request.model_name,
             model_id=request.model_id,
+            input_price_per_million=estimate.input_price_per_million,
+            output_price_per_million=estimate.output_price_per_million,
+            tokens_input=request.estimated_input_tokens,
+            tokens_output=request.estimated_output_tokens,
+            tokens_total=request.estimated_input_tokens + request.estimated_output_tokens,
             endpoint=request.endpoint,
         )
         

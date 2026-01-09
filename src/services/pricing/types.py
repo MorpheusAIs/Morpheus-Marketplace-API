@@ -72,6 +72,8 @@ class UsageEstimate:
         currency: Currency code
         confidence: Confidence level of estimate (0.0 - 1.0)
         pricing_source: Source of pricing data (e.g., "hardcoded", "database")
+        input_price_per_million: Price per 1M input tokens (for DB storage)
+        output_price_per_million: Price per 1M output tokens (for DB storage)
     """
     model_name: str
     estimated_input_tokens: int
@@ -83,6 +85,8 @@ class UsageEstimate:
     currency: str = "USD"
     confidence: float = 1.0
     pricing_source: str = "unknown"
+    input_price_per_million: Decimal = Decimal("0")
+    output_price_per_million: Decimal = Decimal("0")
     
     @property
     def is_estimated(self) -> bool:

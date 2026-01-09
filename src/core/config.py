@@ -139,6 +139,8 @@ class Settings(BaseSettings):
     DB_POOL_TIMEOUT: int = Field(default=int(os.getenv("DB_POOL_TIMEOUT", "30")))
     DB_POOL_RECYCLE: int = Field(default=int(os.getenv("DB_POOL_RECYCLE", "3600")))
     DB_POOL_PRE_PING: bool = Field(default=os.getenv("DB_POOL_PRE_PING", "true").lower() == "true")
+    
+    DEFAULT_BALANCE_AMOUNT: int = Field(default=int(os.getenv("DEFAULT_BALANCE_AMOUNT", "10")))
 
     # JWT Settings
     JWT_SECRET_KEY: str = Field(default=os.getenv("JWT_SECRET_KEY", "super_secret_key_change_me"))
@@ -204,6 +206,15 @@ class Settings(BaseSettings):
     # Secret key required for admin billing operations (staking settings, manual topups)
     # If not set, admin endpoints will be disabled
     BILLING_ADMIN_SECRET: str | None = Field(default=os.getenv("BILLING_ADMIN_SECRET"))
+    
+    # Builders API Settings (for MOR staking data)
+    # Used to fetch staker information for credit allocation
+    BUILDERS_API_URL: str = Field(
+        default=os.getenv("BUILDERS_API_URL", "https://dashboard.mor.org/api")
+    )
+    BUILDERS_SUBNET_ID: str = Field(
+        default=os.getenv("BUILDERS_SUBNET_ID", "")
+    )
     
     # Stripe Settings
     # Required for processing Stripe payments and webhooks
