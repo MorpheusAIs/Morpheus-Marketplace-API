@@ -146,22 +146,44 @@ class WalletErrorResponse(BaseModel):
 
 
 # =============================================================================
-# Message Template
+# SIWE (ERC-4361) Message Format
+# Uses the official siwe-py library: https://github.com/spruceid/siwe-py
 # =============================================================================
 
-WALLET_SIGN_MESSAGE_TEMPLATE = """Sign this message to link your wallet to your Morpheus API Gateway account.
+def get_siwe_template() -> str:
+    """
+    Get the SIWE message template for frontend use.
+    
+    Delegates to the wallet_service which uses the official siwe-py library.
+    """
+    from ..services.wallet_service import get_siwe_message_template
+    return get_siwe_message_template()
 
-Wallet: {wallet_address}
-Nonce: {nonce}
-Timestamp: {timestamp}
 
-This signature does not trigger any blockchain transaction or cost any gas."""
-
-
-def create_sign_message(wallet_address: str, nonce: str, timestamp: str) -> str:
-    """Create the standardized message for signing."""
-    return WALLET_SIGN_MESSAGE_TEMPLATE.format(
+def create_siwe_message(
+    wallet_address: str,
+    nonce: str,
+    timestamp: str,
+    statement: Optional[str] = None
+) -> str:
+    """
+    Create a Sign-In with Ethereum (ERC-4361) compliant message.
+    
+    Uses the official siwe-py library for proper SIWE formatting.
+    
+    Args:
+        wallet_address: Ethereum address
+        nonce: Unique nonce for replay protection
+        timestamp: ISO 8601 timestamp
+        statement: Human-readable statement (optional)
+        
+    Returns:
+        SIWE-formatted message string
+    """
+    from ..services.wallet_service import wallet_linking_service
+    return wallet_linking_service.create_siwe_message(
         wallet_address=wallet_address,
         nonce=nonce,
-        timestamp=timestamp
+        timestamp=timestamp,
+        statement=statement
     )
