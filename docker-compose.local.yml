@@ -1,8 +1,22 @@
 # Self-Contained Local Testing Setup
-# Includes local PostgreSQL and bypasses Cognito for true local development
+# Includes local PostgreSQL, Redis, and bypasses Cognito for true local development
 # Usage: docker-compose -f docker-compose.local.yml up --build
 
 services:
+  # Redis for rate limiting and caching
+  redis-local:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_local_data:/data
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   # Local PostgreSQL Database (ephemeral)
   db-local:
     image: postgres:15-alpine
@@ -32,7 +46,11 @@ services:
     depends_on:
       db-local:
         condition: service_healthy
+      redis-local:
+        condition: service_healthy
     environment:
+      # Redis for rate limiting
+      REDIS_URL: redis://redis-local:6379/0
       # Local database
       DATABASE_URL: postgresql+asyncpg://morpheus_local:local_dev_password@db-local:5432/morpheus_local_db
       
@@ -105,3 +123,4 @@ services:
 
 volumes:
   postgres_local_data:
+  redis_local_data:
