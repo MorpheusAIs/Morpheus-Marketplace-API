@@ -26,7 +26,7 @@ from ....schemas.wallet import (
     WalletStatusResponse,
     WalletAvailabilityResponse,
     WalletUnlinkResponse,
-    WALLET_SIGN_MESSAGE_TEMPLATE,
+    get_siwe_template,
 )
 from ....services.wallet_service import wallet_linking_service, wallet_verification_service
 from ....services.staking_service import staking_service
@@ -41,8 +41,12 @@ router = APIRouter(tags=["Auth - Wallet"])
 # Nonce Generation
 # =============================================================================
 
-@router.post("/nonce", response_model=NonceResponse)
+@router.post("/nonce/{wallet_address}", response_model=NonceResponse)
 async def generate_wallet_nonce(
+    wallet_address: str = Path(
+        ...,
+        description="Ethereum wallet address to generate nonce for (0x prefixed, 40 hex characters)"
+    ),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ):
@@ -50,24 +54,38 @@ async def generate_wallet_nonce(
     Generate a nonce for wallet signature verification.
     
     The frontend should:
-    1. Call this endpoint to get a nonce and message template
+    1. Call this endpoint with the wallet address to get a nonce and message template
     2. Construct the message by filling in the template with wallet_address, nonce, and timestamp
     3. Request the user to sign the message with their Web3 wallet
     4. Submit the signature to POST /wallet/link
     
     Nonces expire after 5 minutes and can only be used once.
     """
-    nonce_logger = logger.bind(endpoint="generate_wallet_nonce", user_id=current_user.id)
+    # Validate address format
+    is_valid, result = wallet_verification_service.validate_wallet_address(wallet_address)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid wallet address format: {result}"
+        )
+    
+    checksummed_address = result
+    
+    nonce_logger = logger.bind(
+        endpoint="generate_wallet_nonce",
+        user_id=current_user.id,
+        wallet_address=checksummed_address
+    )
     nonce_logger.info("Generating wallet nonce", event_type="nonce_generation_start")
     
-    # Generate a new nonce
-    nonce = await wallet_crud.generate_nonce(db, current_user.id)
+    # Generate a new nonce associated with this wallet address
+    nonce = await wallet_crud.generate_nonce(db, current_user.id, checksummed_address)
     
     nonce_logger.info("Wallet nonce generated successfully", event_type="nonce_generated")
     
     return NonceResponse(
         nonce=nonce,
-        message_template=WALLET_SIGN_MESSAGE_TEMPLATE,
+        message_template=get_siwe_template(),
         expires_in=NONCE_TTL_SECONDS
     )
 
@@ -257,9 +275,12 @@ async def get_wallet_status(
 # Wallet Unlinking
 # =============================================================================
 
-@router.delete("/{wallet_id}", response_model=WalletUnlinkResponse)
+@router.delete("/{wallet_address}", response_model=WalletUnlinkResponse)
 async def unlink_wallet(
-    wallet_id: int = Path(..., description="Wallet link ID"),
+    wallet_address: str = Path(
+        ...,
+        description="Ethereum wallet address to unlink (0x prefixed, 40 hex characters)"
+    ),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ):
@@ -268,30 +289,38 @@ async def unlink_wallet(
     
     This allows the wallet to be linked to a different account.
     """
+    # Validate address format
+    is_valid, result = wallet_verification_service.validate_wallet_address(wallet_address)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid wallet address format: {result}"
+        )
+    
+    checksummed_address = result
+    
     delete_logger = logger.bind(
         endpoint="unlink_wallet",
         user_id=current_user.id,
-        wallet_id=wallet_id
+        wallet_address=checksummed_address
     )
     delete_logger.info("Wallet unlink request received", event_type="wallet_unlink_start")
     
-    wallet_link = await wallet_crud.get_wallet_link_by_id(db, wallet_id)
+    wallet_link = await wallet_crud.get_wallet_link_by_address(db, checksummed_address)
     
     if not wallet_link:
         delete_logger.warning("Wallet link not found", event_type="wallet_not_found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Wallet link not found"
+            detail="Wallet not found"
         )
     
     if wallet_link.user_id != current_user.id:
         delete_logger.warning("Wallet belongs to different user", event_type="wallet_ownership_mismatch")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Wallet link not found"
+            detail="Wallet not found"
         )
-    
-    wallet_address = wallet_verification_service.to_checksum_address(wallet_link.wallet_address)
     
     await wallet_crud.delete_wallet_link(db, wallet_link)
     
@@ -299,7 +328,7 @@ async def unlink_wallet(
     
     return WalletUnlinkResponse(
         message="Wallet unlinked successfully",
-        wallet_address=wallet_address
+        wallet_address=checksummed_address
     )
 
 
