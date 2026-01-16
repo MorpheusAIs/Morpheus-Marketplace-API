@@ -17,7 +17,6 @@ from .types import (
     RateLimitResult,
     RateLimitStatus,
     RateLimitHeaders,
-    RateLimitConfig,
 )
 from .rules_service import rate_limit_rules_service, RateLimitRulesService
 from .redis_limiter import redis_limiter, RedisRateLimiter
@@ -88,14 +87,16 @@ class RateLimitService:
         request_id: Optional[str] = None,
     ) -> RateLimitResult:
         """
-        Check if a request is within rate limits.
+        Check if a request is within rate limits and increment RPM only.
         
         This should be called before processing a request.
+        TPM is NOT incremented here - it will be incremented after the request
+        completes with actual token counts via record_token_usage().
         
         Args:
             user_id: The user identifier (user ID or API key prefix)
             model: The model being requested
-            estimated_tokens: Estimated input tokens for the request
+            estimated_tokens: Estimated input tokens for TPM check (not incremented)
             request_id: Unique identifier for this request
             
         Returns:
@@ -121,12 +122,19 @@ class RateLimitService:
         retry_after = reset_at - current_time
         
         try:
-            # Check RPM limit
+            # Check RPM limit and increment
             rpm_current, rpm_limit, rpm_allowed = await self._limiter.check_and_increment_rpm(
                 user_id=user_id,
                 config=config,
                 model_group=model_group,
                 request_id=request_id,
+            )
+            
+            # Get current TPM usage (check only, no increment)
+            _, tpm_current = await self._limiter.get_current_usage(
+                user_id=user_id,
+                config=config,
+                model_group=model_group,
             )
             
             if not rpm_allowed:
@@ -148,29 +156,21 @@ class RateLimitService:
                     rpm_current=rpm_current,
                     rpm_limit=rpm_limit,
                     rpm_remaining=0,
-                    tpm_current=0,
+                    tpm_current=tpm_current,
                     tpm_limit=config.tpm,
-                    tpm_remaining=config.tpm,
+                    tpm_remaining=max(0, config.tpm - tpm_current) if config.tpm > 0 else 0,
                     reset_at=reset_at,
                     retry_after=retry_after,
                     model_group=model_group,
                 )
             
-            # Check TPM limit if we have estimated tokens
-            # Skip TPM check if tpm=0 (no token limit)
-            tpm_current = 0
+            # Check TPM limit (check only, no increment)
+            # TPM will be incremented after request completes with actual tokens
             tpm_allowed = True
-            
             if estimated_tokens > 0 and config.tpm > 0:
-                tpm_current, tpm_limit, tpm_allowed = await self._limiter.check_and_increment_tpm(
-                    user_id=user_id,
-                    token_count=estimated_tokens,
-                    config=config,
-                    model_group=model_group,
-                    request_id=f"{request_id}:est" if request_id else None,
-                )
-                
-                if not tpm_allowed:
+                # Check if adding estimated tokens would exceed limit
+                if tpm_current + estimated_tokens > config.tpm:
+                    tpm_allowed = False
                     logger.warning(
                         "Rate limit exceeded (TPM)",
                         user_id=user_id,
@@ -198,7 +198,7 @@ class RateLimitService:
                         model_group=model_group,
                     )
             
-            # All checks passed
+            # All checks passed - RPM incremented, TPM will be incremented after request
             return RateLimitResult(
                 allowed=True,
                 status=RateLimitStatus.ALLOWED,
@@ -207,7 +207,7 @@ class RateLimitService:
                 rpm_remaining=max(0, rpm_limit - rpm_current),
                 tpm_current=tpm_current,
                 tpm_limit=config.tpm,
-                tpm_remaining=max(0, config.tpm - tpm_current),
+                tpm_remaining=max(0, config.tpm - tpm_current) if config.tpm > 0 else 0,
                 reset_at=reset_at,
                 retry_after=0,
                 model_group=model_group,
@@ -236,11 +236,11 @@ class RateLimitService:
         output_tokens: int,
         model: Optional[str] = None,
         request_id: Optional[str] = None,
-    ) -> bool:
+    ) -> Optional[RateLimitResult]:
         """
-        Record actual token usage after a request completes.
+        Record actual token usage after a request completes and return updated limits.
         
-        This adjusts the TPM counter based on actual usage vs estimated.
+        This increments the TPM counter with actual token usage.
         
         Args:
             user_id: The user identifier
@@ -250,10 +250,10 @@ class RateLimitService:
             request_id: Unique identifier for the request
             
         Returns:
-            True if recording was successful
+            RateLimitResult with updated usage, or None on error
         """
         if not self.is_enabled:
-            return True
+            return None
         
         if not self._initialized:
             await self.initialize()
@@ -261,13 +261,26 @@ class RateLimitService:
         config, model_group = self._rules.get_config_for_model(model)
         total_tokens = input_tokens + output_tokens
         
+        # Calculate window boundary and reset time
+        current_time = int(time.time())
+        window_start = (current_time // config.window_seconds) * config.window_seconds
+        reset_at = window_start + config.window_seconds
+        
         try:
+            # Add actual tokens to TPM counter
             await self._limiter.add_tokens(
                 user_id=user_id,
                 token_count=total_tokens,
                 config=config,
                 model_group=model_group,
                 request_id=request_id,
+            )
+            
+            # Get updated usage
+            rpm_current, tpm_current = await self._limiter.get_current_usage(
+                user_id=user_id,
+                config=config,
+                model_group=model_group,
             )
             
             logger.debug(
@@ -278,10 +291,24 @@ class RateLimitService:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
+                tpm_current=tpm_current,
                 event_type="token_usage_recorded",
             )
             
-            return True
+            # Return updated result for headers
+            return RateLimitResult(
+                allowed=True,
+                status=RateLimitStatus.ALLOWED,
+                rpm_current=rpm_current,
+                rpm_limit=config.rpm,
+                rpm_remaining=max(0, config.rpm - rpm_current),
+                tpm_current=tpm_current,
+                tpm_limit=config.tpm,
+                tpm_remaining=max(0, config.tpm - tpm_current) if config.tpm > 0 else 0,
+                reset_at=reset_at,
+                retry_after=0,
+                model_group=model_group,
+            )
             
         except Exception as e:
             logger.warning(
@@ -290,7 +317,7 @@ class RateLimitService:
                 user_id=user_id,
                 event_type="token_usage_record_error",
             )
-            return False
+            return None
     
     async def get_usage_status(
         self,

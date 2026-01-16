@@ -27,19 +27,12 @@ from ....services.billing_service import billing_service
 from ....services.token_estimation_service import token_estimation_service
 from ....services.rate_limiting import (
     rate_limit_service,
-    RateLimitExceeded,
     RateLimitResult,
     RateLimitStatus,
 )
 from ....schemas.billing import UsageHoldRequest, UsageFinalizeRequest, UsageVoidRequest
 from ....core.logging_config import get_api_logger
-from .chat_models import (
-    ChatCompletionRequest,
-    ChatMessage,
-    Tool,
-    ToolChoice,
-    ToolFunction,
-)
+from .chat_models import ChatCompletionRequest
 from .chat_utils import (
     fix_tool_choice_structure,
     remove_tool_choice_from_tools,
@@ -60,11 +53,6 @@ from .chat_exceptions import (
 )
 
 router = APIRouter(tags=["Chat"])
-
-"""
-Re-exported models for backwards compatibility:
- - ChatMessage, ToolFunction, Tool, ToolChoice, ChatCompletionRequest
-"""
 
 
 @router.post("/completions")
@@ -423,6 +411,9 @@ def _handle_streaming_request(
         event_type="streaming_request_start",
     )
     
+    # Build rate limit user identifier for token tracking
+    rate_limit_user_id = f"key:{db_api_key.key_prefix}" if db_api_key else None
+    
     billing_params = StreamingBillingParams(
         user_id=user.id,
         api_key_id=db_api_key.id,
@@ -430,6 +421,8 @@ def _handle_streaming_request(
         model_id=model_id,
         estimated_input_tokens=token_estimate.input_tokens,
         estimated_output_tokens=token_estimate.output_tokens,
+        rate_limit_user_id=rate_limit_user_id,
+        request_id=request_id,
     )
     
     stream_generator = build_stream_generator(
@@ -497,21 +490,26 @@ async def _handle_non_streaming_request(
             session_id=session_id,
         )
         
-        # Add rate limit headers to response
-        if rate_limit_result and rate_limit_result.rpm_limit > 0:
-            rate_headers = rate_limit_service.create_rate_limit_headers(rate_limit_result)
-            for key, value in rate_headers.to_dict().items():
-                response.headers[key] = value
-        
         if response.status_code == 200:
-            await _finalize_billing(
+            # Finalize billing and record actual token usage
+            updated_rate_limit_result = await _finalize_billing(
                 response=response,
                 ledger_entry_id=ledger_entry_id,
                 requested_model=requested_model,
                 model_id=model_id,
                 user=user,
                 chat_logger=chat_logger,
+                db_api_key=db_api_key,
+                request_id=request_id,
             )
+            
+            # Add rate limit headers AFTER recording actual tokens
+            # Use updated result if available, otherwise fall back to initial result
+            headers_result = updated_rate_limit_result or rate_limit_result
+            if headers_result and headers_result.rpm_limit > 0:
+                rate_headers = rate_limit_service.create_rate_limit_headers(headers_result)
+                for key, value in rate_headers.to_dict().items():
+                    response.headers[key] = value
         else:
             await _void_billing_hold(
                 user_id=user.id,
@@ -520,6 +518,11 @@ async def _handle_non_streaming_request(
                 failure_reason="Request failed",
                 chat_logger=chat_logger,
             )
+            # For failed requests, still add rate limit headers from initial check
+            if rate_limit_result and rate_limit_result.rpm_limit > 0:
+                rate_headers = rate_limit_service.create_rate_limit_headers(rate_limit_result)
+                for key, value in rate_headers.to_dict().items():
+                    response.headers[key] = value
         
         return response
         
@@ -559,14 +562,42 @@ async def _finalize_billing(
     model_id: Optional[str],
     user: User,
     chat_logger,
-) -> None:
-    """Finalize billing after successful response."""
+    db_api_key: Optional[APIKey] = None,
+    request_id: Optional[str] = None,
+) -> Optional[RateLimitResult]:
+    """
+    Finalize billing after successful response and record actual token usage for rate limiting.
+    
+    Returns:
+        Updated RateLimitResult with actual token counts, or None if rate limiting is disabled.
+    """
+    updated_rate_limit_result = None
+    
     try:
         response_body = json.loads(response.body.decode("utf-8"))
         usage = response_body.get("usage_from_provider", {})
         tokens_input = usage.get("prompt_tokens", 0)
         tokens_output = usage.get("completion_tokens", 0)
         tokens_total = usage.get("total_tokens", tokens_input + tokens_output)
+        
+        # Record actual token usage for rate limiting and get updated result
+        if db_api_key and tokens_total > 0:
+            user_identifier = f"key:{db_api_key.key_prefix}"
+            updated_rate_limit_result = await rate_limit_service.record_token_usage(
+                user_id=user_identifier,
+                input_tokens=tokens_input,
+                output_tokens=tokens_output,
+                model=requested_model,
+                request_id=request_id,
+            )
+            chat_logger.debug(
+                "Recorded actual token usage for rate limiting",
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
+                tokens_total=tokens_total,
+                tpm_current=updated_rate_limit_result.tpm_current if updated_rate_limit_result else None,
+                event_type="rate_limit_tokens_recorded",
+            )
         
         async with get_db() as db:
             finalize_request = UsageFinalizeRequest(
@@ -589,6 +620,9 @@ async def _finalize_billing(
                 amount_total=str(finalize_response.amount_total),
                 event_type="usage_finalized",
             )
+        
+        return updated_rate_limit_result
+        
     except Exception as e:
         chat_logger.error(
             "Error finalizing usage",
@@ -596,6 +630,7 @@ async def _finalize_billing(
             event_type="usage_finalize_error",
             exc_info=True,
         )
+        return None
 
 
 async def _void_billing_hold(

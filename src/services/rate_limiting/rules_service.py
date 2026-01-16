@@ -34,7 +34,7 @@ DEFAULT_MODEL_GROUPS: List[Dict] = [
     {
         "name": "S",
         "rpm": 500,
-        "tpm": 1000000,  # 1M tokens/minute
+        "tpm": 1000000,
         "models": [
             "llama-3.2-3b",
             "llama-3.2-3b:web",
@@ -46,8 +46,8 @@ DEFAULT_MODEL_GROUPS: List[Dict] = [
     },
     {
         "name": "M",
-        "rpm": 3,
-        "tpm": 750000,  # 750k tokens/minute
+        "rpm": 50,
+        "tpm": 750000,
         "models": [
             "llama-3.3-70b",
             "llama-3.3-70b:web",
@@ -64,7 +64,7 @@ DEFAULT_MODEL_GROUPS: List[Dict] = [
     {
         "name": "L",
         "rpm": 20,
-        "tpm": 500000,  # 500k tokens/minute
+        "tpm": 500000,
         "models": [
             "glm-4.6",
             "glm-4.6:web",
@@ -323,4 +323,5 @@ class RateLimitRulesService:
 
 # Singleton instance
 rate_limit_rules_service = RateLimitRulesService()
+
 

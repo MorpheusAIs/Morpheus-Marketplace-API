@@ -18,13 +18,7 @@ from .types import (
 from .rules_service import RateLimitRulesService, rate_limit_rules_service
 from .redis_limiter import RedisRateLimiter, redis_limiter
 from .rate_limit_service import RateLimitService, rate_limit_service
-from .dependencies import (
-    RateLimitExceeded,
-    check_rate_limit,
-    get_user_identifier,
-    rate_limit_dependency,
-    add_rate_limit_headers,
-)
+from .dependencies import RateLimitExceeded
 
 __all__ = [
     # Types
@@ -42,9 +36,5 @@ __all__ = [
     "rate_limit_service",
     # Dependencies
     "RateLimitExceeded",
-    "check_rate_limit",
-    "get_user_identifier",
-    "rate_limit_dependency",
-    "add_rate_limit_headers",
 ]
 

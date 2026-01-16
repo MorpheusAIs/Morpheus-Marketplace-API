@@ -16,7 +16,7 @@ from redis.asyncio import ConnectionPool
 from src.core.config import settings
 from src.core.logging_config import get_core_logger
 
-from .types import RateLimitConfig, RateLimitResult, RateLimitStatus
+from .types import RateLimitConfig
 
 logger = get_core_logger()
 
@@ -233,66 +233,6 @@ class RedisRateLimiter:
             )
             # Fail open - allow the request if Redis fails
             return 0, config.rpm, True
-    
-    async def check_and_increment_tpm(
-        self,
-        user_id: str,
-        token_count: int,
-        config: RateLimitConfig,
-        model_group: Optional[str] = None,
-        request_id: Optional[str] = None,
-    ) -> Tuple[int, int, bool]:
-        """
-        Check and increment the TPM counter.
-        
-        Args:
-            user_id: The user identifier
-            token_count: Number of tokens for this request
-            config: Rate limit configuration
-            model_group: Optional model group for separate limits
-            request_id: Unique identifier for this request
-            
-        Returns:
-            Tuple of (current_count, limit, allowed)
-        """
-        try:
-            async with self._get_redis() as redis:
-                key = self._get_key(user_id, "tpm", model_group)
-                
-                # Use fixed window boundaries aligned to clock intervals
-                current_time_seconds = int(time.time())
-                window_start_seconds = (current_time_seconds // config.window_seconds) * config.window_seconds
-                
-                # Convert to milliseconds for Redis storage
-                current_time = int(time.time() * 1000)
-                window_start = window_start_seconds * 1000
-                
-                entry_id = request_id or str(current_time)
-                
-                result = await redis.evalsha(
-                    self._script_sha,
-                    1,
-                    key,
-                    str(window_start),
-                    str(current_time),
-                    str(config.tpm),
-                    str(token_count),
-                    entry_id,
-                    str(config.window_seconds + 10),
-                )
-                
-                current_count, allowed, _ = result
-                return int(current_count), config.tpm, bool(allowed)
-                
-        except Exception as e:
-            logger.warning(
-                "TPM check failed, allowing request",
-                error=str(e),
-                user_id=user_id,
-                token_count=token_count,
-                event_type="tpm_check_error",
-            )
-            return 0, config.tpm, True
     
     async def add_tokens(
         self,
