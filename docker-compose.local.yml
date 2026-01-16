@@ -100,6 +100,12 @@ services:
       JWT_SECRET_KEY: local-testing-secret-key-not-for-production
       ACCESS_TOKEN_EXPIRE_MINUTES: 30
       
+      # Web3/SIWE settings (ERC-4361 Sign-In with Ethereum)
+      WEB3_PROVIDER_URL: ${WEB3_PROVIDER_URL:-}  # Optional: enables EIP-1271 smart contract wallet verification
+      SIWE_DOMAIN: ${SIWE_DOMAIN:-app.mor.org}
+      SIWE_URI: ${SIWE_URI:-https://app.mor.org}
+      SIWE_CHAIN_ID: ${SIWE_CHAIN_ID:-8453}  # Base mainnet
+      
       # AWS settings (not needed for local, but prevents errors)
       AWS_DEFAULT_REGION: us-east-1
       

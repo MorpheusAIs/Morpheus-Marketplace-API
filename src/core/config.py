@@ -221,6 +221,14 @@ class Settings(BaseSettings):
     STRIPE_SECRET_KEY: str | None = Field(default=os.getenv("STRIPE_SECRET_KEY"))
     STRIPE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("STRIPE_WEBHOOK_SECRET"))
     
+    # Web3 Provider Settings (optional - enables EIP-1271 smart contract wallet verification)
+    # If not set, only EOA wallets will be supported
+    WEB3_PROVIDER_URL: str | None = Field(default=os.getenv("WEB3_PROVIDER_URL"))
+    # SIWE (Sign-In with Ethereum) settings
+    SIWE_DOMAIN: str = Field(default=os.getenv("SIWE_DOMAIN", "app.mor.org"))
+    SIWE_URI: str = Field(default=os.getenv("SIWE_URI", "https://app.mor.org"))
+    SIWE_CHAIN_ID: int = Field(default=int(os.getenv("SIWE_CHAIN_ID", "8453")))  # Default: Base
+    
     # Legacy Model Sync Settings (deprecated - kept for compatibility)
     MODEL_SYNC_ON_STARTUP: bool = Field(default=False)  # Disabled by default
     MODEL_SYNC_INTERVAL_HOURS: int = Field(default=int(os.getenv("MODEL_SYNC_INTERVAL_HOURS", "1")))
