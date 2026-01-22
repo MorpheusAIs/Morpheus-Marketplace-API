@@ -291,6 +291,7 @@ async def list_usage(
             amount_staking=entry.amount_staking,
             amount_total=entry.amount_total,
             request_id=entry.request_id,
+            api_key_id=entry.api_key_id,
         )
         for entry in entries
     ]
@@ -354,6 +355,7 @@ async def list_usage_for_month(
             amount_staking=entry.amount_staking,
             amount_total=entry.amount_total,
             request_id=entry.request_id,
+            api_key_id=entry.api_key_id,
         )
         for entry in entries
     ]

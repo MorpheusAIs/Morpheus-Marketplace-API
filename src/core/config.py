@@ -221,6 +221,10 @@ class Settings(BaseSettings):
     STRIPE_SECRET_KEY: str | None = Field(default=os.getenv("STRIPE_SECRET_KEY"))
     STRIPE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("STRIPE_WEBHOOK_SECRET"))
     
+    # Coinbase Commerce Settings
+    # Required for processing Coinbase payments and webhooks
+    COINBASE_COMMERCE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("COINBASE_COMMERCE_WEBHOOK_SECRET"))
+    
     # Web3 Provider Settings (optional - enables EIP-1271 smart contract wallet verification)
     # If not set, only EOA wallets will be supported
     WEB3_PROVIDER_URL: str | None = Field(default=os.getenv("WEB3_PROVIDER_URL"))

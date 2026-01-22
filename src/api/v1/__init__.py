@@ -12,6 +12,7 @@ from .embeddings.index import router as embeddings_router
 from .audio.index import router as audio_router
 from .billing.index import router as billing_router
 from .webhooks.stripe import stripe_webhook_router
+from .webhooks.coinbase import coinbase_webhook_router
 from .wallet.index import router as wallet_router
 
 # Create routers with the fixed dependency route class
@@ -49,6 +50,7 @@ billing.include_router(billing_router)
 # Webhooks router
 webhooks = APIRouter()
 webhooks.include_router(stripe_webhook_router)
+webhooks.include_router(coinbase_webhook_router)
 
 # Wallet router
 wallet = APIRouter()
