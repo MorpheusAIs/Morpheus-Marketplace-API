@@ -9,7 +9,7 @@ load_dotenv()
 
 class Settings(BaseSettings):
     # Project Settings
-    PROJECT_NAME: str = "Morpheus API Gateway"
+    PROJECT_NAME: str = "Morpheus Inference API"
     API_V1_STR: str = "/api/v1"
     
     # Base URL - set by Terraform based on environment
@@ -224,10 +224,6 @@ class Settings(BaseSettings):
     # Required for processing Stripe payments and webhooks
     STRIPE_SECRET_KEY: str | None = Field(default=os.getenv("STRIPE_SECRET_KEY"))
     STRIPE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("STRIPE_WEBHOOK_SECRET"))
-    
-    # Coinbase Commerce Settings
-    # Required for processing Coinbase payments and webhooks
-    COINBASE_COMMERCE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("COINBASE_COMMERCE_WEBHOOK_SECRET"))
     
     # Web3 Provider Settings (optional - enables EIP-1271 smart contract wallet verification)
     # If not set, only EOA wallets will be supported
