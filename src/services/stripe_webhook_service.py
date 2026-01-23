@@ -112,15 +112,22 @@ class StripeWebhookService:
         db: AsyncSession,
         metadata: Dict[str, Any],
         fallback_metadata: Optional[Dict[str, Any]] = None,
+        client_reference_id: Optional[str] = None,
         log_context: Dict[str, Any] = None,
     ) -> Tuple[Optional[User], Optional[str]]:
         """
-        Extract and validate user from Stripe metadata.
+        Extract and validate user from Stripe metadata or client_reference_id.
+        
+        Supports multiple user identification methods:
+        1. metadata.user_id - Database ID (integer) from Checkout Sessions via API
+        2. fallback_metadata.user_id - Database ID from subscription invoices
+        3. client_reference_id - Cognito user ID (UUID) from Payment Links
         
         Args:
             db: Database session
             metadata: Primary metadata dict to check
             fallback_metadata: Optional fallback metadata dict
+            client_reference_id: Optional client_reference_id from Payment Links (Cognito sub)
             log_context: Additional context for logging
             
         Returns:
@@ -128,40 +135,56 @@ class StripeWebhookService:
         """
         log_context = log_context or {}
         
-        # Try primary metadata first
+        # Try primary metadata first (database ID)
         user_id_str = metadata.get("user_id") if metadata else None
         
         # Fall back to secondary metadata
         if not user_id_str and fallback_metadata:
             user_id_str = fallback_metadata.get("user_id")
         
-        if not user_id_str:
-            logger.error(
-                "Missing user_id in metadata",
+        # If we have a user_id from metadata, look up by database ID
+        if user_id_str:
+            try:
+                user_id = int(user_id_str)
+                user = await user_crud.get_user_by_id(db, user_id)
+                if user:
+                    return user, None
+                logger.warning(
+                    "User not found by database ID",
+                    user_id=user_id,
+                    **log_context,
+                )
+            except ValueError:
+                logger.warning(
+                    "Invalid user_id format in metadata, will try other methods",
+                    user_id_str=user_id_str,
+                    **log_context,
+                )
+        
+        # Try client_reference_id (Cognito user ID from Payment Links)
+        if client_reference_id:
+            logger.info(
+                "Looking up user by Cognito ID (Payment Link)",
+                cognito_user_id=client_reference_id,
                 **log_context,
             )
-            return None, "Missing user_id in metadata"
-        
-        try:
-            user_id = int(user_id_str)
-        except ValueError:
-            logger.error(
-                "Invalid user_id in metadata",
-                user_id_str=user_id_str,
+            user = await user_crud.get_user_by_cognito_id(db, client_reference_id)
+            if user:
+                return user, None
+            logger.warning(
+                "User not found by Cognito ID",
+                cognito_user_id=client_reference_id,
                 **log_context,
             )
-            return None, "Invalid user_id in metadata"
         
-        user = await user_crud.get_user_by_id(db, user_id)
-        if not user:
-            logger.error(
-                "User not found",
-                user_id=user_id,
-                **log_context,
-            )
-            return None, "User not found"
-        
-        return user, None
+        # No valid user identifier found
+        logger.error(
+            "No valid user identifier found in metadata or client_reference_id",
+            has_metadata_user_id=bool(user_id_str),
+            has_client_reference_id=bool(client_reference_id),
+            **log_context,
+        )
+        return None, "User not found - no valid identifier provided"
     
     async def _create_purchase_entry(
         self,
@@ -263,9 +286,15 @@ class StripeWebhookService:
         if existing:
             return True, "Already processed"
         
-        # Get user from metadata
+        # Get user from metadata or client_reference_id (Payment Links)
         metadata = session.metadata or {}
-        user, error = await self._get_user_from_metadata(db, metadata, log_context=log_context)
+        client_reference_id = getattr(session, 'client_reference_id', None)
+        user, error = await self._get_user_from_metadata(
+            db, 
+            metadata, 
+            client_reference_id=client_reference_id,
+            log_context=log_context
+        )
         if error:
             return False, error
         
@@ -274,7 +303,6 @@ class StripeWebhookService:
         if error:
             return False, error
         
-        # Build payment metadata
         payment_metadata = {
             "checkout_session_id": session_id,
             "type": "checkout",
@@ -283,8 +311,12 @@ class StripeWebhookService:
             payment_metadata["payment_intent_id"] = session.payment_intent
         if session.customer and isinstance(session.customer, str):
             payment_metadata["customer_id"] = session.customer
+        if client_reference_id:
+            payment_metadata["client_reference_id"] = client_reference_id
+            payment_metadata["source"] = "payment_link"
         
-        # Create entry and update balance
+        description = "Stripe payment - Payment Link" if client_reference_id else "Stripe payment - Checkout Session"
+        
         entry = await self._create_purchase_entry(
             db=db,
             user_id=user.id,
@@ -293,7 +325,7 @@ class StripeWebhookService:
             event_type=event_type,
             transaction_id=session_id,
             payment_metadata=payment_metadata,
-            description="Stripe payment - Checkout Session",
+            description=description,
         )
         
         logger.info(
