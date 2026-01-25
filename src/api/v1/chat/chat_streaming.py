@@ -18,14 +18,9 @@ from typing import Any, AsyncIterator, Callable, Dict, Optional, TYPE_CHECKING
 from ....services import proxy_router_service
 from ....services import session_routing_service
 from ....services.billing_service import billing_service
+from ....services.rate_limiting import rate_limit_service
 from ....schemas.billing import UsageFinalizeRequest, UsageVoidRequest
 from ....db.database import get_db
-from .chat_exceptions import (
-    SessionExpiredError,
-    SessionCreationError,
-    ProxyError,
-    GatewayError,
-)
 
 if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
@@ -41,6 +36,8 @@ class StreamingBillingParams:
     model_id: Optional[str]
     estimated_input_tokens: int
     estimated_output_tokens: int
+    rate_limit_user_id: Optional[str] = None
+    request_id: Optional[str] = None
 
 
 @dataclass 
@@ -113,8 +110,10 @@ async def _finalize_streaming_billing(
     ledger_entry_id: uuid.UUID,
     accumulator: StreamingUsageAccumulator,
     logger: "BoundLogger",
+    rate_limit_user_id: Optional[str] = None,
+    request_id: Optional[str] = None,
 ) -> None:
-    """Finalize billing after successful stream completion."""
+    """Finalize billing after successful stream completion and record actual token usage for rate limiting."""
     try:
         async with get_db() as db:
             finalize_request = UsageFinalizeRequest(
@@ -135,6 +134,24 @@ async def _finalize_streaming_billing(
                 amount_total=str(response.amount_total),
                 event_type="streaming_billing_finalized",
             )
+        
+        # Record actual token usage for rate limiting
+        if rate_limit_user_id and accumulator.tokens_total > 0:
+            await rate_limit_service.record_token_usage(
+                user_id=rate_limit_user_id,
+                input_tokens=accumulator.tokens_input,
+                output_tokens=accumulator.tokens_output,
+                model=accumulator.model_name,
+                request_id=request_id,
+            )
+            logger.debug(
+                "Recorded actual streaming token usage for rate limiting",
+                tokens_input=accumulator.tokens_input,
+                tokens_output=accumulator.tokens_output,
+                tokens_total=accumulator.tokens_total,
+                event_type="rate_limit_streaming_tokens_recorded",
+            )
+            
     except Exception as e:
         logger.error(
             "Failed to finalize streaming billing",
@@ -299,6 +316,8 @@ def build_stream_generator(
                         ledger_entry_id=ledger_entry_id,
                         accumulator=accumulator,
                         logger=stream_logger,
+                        rate_limit_user_id=billing_params.rate_limit_user_id,
+                        request_id=billing_params.request_id,
                     )
                 else:
                     await _void_streaming_billing(

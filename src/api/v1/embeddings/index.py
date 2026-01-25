@@ -6,6 +6,7 @@ Key behaviors:
 - Creates vector embeddings for input text using the Morpheus Network providers
 - Automatically manages sessions and routes requests to the appropriate embedding model
 - Billing: Checks balance and creates usage holds, finalizes after completion
+- Rate limiting: Enforces RPM and TPM limits per user/API key
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import JSONResponse
@@ -18,6 +19,7 @@ from ....services import session_routing_service, NoSessionAvailableError, Sessi
 from ....services import proxy_router_service
 from ....services.billing_service import billing_service
 from ....services.token_estimation_service import token_estimation_service
+from ....services.rate_limiting import rate_limit_service, RateLimitResult
 from ....db.database import get_db
 from ....dependencies import get_api_key_user, get_current_api_key
 from ....db.models import User, APIKey
@@ -63,8 +65,18 @@ async def create_embeddings(
     requested_model = request_data.model
     ledger_entry_id = None
     model_id = None
+    rate_limit_result: Optional[RateLimitResult] = None
     
     try:
+        # Check rate limits (RPM only - TPM recorded after response)
+        rate_limit_result = await _check_rate_limits(
+            embeddings_logger=embeddings_logger,
+            request_id=request_id,
+            db_api_key=db_api_key,
+            requested_model=requested_model,
+            request_data=request_data,
+        )
+        
         # Create billing hold
         ledger_entry_id, model_id = await _create_billing_hold(
             request_id=request_id,
@@ -143,14 +155,16 @@ async def create_embeddings(
             if response.status_code == 200:
                 response_data = response.json()
                 
-                # Finalize billing with actual token usage
-                await _finalize_billing(
+                # Finalize billing and record token usage for rate limiting
+                updated_rate_limit_result = await _finalize_billing(
                     response_data=response_data,
                     ledger_entry_id=ledger_entry_id,
                     requested_model=requested_model,
                     model_id=model_id,
                     user=user,
                     embeddings_logger=embeddings_logger,
+                    db_api_key=db_api_key,
+                    request_id=request_id,
                 )
                 
                 # Count embeddings in response for metrics
@@ -159,7 +173,18 @@ async def create_embeddings(
                                       embedding_count=embedding_count,
                                       session_id=session_id,
                                       event_type="embeddings_success")
-                return JSONResponse(content=response_data)
+                
+                # Build response with rate limit headers
+                json_response = JSONResponse(content=response_data)
+                
+                # Add rate limit headers (use updated result if available)
+                headers_result = updated_rate_limit_result or rate_limit_result
+                if headers_result and headers_result.rpm_limit > 0:
+                    rate_headers = rate_limit_service.create_rate_limit_headers(headers_result)
+                    for key, value in rate_headers.to_dict().items():
+                        json_response.headers[key] = value
+                
+                return json_response
             else:
                 embeddings_logger.error("Proxy-router error",
                                        status_code=response.status_code,
@@ -225,6 +250,99 @@ async def create_embeddings(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}"
         )
+
+
+async def _check_rate_limits(
+    embeddings_logger,
+    request_id: str,
+    db_api_key: APIKey,
+    requested_model: Optional[str],
+    request_data: EmbeddingRequest,
+) -> RateLimitResult:
+    """
+    Check rate limits (RPM and TPM) before processing the request.
+    
+    RPM is incremented here. TPM is only checked (not incremented) -
+    actual TPM will be recorded after request completes.
+    
+    Raises:
+        HTTPException with 429 if rate limit exceeded
+    """
+    if not rate_limit_service.is_enabled:
+        return RateLimitResult(allowed=True)
+    
+    # Build user identifier from API key
+    user_identifier = f"key:{db_api_key.key_prefix}"
+    
+    # Estimate tokens for TPM check
+    request_body = {
+        "input": request_data.input,
+        "model": requested_model,
+    }
+    token_estimate = token_estimation_service.estimate(request_body, model_type="EMBEDDINGS")
+    estimated_tokens = token_estimate.input_tokens
+    
+    embeddings_logger.debug(
+        "Checking rate limits",
+        user_identifier=user_identifier,
+        model=requested_model,
+        estimated_tokens=estimated_tokens,
+        event_type="rate_limit_check_start",
+    )
+    
+    result = await rate_limit_service.check_rate_limit(
+        user_id=user_identifier,
+        model=requested_model,
+        estimated_tokens=estimated_tokens,
+        request_id=request_id,
+    )
+    
+    if not result.allowed:
+        embeddings_logger.warning(
+            "Rate limit exceeded",
+            status=result.status.value if result.status else "unknown",
+            rpm_current=result.rpm_current,
+            rpm_limit=result.rpm_limit,
+            tpm_current=result.tpm_current,
+            tpm_limit=result.tpm_limit,
+            retry_after=result.retry_after,
+            event_type="rate_limit_exceeded",
+        )
+        
+        # Determine limit type for error message
+        limit_type = "requests" if result.status and "RPM" in result.status.value else "tokens"
+        current = result.rpm_current if limit_type == "requests" else result.tpm_current
+        limit = result.rpm_limit if limit_type == "requests" else result.tpm_limit
+        
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": {
+                    "message": f"Rate limit exceeded: {current}/{limit} {limit_type} per minute. Please retry after {result.retry_after} seconds.",
+                    "type": limit_type,
+                    "param": None,
+                    "code": "rate_limit_exceeded",
+                }
+            },
+            headers={
+                "Retry-After": str(result.retry_after),
+                "X-RateLimit-Limit-Requests": str(result.rpm_limit),
+                "X-RateLimit-Limit-Tokens": str(result.tpm_limit),
+                "X-RateLimit-Remaining-Requests": str(result.rpm_remaining),
+                "X-RateLimit-Remaining-Tokens": str(result.tpm_remaining),
+            }
+        )
+    
+    embeddings_logger.debug(
+        "Rate limit check passed",
+        rpm_current=result.rpm_current,
+        rpm_remaining=result.rpm_remaining,
+        tpm_current=result.tpm_current,
+        tpm_remaining=result.tpm_remaining,
+        event_type="rate_limit_check_passed",
+    )
+    
+    return result
 
 
 async def _create_billing_hold(
@@ -315,14 +433,41 @@ async def _finalize_billing(
     model_id: Optional[str],
     user: User,
     embeddings_logger,
-) -> None:
-    """Finalize billing after successful response."""
+    db_api_key: Optional[APIKey] = None,
+    request_id: Optional[str] = None,
+) -> Optional[RateLimitResult]:
+    """
+    Finalize billing after successful response and record actual token usage for rate limiting.
+    
+    Returns:
+        Updated RateLimitResult with actual token counts, or None if rate limiting is disabled.
+    """
+    updated_rate_limit_result = None
+    
     try:
         # Get token usage from response
         usage = response_data.get("usage_from_provider", {})
         tokens_input = usage.get("prompt_tokens", 0)
         tokens_output = 0  # Embeddings don't have output tokens
         tokens_total = usage.get("total_tokens", tokens_input)
+        
+        # Record actual token usage for rate limiting
+        if db_api_key and tokens_total > 0:
+            user_identifier = f"key:{db_api_key.key_prefix}"
+            updated_rate_limit_result = await rate_limit_service.record_token_usage(
+                user_id=user_identifier,
+                input_tokens=tokens_input,
+                output_tokens=tokens_output,
+                model=requested_model,
+                request_id=request_id,
+            )
+            embeddings_logger.debug(
+                "Recorded actual token usage for rate limiting",
+                tokens_input=tokens_input,
+                tokens_total=tokens_total,
+                tpm_current=updated_rate_limit_result.tpm_current if updated_rate_limit_result else None,
+                event_type="rate_limit_tokens_recorded",
+            )
         
         async with get_db() as db:
             finalize_request = UsageFinalizeRequest(
@@ -345,6 +490,9 @@ async def _finalize_billing(
                 amount_total=str(finalize_response.amount_total),
                 event_type="usage_finalized",
             )
+        
+        return updated_rate_limit_result
+        
     except Exception as e:
         embeddings_logger.error(
             "Error finalizing usage",
@@ -352,6 +500,7 @@ async def _finalize_billing(
             event_type="usage_finalize_error",
             exc_info=True,
         )
+        return None
 
 
 async def _void_billing_hold(
