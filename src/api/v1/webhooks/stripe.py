@@ -8,9 +8,13 @@ Implements Stripe's best practices:
 - Proper error handling and logging
 
 Events handled:
-- checkout.session.completed: One-time payments via Checkout
+- checkout.session.completed: One-time payments via Checkout or Payment Links
 - invoice.paid: Subscription/invoice payments
 - invoice.payment_failed: Failed payment attempts
+
+User identification:
+- Checkout Sessions (API): Uses metadata.user_id
+- Payment Links: Uses client_reference_id
 """
 from fastapi import APIRouter, Request, HTTPException, status, Depends
 from sqlalchemy.ext.asyncio import AsyncSession

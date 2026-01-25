@@ -63,16 +63,19 @@ class Settings(BaseSettings):
             if environment in ["production", "prod", "prd"]:
                 origins = [
                     "https://openbeta.mor.org",
-                    "https://api.mor.org"
+                    "https://api.mor.org",
+                    "https://app.mor.org"
                 ]
             elif environment in ["development", "dev", "test", "staging"]:
                 origins = [
                     # Production origins (for cross-env testing)
                     "https://openbeta.mor.org",
                     "https://api.mor.org",
+                    "https://app.mor.org",
                     # Development origins
                     "https://openbeta.dev.mor.org",
                     "https://api.dev.mor.org",
+                    "https://app.dev.mor.org",
                     # Local development origins
                     "http://localhost:3000",
                     "http://localhost:8080",
@@ -83,7 +86,8 @@ class Settings(BaseSettings):
                 # Unknown environment - use safe defaults
                 origins = [
                     "https://openbeta.mor.org",
-                    "https://api.mor.org"
+                    "https://api.mor.org",
+                    "https://app.mor.org"
                 ]
         
         # Add development origins if CORS_DEV_ORIGINS is set
@@ -220,6 +224,10 @@ class Settings(BaseSettings):
     # Required for processing Stripe payments and webhooks
     STRIPE_SECRET_KEY: str | None = Field(default=os.getenv("STRIPE_SECRET_KEY"))
     STRIPE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("STRIPE_WEBHOOK_SECRET"))
+    
+    # Coinbase Commerce Settings
+    # Required for processing Coinbase payments and webhooks
+    COINBASE_COMMERCE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("COINBASE_COMMERCE_WEBHOOK_SECRET"))
     
     # Web3 Provider Settings (optional - enables EIP-1271 smart contract wallet verification)
     # If not set, only EOA wallets will be supported

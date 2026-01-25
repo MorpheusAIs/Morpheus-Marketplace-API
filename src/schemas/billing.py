@@ -170,6 +170,7 @@ class UsageEntryResponse(BaseModel):
     amount_staking: DecimalStr
     amount_total: DecimalStr
     request_id: Optional[str] = None
+    api_key_id: Optional[int] = None
     
     model_config = ConfigDict(from_attributes=True)
 
