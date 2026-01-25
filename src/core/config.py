@@ -234,6 +234,29 @@ class Settings(BaseSettings):
     MODEL_SYNC_INTERVAL_HOURS: int = Field(default=int(os.getenv("MODEL_SYNC_INTERVAL_HOURS", "1")))
     MODEL_SYNC_ENABLED: bool = Field(default=False)  # Disabled by default
     
+    # Redis Settings (for rate limiting and caching)
+    REDIS_URL: str = Field(default=os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+    REDIS_MAX_CONNECTIONS: int = Field(default=int(os.getenv("REDIS_MAX_CONNECTIONS", "20")))
+    REDIS_SOCKET_TIMEOUT: float = Field(default=float(os.getenv("REDIS_SOCKET_TIMEOUT", "5.0")))
+    REDIS_SOCKET_CONNECT_TIMEOUT: float = Field(default=float(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT", "5.0")))
+    
+    # Rate Limiting Settings
+    # Enable/disable rate limiting globally
+    RATE_LIMIT_ENABLED: bool = Field(default=os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true")
+    
+    # Default rate limits (applied if no model-specific limits match)
+    # Requests per minute (RPM)
+    RATE_LIMIT_DEFAULT_RPM: int = Field(default=int(os.getenv("RATE_LIMIT_DEFAULT_RPM", "60")))
+    # Tokens per minute (TPM) - input + output combined
+    RATE_LIMIT_DEFAULT_TPM: int = Field(default=int(os.getenv("RATE_LIMIT_DEFAULT_TPM", "100000")))
+    
+    # Rate limit window in seconds (default: 60 for per-minute limits)
+    RATE_LIMIT_WINDOW_SECONDS: int = Field(default=int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60")))
+    
+    # Model group rate limits (JSON format)
+    # Format: {"group_name": {"rpm": 30, "tpm": 50000, "models": ["model1", "model2"]}}
+    RATE_LIMIT_MODEL_GROUPS: str = Field(default=os.getenv("RATE_LIMIT_MODEL_GROUPS", ""))
+    
 
 
     class Config:

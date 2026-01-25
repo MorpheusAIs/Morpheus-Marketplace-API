@@ -19,6 +19,7 @@ from src.api.v1 import models, chat, session, auth, automation, chat_history, em
 from src.api.v1.chat.chat_exceptions import ChatError
 from src.services import session_routing_service
 from src.services.staking_service import staking_service
+from src.services.rate_limiting import rate_limit_service
 
 from src.core.config import settings
 from src.core.version import get_version, get_version_info
@@ -421,6 +422,23 @@ async def startup_event():
                     event_type="session_routing_automation_error")
         logger.warning("Continuing startup without session routing automation")
     
+    # Initialize rate limiting service
+    if settings.RATE_LIMIT_ENABLED:
+        try:
+            await rate_limit_service.initialize()
+            logger.info("Rate limiting service initialized",
+                       enabled=True,
+                       default_rpm=settings.RATE_LIMIT_DEFAULT_RPM,
+                       default_tpm=settings.RATE_LIMIT_DEFAULT_TPM,
+                       event_type="rate_limit_init_success")
+        except Exception as e:
+            logger.error("Failed to initialize rate limiting service",
+                        error=str(e),
+                        event_type="rate_limit_init_error")
+            logger.warning("Continuing startup without rate limiting")
+    else:
+        logger.info("Rate limiting is disabled", event_type="rate_limit_disabled")
+    
     logger.info("Application startup complete", event_type="startup_complete")
 
 @app.on_event("shutdown")
@@ -437,6 +455,13 @@ async def shutdown_event():
         logger.info("Session routing automation loop stopped", event_type="session_routing_automation_stopped")
     except Exception as e:
         logger.warning("Error stopping session routing automation", error=str(e), event_type="session_routing_automation_stop_error")
+    
+    # Close rate limiting service
+    try:
+        await rate_limit_service.close()
+        logger.info("Rate limiting service closed", event_type="rate_limit_shutdown")
+    except Exception as e:
+        logger.warning("Error closing rate limiting service", error=str(e), event_type="rate_limit_shutdown_error")
     
     # Close proxy router HTTP client
     try:
@@ -596,6 +621,13 @@ async def health_check():
     except Exception as e:
         model_service_status = f"unhealthy: {str(e)}"
     
+    # Check rate limiting service health
+    rate_limit_health = {}
+    try:
+        rate_limit_health = await rate_limit_service.health_check()
+    except Exception as e:
+        rate_limit_health = {"status": "error", "error": str(e)}
+    
     # Calculate uptime
     uptime_seconds = None
     uptime_human = None
@@ -652,7 +684,8 @@ async def health_check():
             "seconds": uptime_seconds,
             "human_readable": uptime_human,
             "started_at": APP_START_TIME.isoformat() if APP_START_TIME else None
-        }
+        },
+        "rate_limiting": rate_limit_health
     }
     
     return response

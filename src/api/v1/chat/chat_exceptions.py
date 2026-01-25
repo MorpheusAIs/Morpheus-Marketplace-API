@@ -148,6 +148,79 @@ class RequestParseError(ChatError):
     error_type: str = "invalid_request"
 
 
+@dataclass
+class RateLimitError(ChatError):
+    """Raised when rate limit is exceeded."""
+    
+    rpm_current: int = 0
+    rpm_limit: int = 0
+    tpm_current: int = 0
+    tpm_limit: int = 0
+    retry_after: int = 0
+    reset_at: int = 0  # Unix timestamp when the window resets
+    limit_type: str = "rpm"  # 'rpm' or 'tpm'
+    message: str = "Rate limit exceeded"
+    status_code: int = status.HTTP_429_TOO_MANY_REQUESTS
+    error_type: str = "rate_limit_exceeded"
+    
+    def __post_init__(self):
+        if self.limit_type == "rpm":
+            self.message = (
+                f"Rate limit exceeded: {self.rpm_current}/{self.rpm_limit} "
+                f"requests per minute. Please retry after {self.retry_after} seconds."
+            )
+        else:
+            self.message = (
+                f"Rate limit exceeded: {self.tpm_current}/{self.tpm_limit} "
+                f"tokens per minute. Please retry after {self.retry_after} seconds."
+            )
+        
+        self.details = {
+            "rpm_current": self.rpm_current,
+            "rpm_limit": self.rpm_limit,
+            "tpm_current": self.tpm_current,
+            "tpm_limit": self.tpm_limit,
+            "retry_after": self.retry_after,
+            "code": "rate_limit_exceeded",
+        }
+        super().__post_init__()
+    
+    def to_response(self) -> JSONResponse:
+        """Convert exception to a JSONResponse with rate limit headers."""
+        from datetime import datetime, timezone
+        
+        # OpenAI-compatible format:
+        # - type: what was rate limited ("requests" or "tokens")
+        # - code: the error code ("rate_limit_exceeded")
+        error_type = "requests" if self.limit_type == "rpm" else "tokens"
+        
+        content = {
+            "error": {
+                "message": self.message,
+                "type": error_type,
+                "param": None,
+                "code": "rate_limit_exceeded",
+            }
+        }
+        
+        # Calculate reset time ISO string
+        reset_iso = ""
+        if self.reset_at > 0:
+            reset_time = datetime.fromtimestamp(self.reset_at, tz=timezone.utc)
+            reset_iso = reset_time.isoformat()
+        
+        headers = {
+            "Retry-After": str(self.retry_after),
+            "X-RateLimit-Limit-Requests": str(self.rpm_limit),
+            "X-RateLimit-Remaining-Requests": str(max(0, self.rpm_limit - self.rpm_current)),
+            "X-RateLimit-Limit-Tokens": str(self.tpm_limit),
+            "X-RateLimit-Remaining-Tokens": str(max(0, self.tpm_limit - self.tpm_current)),
+            "X-RateLimit-Reset-Requests": reset_iso,
+            "X-RateLimit-Reset-Tokens": reset_iso,
+        }
+        return JSONResponse(status_code=self.status_code, content=content, headers=headers)
+
+
 def handle_chat_error(error: ChatError, logger, request_id: str) -> JSONResponse:
     """
     Handle a ChatError by logging and converting to response.
@@ -182,6 +255,7 @@ __all__ = [
     "ProxyError",
     "GatewayError",
     "RequestParseError",
+    "RateLimitError",
     "handle_chat_error",
 ]
 

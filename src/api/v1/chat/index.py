@@ -8,6 +8,7 @@ Key behaviors:
 - Returns regular JSON responses when streaming is not requested (stream=false)
 - Warning: Tool calling may require streaming with some models
 - Billing: Both streaming and non-streaming requests check balance and create usage holds
+- Rate limiting: RPM and TPM limits are applied before processing
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
@@ -24,15 +25,14 @@ from ....core.model_routing import model_router
 from ....services import session_routing_service, NoSessionAvailableError, SessionOpenError
 from ....services.billing_service import billing_service
 from ....services.token_estimation_service import token_estimation_service
+from ....services.rate_limiting import (
+    rate_limit_service,
+    RateLimitResult,
+    RateLimitStatus,
+)
 from ....schemas.billing import UsageHoldRequest, UsageFinalizeRequest, UsageVoidRequest
 from ....core.logging_config import get_api_logger
-from .chat_models import (
-    ChatCompletionRequest,
-    ChatMessage,
-    Tool,
-    ToolChoice,
-    ToolFunction,
-)
+from .chat_models import ChatCompletionRequest
 from .chat_utils import (
     fix_tool_choice_structure,
     remove_tool_choice_from_tools,
@@ -48,15 +48,11 @@ from .chat_exceptions import (
     SessionNotFoundError,
     SessionCreationError,
     GatewayError,
+    RateLimitError,
     handle_chat_error,
 )
 
 router = APIRouter(tags=["Chat"])
-
-"""
-Re-exported models for backwards compatibility:
- - ChatMessage, ToolFunction, Tool, ToolChoice, ChatCompletionRequest
-"""
 
 
 @router.post("/completions")
@@ -108,6 +104,16 @@ async def create_chat_completion(
     )
     
     json_body = request_data.model_dump(exclude_none=True)
+    
+    # Check rate limits before processing
+    rate_limit_result = await _check_rate_limits(
+        user=user,
+        db_api_key=db_api_key,
+        model=request_data.model,
+        messages=json_body.get("messages", []),
+        chat_logger=chat_logger,
+        request_id=request_id,
+    )
     has_tools = bool(json_body.get("tools"))
     should_stream = request_data.stream or False
     
@@ -193,6 +199,7 @@ async def create_chat_completion(
             user=user,
             ledger_entry_id=ledger_entry_id,
             token_estimate=token_estimate,
+            rate_limit_result=rate_limit_result,
         )
     else:
         return await _handle_non_streaming_request(
@@ -205,7 +212,89 @@ async def create_chat_completion(
             db_api_key=db_api_key,
             user=user,
             ledger_entry_id=ledger_entry_id,
+            rate_limit_result=rate_limit_result,
         )
+
+
+async def _check_rate_limits(
+    user: User,
+    db_api_key: APIKey,
+    model: Optional[str],
+    messages: list,
+    chat_logger,
+    request_id: str,
+) -> RateLimitResult:
+    """
+    Check rate limits (RPM and TPM) before processing the request.
+    
+    Args:
+        user: The authenticated user
+        db_api_key: The API key used for the request
+        model: The requested model
+        messages: The chat messages
+        chat_logger: Logger instance
+        request_id: Unique request ID
+        
+    Returns:
+        RateLimitResult with current usage information
+        
+    Raises:
+        RateLimitError: If rate limit is exceeded
+    """
+    # Estimate input tokens for TPM check (~4 chars per token)
+    total_chars = sum(
+        len(str(m.get("content", ""))) 
+        for m in messages if isinstance(m, dict)
+    )
+    estimated_tokens = max(total_chars // 4, 1)
+    
+    # Use API key prefix as user identifier for rate limiting
+    user_identifier = f"key:{db_api_key.key_prefix}"
+    
+    result = await rate_limit_service.check_rate_limit(
+        user_id=user_identifier,
+        model=model,
+        estimated_tokens=estimated_tokens,
+        request_id=request_id,
+    )
+    
+    if not result.allowed and result.status != RateLimitStatus.ERROR:
+        limit_type = "rpm" if result.status == RateLimitStatus.EXCEEDED_RPM else "tpm"
+        
+        chat_logger.warning(
+            "Rate limit exceeded",
+            user_id=user.id,
+            api_key_prefix=db_api_key.key_prefix,
+            model=model,
+            model_group=result.model_group,
+            limit_type=limit_type,
+            rpm_current=result.rpm_current,
+            rpm_limit=result.rpm_limit,
+            tpm_current=result.tpm_current,
+            tpm_limit=result.tpm_limit,
+            retry_after=result.retry_after,
+            event_type="rate_limit_exceeded",
+        )
+        
+        raise RateLimitError(
+            rpm_current=result.rpm_current,
+            rpm_limit=result.rpm_limit,
+            tpm_current=result.tpm_current,
+            tpm_limit=result.tpm_limit,
+            retry_after=result.retry_after,
+            reset_at=result.reset_at,
+            limit_type=limit_type,
+        )
+    
+    chat_logger.debug(
+        "Rate limit check passed",
+        rpm_remaining=result.rpm_remaining,
+        tpm_remaining=result.tpm_remaining,
+        model_group=result.model_group,
+        event_type="rate_limit_check_passed",
+    )
+    
+    return result
 
 
 async def _resolve_session(
@@ -313,6 +402,7 @@ def _handle_streaming_request(
     user: User,
     ledger_entry_id: uuid.UUID,
     token_estimate,
+    rate_limit_result: Optional[RateLimitResult] = None,
 ) -> StreamingResponse:
     """Handle streaming chat completion request (hold already created)."""
     chat_logger.info(
@@ -321,6 +411,9 @@ def _handle_streaming_request(
         event_type="streaming_request_start",
     )
     
+    # Build rate limit user identifier for token tracking
+    rate_limit_user_id = f"key:{db_api_key.key_prefix}" if db_api_key else None
+    
     billing_params = StreamingBillingParams(
         user_id=user.id,
         api_key_id=db_api_key.id,
@@ -328,6 +421,8 @@ def _handle_streaming_request(
         model_id=model_id,
         estimated_input_tokens=token_estimate.input_tokens,
         estimated_output_tokens=token_estimate.output_tokens,
+        rate_limit_user_id=rate_limit_user_id,
+        request_id=request_id,
     )
     
     stream_generator = build_stream_generator(
@@ -347,13 +442,21 @@ def _handle_streaming_request(
         event_type="streaming_response_start",
     )
     
+    # Build headers including rate limit info
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+    }
+    
+    # Add rate limit headers if available
+    if rate_limit_result and rate_limit_result.rpm_limit > 0:
+        rate_headers = rate_limit_service.create_rate_limit_headers(rate_limit_result)
+        headers.update(rate_headers.to_dict())
+    
     return StreamingResponse(
         stream_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        },
+        headers=headers,
     )
 
 
@@ -367,6 +470,7 @@ async def _handle_non_streaming_request(
     db_api_key: APIKey,
     user: User,
     ledger_entry_id: uuid.UUID,
+    rate_limit_result: Optional[RateLimitResult] = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion request (hold already created)."""
     chat_logger.info(
@@ -387,14 +491,25 @@ async def _handle_non_streaming_request(
         )
         
         if response.status_code == 200:
-            await _finalize_billing(
+            # Finalize billing and record actual token usage
+            updated_rate_limit_result = await _finalize_billing(
                 response=response,
                 ledger_entry_id=ledger_entry_id,
                 requested_model=requested_model,
                 model_id=model_id,
                 user=user,
                 chat_logger=chat_logger,
+                db_api_key=db_api_key,
+                request_id=request_id,
             )
+            
+            # Add rate limit headers AFTER recording actual tokens
+            # Use updated result if available, otherwise fall back to initial result
+            headers_result = updated_rate_limit_result or rate_limit_result
+            if headers_result and headers_result.rpm_limit > 0:
+                rate_headers = rate_limit_service.create_rate_limit_headers(headers_result)
+                for key, value in rate_headers.to_dict().items():
+                    response.headers[key] = value
         else:
             await _void_billing_hold(
                 user_id=user.id,
@@ -403,6 +518,11 @@ async def _handle_non_streaming_request(
                 failure_reason="Request failed",
                 chat_logger=chat_logger,
             )
+            # For failed requests, still add rate limit headers from initial check
+            if rate_limit_result and rate_limit_result.rpm_limit > 0:
+                rate_headers = rate_limit_service.create_rate_limit_headers(rate_limit_result)
+                for key, value in rate_headers.to_dict().items():
+                    response.headers[key] = value
         
         return response
         
@@ -442,14 +562,42 @@ async def _finalize_billing(
     model_id: Optional[str],
     user: User,
     chat_logger,
-) -> None:
-    """Finalize billing after successful response."""
+    db_api_key: Optional[APIKey] = None,
+    request_id: Optional[str] = None,
+) -> Optional[RateLimitResult]:
+    """
+    Finalize billing after successful response and record actual token usage for rate limiting.
+    
+    Returns:
+        Updated RateLimitResult with actual token counts, or None if rate limiting is disabled.
+    """
+    updated_rate_limit_result = None
+    
     try:
         response_body = json.loads(response.body.decode("utf-8"))
         usage = response_body.get("usage_from_provider", {})
         tokens_input = usage.get("prompt_tokens", 0)
         tokens_output = usage.get("completion_tokens", 0)
         tokens_total = usage.get("total_tokens", tokens_input + tokens_output)
+        
+        # Record actual token usage for rate limiting and get updated result
+        if db_api_key and tokens_total > 0:
+            user_identifier = f"key:{db_api_key.key_prefix}"
+            updated_rate_limit_result = await rate_limit_service.record_token_usage(
+                user_id=user_identifier,
+                input_tokens=tokens_input,
+                output_tokens=tokens_output,
+                model=requested_model,
+                request_id=request_id,
+            )
+            chat_logger.debug(
+                "Recorded actual token usage for rate limiting",
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
+                tokens_total=tokens_total,
+                tpm_current=updated_rate_limit_result.tpm_current if updated_rate_limit_result else None,
+                event_type="rate_limit_tokens_recorded",
+            )
         
         async with get_db() as db:
             finalize_request = UsageFinalizeRequest(
@@ -472,6 +620,9 @@ async def _finalize_billing(
                 amount_total=str(finalize_response.amount_total),
                 event_type="usage_finalized",
             )
+        
+        return updated_rate_limit_result
+        
     except Exception as e:
         chat_logger.error(
             "Error finalizing usage",
@@ -479,6 +630,7 @@ async def _finalize_billing(
             event_type="usage_finalize_error",
             exc_info=True,
         )
+        return None
 
 
 async def _void_billing_hold(
