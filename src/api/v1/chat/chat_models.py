@@ -3,11 +3,73 @@ from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 
 
+class ImageUrl(BaseModel):
+    """Image URL for vision content parts."""
+
+    url: str
+    detail: Optional[str] = None  # "auto", "low", or "high"
+
+
+class InputAudio(BaseModel):
+    """Audio data for input_audio content parts."""
+
+    data: str  # Base64-encoded audio data
+    format: str  # "wav" or "mp3"
+
+
+class FileData(BaseModel):
+    """File reference for file content parts."""
+
+    file_id: Optional[str] = None  # ID of uploaded file
+    filename: Optional[str] = None  # Filename when using file_data
+    file_data: Optional[str] = None  # Base64-encoded file data
+
+
+class ContentPartText(BaseModel):
+    """Text content part for multimodal messages."""
+
+    type: str = "text"
+    text: str
+
+
+class ContentPartImageUrl(BaseModel):
+    """Image URL content part for multimodal messages."""
+
+    type: str = "image_url"
+    image_url: ImageUrl
+
+
+class ContentPartInputAudio(BaseModel):
+    """Audio content part for multimodal messages."""
+
+    type: str = "input_audio"
+    input_audio: InputAudio
+
+
+class ContentPartFile(BaseModel):
+    """File content part for multimodal messages."""
+
+    type: str = "file"
+    file: FileData
+
+
+# Union of all supported content part types
+ContentPart = Union[
+    ContentPartText,
+    ContentPartImageUrl,
+    ContentPartInputAudio,
+    ContentPartFile,
+]
+
+
 class ChatMessage(BaseModel):
-    """Represents a single chat message in the OpenAI-compatible schema."""
+    """Represents a single chat message in the OpenAI-compatible schema.
+
+    Content can be either a string or a list of content parts (for multimodal inputs).
+    """
 
     role: str
-    content: Optional[str] = None
+    content: Optional[Union[str, List[ContentPart]]] = None
     name: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
@@ -63,6 +125,14 @@ class ChatCompletionRequest(BaseModel):
 
 
 __all__ = [
+    "ImageUrl",
+    "InputAudio",
+    "FileData",
+    "ContentPartText",
+    "ContentPartImageUrl",
+    "ContentPartInputAudio",
+    "ContentPartFile",
+    "ContentPart",
     "ChatMessage",
     "ToolFunction",
     "Tool",
