@@ -33,10 +33,10 @@ from ....schemas.billing import (
     LedgerStatusEnum,
     LedgerEntryTypeEnum,
 )
-from ....core.logging_config import get_core_logger
+from ....core.logging_config import get_api_logger
 from ....core.config import settings
 
-logger = get_core_logger()
+logger = get_api_logger()
 
 router = APIRouter(tags=["Billing"])
 
