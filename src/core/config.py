@@ -220,6 +220,18 @@ class Settings(BaseSettings):
         default=os.getenv("BUILDERS_SUBNET_ID", "")
     )
     
+    # CoinCap API Settings (for MOR price data)
+    # Optional API key for higher rate limits: https://pro.coincap.io/api-docs
+    COINCAP_API_KEY: str | None = Field(default=os.getenv("COINCAP_API_KEY"))
+    
+    # Staking Credits Adjustment Factor
+    # Multiplier applied to final daily credits calculation for manual tuning
+    # Formula: daily_credits = stake_share * today_emission * mor_price * ADJUSTMENT_FACTOR
+    # Default: 1.0 (no adjustment)
+    STAKING_CREDITS_ADJUSTMENT_FACTOR: str = Field(
+        default=os.getenv("STAKING_CREDITS_ADJUSTMENT_FACTOR", "1.0")
+    )
+    
     # Stripe Settings
     # Required for processing Stripe payments and webhooks
     STRIPE_SECRET_KEY: str | None = Field(default=os.getenv("STRIPE_SECRET_KEY"))
