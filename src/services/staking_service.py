@@ -191,7 +191,7 @@ class StakingService:
         emission_service = get_mor_emission_service()
         
         mor_price = await pricing_service.get_price_usd()
-        today_emission = emission_service.get_daily_emission()
+        today_emission = emission_service.get_compute_emission()
         
         return mor_price, today_emission
     

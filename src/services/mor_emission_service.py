@@ -77,6 +77,8 @@ class MOREmissionService:
     COMMUNITY_PERCENT = Decimal("0.24")
     PROTECTION_PERCENT = Decimal("0.04")
     
+    PERCENT_ACTUAL_DISTRIBUTION = Decimal("0.8") # 80% of the emission is distributed to builders
+    
     def __init__(self):
         """Initialize the emission service."""
         self._emission_logger = logger.bind(component="mor_emission_service")
@@ -150,7 +152,7 @@ class MOREmissionService:
             Compute emission for the day
         """
         total = self.get_daily_emission(for_date)
-        return (total * self.COMPUTE_PERCENT).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+        return (total * self.COMPUTE_PERCENT * self.PERCENT_ACTUAL_DISTRIBUTION).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
     
     def get_emission_info(self, for_date: Optional[date] = None) -> EmissionInfo:
         """
