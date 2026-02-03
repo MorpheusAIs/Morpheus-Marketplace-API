@@ -370,6 +370,25 @@ async def openSession(
         raise ProxyRouterServiceError(f"Failed to create session: {str(e)}")
 
 
+def is_session_already_closed_error(error_message: str) -> bool:
+    """
+    Check if an error message indicates the session is already closed.
+    
+    Args:
+        error_message: The error message from the proxy router
+        
+    Returns:
+        bool: True if the error indicates session is already closed
+    """
+    already_closed_indicators = [
+        "SessionAlreadyClosed",
+        "session already closed",
+        "session is already closed",
+    ]
+    error_lower = error_message.lower()
+    return any(indicator.lower() in error_lower for indicator in already_closed_indicators)
+
+
 async def closeSession(session_id: str) -> Dict[str, Any]:
     """
     Close an existing session.
@@ -378,20 +397,23 @@ async def closeSession(session_id: str) -> Dict[str, Any]:
         session_id: ID of the session to close
         
     Returns:
-        Dict containing closure response
+        Dict containing closure response. Returns {"success": True, "already_closed": True}
+        if the session was already closed.
         
     Raises:
-        ProxyRouterServiceError: If session closure fails
+        ProxyRouterServiceError: If session closure fails (except for already-closed sessions)
     """
     logger.info("Closing proxy router session",
                session_id=session_id,
                event_type="session_close_start")
     
     try:
+        # Use max_retries=1 to avoid unnecessary retries on already-closed sessions
+        # If it fails, we check the error and handle SessionAlreadyClosed gracefully
         response = await _execute_request(
             "POST",
             f"blockchain/sessions/{session_id}/close",
-            max_retries=3
+            max_retries=1
         )
         
         # Handle successful closure
@@ -421,12 +443,34 @@ async def closeSession(session_id: str) -> Dict[str, Any]:
                 error_type="server_error" if response.status_code >= 500 else "client_error"
             )
         
-    except Exception as e:
+    except ProxyRouterServiceError as e:
+        # Check if this is a "session already closed" error
+        if is_session_already_closed_error(str(e)):
+            logger.info("Session was already closed on blockchain",
+                       session_id=session_id,
+                       event_type="session_already_closed")
+            return {"success": True, "already_closed": True}
+        
         logger.error("Error closing session",
                     session_id=session_id,
                     error=str(e),
                     event_type="session_close_error")
-        raise ProxyRouterServiceError(f"Failed to close session: {str(e)}")
+        raise
+        
+    except Exception as e:
+        # Check if this is a "session already closed" error
+        error_str = str(e)
+        if is_session_already_closed_error(error_str):
+            logger.info("Session was already closed on blockchain",
+                       session_id=session_id,
+                       event_type="session_already_closed")
+            return {"success": True, "already_closed": True}
+        
+        logger.error("Error closing session",
+                    session_id=session_id,
+                    error=error_str,
+                    event_type="session_close_error")
+        raise ProxyRouterServiceError(f"Failed to close session: {error_str}")
 
 
 async def getSessionStatus(session_id: str) -> Dict[str, Any]:

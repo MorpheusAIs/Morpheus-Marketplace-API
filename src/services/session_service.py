@@ -314,7 +314,8 @@ async def create_automated_session(
 
 async def close_session(
     db: AsyncSession, 
-    session_id: str
+    session_id: str,
+    skip_proxy_close: bool = False
 ) -> bool:
     """
     Close an existing session with enhanced validation.
@@ -322,6 +323,7 @@ async def close_session(
     Args:
         db: Database session
         session_id: ID of the session to close
+        skip_proxy_close: If True, only mark session inactive in DB (for already-closed sessions)
         
     Returns:
         bool: True if session was closed successfully, False otherwise
@@ -335,43 +337,80 @@ async def close_session(
                                session_id=session_id,
                                event_type="session_not_found_for_close")
             return False
+        
+        # If session is already inactive in DB, nothing to do
+        if not session.is_active:
+            close_logger.info("Session already inactive in database",
+                             session_id=session_id,
+                             event_type="session_already_inactive")
+            return True
+        
+        # If we should skip proxy close (session already closed on blockchain), just mark inactive
+        if skip_proxy_close:
+            await session_crud.mark_session_inactive(db, session_id)
+            close_logger.info("Marked session inactive (skipped proxy close)",
+                             session_id=session_id,
+                             event_type="session_marked_inactive_skip_proxy")
+            return True
             
         proxy_success = False
+        already_closed = False
+        
         try:
             # Use the proxy router service to close the session
             response = await proxy_router_service.closeSession(session_id)
-            close_logger.info("Successfully closed session at proxy level",
-                             session_id=session_id,
-                             event_type="proxy_session_closed")
+            
+            # Check if session was already closed
+            if response.get("already_closed", False):
+                close_logger.info("Session was already closed on blockchain",
+                                 session_id=session_id,
+                                 event_type="session_already_closed_on_chain")
+                already_closed = True
+            else:
+                close_logger.info("Successfully closed session at proxy level",
+                                 session_id=session_id,
+                                 event_type="proxy_session_closed")
             proxy_success = True
+            
         except proxy_router_service.ProxyRouterServiceError as proxy_error:
-            # Log other errors but don't mark success
-            close_logger.error("Error closing session at proxy level",
-                              session_id=session_id,
-                              error=str(proxy_error),
-                              error_type=proxy_error.error_type,
-                              event_type="proxy_session_close_error")
-            # Try to verify session status at proxy
-            try:
-                status = await check_proxy_session_status(session_id)
-                if status.get("closed", False):
-                    close_logger.info("Session verified as closed despite error",
-                                     session_id=session_id,
-                                     event_type="session_verified_closed")
-                    proxy_success = True
-            except Exception as verify_error:
-                close_logger.error("Failed to verify session status",
-                                   session_id=session_id,
-                                   error=str(verify_error),
-                                   event_type="session_status_verification_error")
+            # Check if this is a "session already closed" error
+            if proxy_router_service.is_session_already_closed_error(str(proxy_error)):
+                close_logger.info("Session was already closed (from error)",
+                                 session_id=session_id,
+                                 event_type="session_already_closed_error")
+                proxy_success = True
+                already_closed = True
+            else:
+                # Log other errors
+                close_logger.error("Error closing session at proxy level",
+                                  session_id=session_id,
+                                  error=str(proxy_error),
+                                  error_type=proxy_error.error_type,
+                                  event_type="proxy_session_close_error")
+                # Try to verify session status at proxy
+                try:
+                    status = await check_proxy_session_status(session_id)
+                    if status.get("closed", False):
+                        close_logger.info("Session verified as closed despite error",
+                                         session_id=session_id,
+                                         event_type="session_verified_closed")
+                        proxy_success = True
+                        already_closed = True
+                except Exception as verify_error:
+                    close_logger.error("Failed to verify session status",
+                                       session_id=session_id,
+                                       error=str(verify_error),
+                                       event_type="session_status_verification_error")
         
-        # Only mark session as inactive if proxy closure was successful
+        # Mark session as inactive if proxy closure was successful or session is expired
         if proxy_success or session.is_expired:
             await session_crud.mark_session_inactive(db, session_id)
             close_logger.info("Successfully marked session as inactive in database",
                              session_id=session_id,
+                             already_closed_on_chain=already_closed,
                              event_type="session_marked_inactive")
             return True
+            
         close_logger.warning("Not marking session as inactive in DB due to proxy failure",
                             session_id=session_id,
                             event_type="session_not_marked_inactive")
@@ -405,30 +444,57 @@ async def check_proxy_session_status(session_id: str) -> Dict[str, Any]:
         
     Returns:
         Dict with session status information, including 'closed' boolean
+        
+    Response format from proxy router:
+    {
+        "session": {
+            "Id": "0x...",
+            "ClosedAt": 1769448586,  # 0 if not closed
+            "BidID": "0x...",
+            ...
+        }
+    }
     """
+    status_logger = logger.bind(session_id=session_id)
+    
     try:
         response = await proxy_router_service.getSessionStatus(session_id)
         
         if response and isinstance(response, dict):
-            if "BidID" in response and response["BidID"] == "0x0000000000000000000000000000000000000000000000000000000000000000":
+            # Handle wrapped response format: {"session": {...}}
+            session_data = response.get("session", response)
+            
+            # Check for null/empty bid ID indicating session doesn't exist
+            bid_id = session_data.get("BidID", "")
+            if bid_id == "0x0000000000000000000000000000000000000000000000000000000000000000":
+                status_logger.info("Session has null BidID, marking as non-existent",
+                                  session_id=session_id,
+                                  event_type="session_null_bid")
                 return {"exists": False, "closed": True, "data": None}
 
-            closed = False
-            if "ClosedAt" in response and response["ClosedAt"] > 0:
-                closed = True
+            # Check if session is closed (ClosedAt > 0 means closed)
+            closed_at = session_data.get("ClosedAt", 0)
+            closed = closed_at > 0
+            
+            if closed:
+                status_logger.info("Session is closed on blockchain",
+                                  session_id=session_id,
+                                  closed_at=closed_at,
+                                  event_type="session_closed_on_chain")
             
             return {
                 "exists": True,
                 "closed": closed,
-                "data": response
+                "closed_at": closed_at,
+                "data": session_data
             }
         else:
-            status_logger = logger.bind(session_id=session_id)
             status_logger.error("Invalid response from proxy router",
                               session_id=session_id,
                               response=response,
                               event_type="invalid_proxy_response")
             return {"exists": False, "closed": True, "data": None}
+            
     except proxy_router_service.ProxyRouterServiceError as e:
         status_logger.error("Error checking session status",
                            session_id=session_id,
@@ -461,19 +527,34 @@ async def verify_session_status(db: AsyncSession, session_id: str) -> bool:
     proxy_status = await check_proxy_session_status(session_id)
     return proxy_status.get("exists", False) and not proxy_status.get("closed", True)
 
-async def synchronize_sessions(db: AsyncSession):
+async def synchronize_sessions(db: AsyncSession) -> Dict[str, List[str]]:
     """
     Synchronize session states between database and proxy router.
     
+    This function checks all active sessions in the database against the proxy router
+    and marks sessions as inactive if they are closed on the blockchain.
+    
     Args:
         db: Database session
+        
+    Returns:
+        Dict with lists of session IDs that were synced, still active, and had errors
     """
     sync_logger = logger.bind(component="session_synchronization")
     sync_logger.info("Starting session synchronization",
                     event_type="session_sync_start")
     
+    result = {
+        "synced": [],      # Sessions that were closed on blockchain and marked inactive in DB
+        "active": [],      # Sessions that are still active on blockchain
+        "errors": [],      # Sessions that had errors during sync
+    }
+    
     # Get all sessions marked as active in database
     active_sessions = await session_crud.get_all_active_sessions(db)
+    sync_logger.info("Found active sessions in database",
+                    count=len(active_sessions),
+                    event_type="session_sync_active_count")
     
     for session in active_sessions:
         # Verify each session's status in proxy router
@@ -484,11 +565,25 @@ async def synchronize_sessions(db: AsyncSession):
             if not proxy_status.get("exists", False) or proxy_status.get("closed", True):
                 sync_logger.info("Session is closed in proxy but active in DB, synchronizing",
                                 session_id=session.id,
+                                closed_at=proxy_status.get("closed_at"),
                                 event_type="session_sync_inconsistency")
                 await session_crud.mark_session_inactive(db, session.id)
+                result["synced"].append(session.id)
+            else:
+                result["active"].append(session.id)
+                
         except Exception as e:
             sync_logger.error("Error checking session in proxy",
                              session_id=session.id,
                              error=str(e),
                              event_type="session_proxy_check_error")
+            result["errors"].append(session.id)
             # Don't automatically mark as inactive on error
+    
+    sync_logger.info("Session synchronization completed",
+                    synced_count=len(result["synced"]),
+                    active_count=len(result["active"]),
+                    error_count=len(result["errors"]),
+                    event_type="session_sync_complete")
+    
+    return result
