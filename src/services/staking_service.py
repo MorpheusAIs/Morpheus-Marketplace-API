@@ -55,6 +55,51 @@ class StakingService:
             await self._http_client.aclose()
             self._http_client = None
     
+    async def fetch_total_staked(self) -> Decimal:
+        """
+        Fetch total staked MOR from the subnets API.
+        
+        Returns total staked in wei from data.totals.totalstaked.
+        """
+        staking_logger = logger.bind(component="staking_service", action="fetch_total_staked")
+        
+        url = f"{settings.BUILDERS_API_URL}/builders/subnets"
+        client = await self._get_http_client()
+        
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Extract total staked from data.totals.totalstaked
+            totals = data.get("data", {}).get("totals", {})
+            total_staked_raw = totals.get("totalStaked", 0)
+            total_staked_wei = Decimal(str(total_staked_raw))
+            
+            staking_logger.info(
+                "Fetched total staked from subnets API",
+                total_staked_wei=str(total_staked_wei),
+                url=url
+            )
+            
+            return total_staked_wei
+            
+        except httpx.HTTPStatusError as e:
+            staking_logger.error(
+                "HTTP error fetching total staked",
+                status_code=e.response.status_code,
+                url=url,
+                error=str(e)
+            )
+            raise
+        except Exception as e:
+            staking_logger.error(
+                "Error fetching total staked",
+                url=url,
+                error=str(e)
+            )
+            raise
+    
     async def fetch_all_stakers(self) -> Dict[str, Decimal]:
         """
         Fetch all stakers from Builders API with pagination.
@@ -272,14 +317,14 @@ class StakingService:
         wei_divisor = Decimal("1000000000000000000")  # 10^18
         
         try:
-            # Step 1: Fetch all stakers from Builders API
+            # Step 1: Fetch all stakers from Builders API (for individual wallet stakes)
             all_stakers = await self.fetch_all_stakers()
             
-            # Calculate total staked across all stakers (in wei)
-            total_staked_wei = sum(all_stakers.values(), Decimal(0))
+            # Step 2: Fetch total staked from subnets API (for global total)
+            total_staked_wei = await self.fetch_total_staked()
             total_staked_mor = total_staked_wei / wei_divisor
             
-            # Step 2: Get MOR price and today's emission
+            # Step 3: Get MOR price and today's emission
             mor_price, today_emission = await self._get_pricing_data()
             
             # Get adjustment factor for logging
@@ -293,7 +338,7 @@ class StakingService:
                 adjustment_factor=str(adjustment_factor)
             )
             
-            # Step 2: Get all linked wallets from DB
+            # Step 4: Get all linked wallets from DB
             result = await db.execute(select(WalletLink))
             wallet_links = list(result.scalars().all())
             
@@ -303,7 +348,7 @@ class StakingService:
                 wallet_count=len(wallet_links)
             )
             
-            # Step 3: Group wallets by user_id
+            # Step 5: Group wallets by user_id
             user_wallets: Dict[int, List[WalletLink]] = {}
             for wallet_link in wallet_links:
                 if wallet_link.user_id not in user_wallets:
@@ -315,7 +360,7 @@ class StakingService:
                 user_count=len(user_wallets)
             )
             
-            # Step 4: Process each user in a single transaction
+            # Step 6: Process each user in a single transaction
             users_processed = 0
             users_skipped = 0  # Already refreshed today
             users_failed = 0
