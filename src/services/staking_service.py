@@ -63,7 +63,7 @@ class StakingService:
         """
         staking_logger = logger.bind(component="staking_service", action="fetch_total_staked")
         
-        url = "https://dashboard.mor.org/api/builders/subnets"
+        url = f"{settings.BUILDERS_API_URL}/builders/subnets"
         client = await self._get_http_client()
         
         try:
