@@ -224,8 +224,6 @@ class ManualTopupRequest(BaseModel):
     """Request for POST /billing/credits/adjust."""
     amount_usd: Decimal = Field(..., description="Amount to adjust in USD (positive to add, negative to subtract)")
     description: Optional[str] = Field(None, max_length=500, description="Optional description/reason for adjustment")
-    user_id: Optional[int] = Field(None, description="Target user ID (database primary key). If not provided, adjusts current user's credits.")
-    cognito_user_id: Optional[uuid.UUID] = Field(None, description="Target Cognito user ID. Alternative to user_id.")
 
 
 class ManualTopupResponse(BaseModel):
@@ -310,4 +308,17 @@ class RefundResponse(BaseModel):
     amount_refunded: DecimalStr
     success: bool
     error: Optional[str] = None
+
+
+# === Billing Preferences Schemas ===
+
+class BillingPreferencesResponse(BaseModel):
+    allow_overages: bool = Field(
+        ...,
+        description="When enabled, automatically deduct from Credit Balance if Daily Staking Allowance is exhausted"
+    )
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 

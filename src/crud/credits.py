@@ -105,18 +105,6 @@ async def set_staking_daily_amount(db: AsyncSession, user_id: int, amount: Decim
     return balance
 
 
-async def update_allow_overages(db: AsyncSession, user_id: int, allow_overages: bool) -> CreditAccountBalance:
-    balance = await get_or_create_balance(db, user_id)
-    balance.allow_overages = allow_overages
-    balance.updated_at = datetime.utcnow()
-    
-    await db.commit()
-    await db.refresh(balance)
-    
-    logger.info("Updated allow_overages setting", user_id=user_id, allow_overages=allow_overages)
-    return balance
-
-
 # === Ledger Entry Operations ===
 
 async def get_ledger_entry_by_id(
