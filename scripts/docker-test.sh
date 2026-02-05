@@ -20,6 +20,9 @@ echo "✅ Found .env.local"
 if [ "$1" == "clean" ]; then
     echo "🧹 Cleaning up existing containers..."
     docker compose -f docker-compose.local.yml down --remove-orphans
+elif [ "$1" == "db-clean-volumes" ]; then
+    echo "🧹 Cleaning up existing containers and database volumes..."
+    docker compose -f docker-compose.local.yml down --volumes --remove-orphans
 else
     echo "🧹 Skipping cleanup"
     docker compose -f docker-compose.local.yml down
@@ -27,7 +30,7 @@ fi
 
 # Build and start services
 echo "🚀 Starting services with docker-compose..."
-docker compose -f docker-compose.local.yml up --build -d
+docker compose -f docker-compose.local.yml up --build
 
 echo "⏳ Waiting for container to start..."
 sleep 5

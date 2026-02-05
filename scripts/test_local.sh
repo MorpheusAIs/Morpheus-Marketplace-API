@@ -28,8 +28,8 @@ fi
 echo "✅ Docker is running"
 
 # Clean up any previous containers
-echo "🧹 Cleaning up previous containers..."
-docker compose -f docker-compose.local.yml down --volumes --remove-orphans
+# echo "🧹 Cleaning up previous containers..."
+# docker compose -f docker-compose.local.yml down --volumes --remove-orphans
 
 # Build and start the self-contained environment
 echo "🔨 Building and starting self-contained local environment..."
@@ -39,6 +39,6 @@ echo "   - API with bypassed Cognito authentication"
 echo "   - Hot reload for development"
 echo "   - Test user: test@local.dev"
 
-docker compose -f docker-compose.local.yml up --build --remove-orphans
+docker compose -f docker-compose.local.yml up
 
 echo "🎉 Self-contained local testing environment stopped"
