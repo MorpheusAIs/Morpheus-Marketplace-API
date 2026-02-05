@@ -119,7 +119,6 @@ async def get_balance(
 
 
 # === Transactions List Endpoint ===
-
 @router.get("/transactions", response_model=LedgerListResponse)
 async def list_transactions(
     limit: int = Query(default=50, ge=1, le=100),

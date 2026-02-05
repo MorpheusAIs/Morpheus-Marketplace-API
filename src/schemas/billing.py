@@ -310,4 +310,3 @@ class RefundResponse(BaseModel):
     amount_refunded: DecimalStr
     success: bool
     error: Optional[str] = None
-

@@ -2,7 +2,7 @@
 CRUD operations for credits ledger and account balances.
 """
 from typing import Optional, List, Tuple
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from decimal import Decimal
 import uuid
 
@@ -15,6 +15,16 @@ from src.db.models import CreditLedger, CreditAccountBalance, LedgerStatus, Ledg
 from src.core.logging_config import get_core_logger
 
 logger = get_core_logger()
+
+
+def _normalize_datetime(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+    return dt
 
 
 # === Account Balance Operations ===
@@ -332,14 +342,17 @@ async def get_transactions(
     if entry_type is not None:
         query = query.where(CreditLedger.entry_type == entry_type)
         count_query = count_query.where(CreditLedger.entry_type == entry_type)
-    
-    if from_date is not None:
-        query = query.where(CreditLedger.created_at >= from_date)
-        count_query = count_query.where(CreditLedger.created_at >= from_date)
-    
-    if to_date is not None:
-        query = query.where(CreditLedger.created_at <= to_date)
-        count_query = count_query.where(CreditLedger.created_at <= to_date)
+
+    normalized_from_date = _normalize_datetime(from_date)
+    normalized_to_date = _normalize_datetime(to_date)
+
+    if normalized_from_date is not None:
+        query = query.where(CreditLedger.created_at >= normalized_from_date)
+        count_query = count_query.where(CreditLedger.created_at >= normalized_from_date)
+
+    if normalized_to_date is not None:
+        query = query.where(CreditLedger.created_at <= normalized_to_date)
+        count_query = count_query.where(CreditLedger.created_at <= normalized_to_date)
     
     # Order and paginate
     query = query.order_by(CreditLedger.created_at.desc()).offset(offset).limit(limit)
@@ -378,13 +391,16 @@ async def get_usage_entries(
     count_query = select(func.count(CreditLedger.id)).where(base_filter)
     
     # Apply optional filters
-    if from_date is not None:
-        query = query.where(CreditLedger.created_at >= from_date)
-        count_query = count_query.where(CreditLedger.created_at >= from_date)
-    
-    if to_date is not None:
-        query = query.where(CreditLedger.created_at <= to_date)
-        count_query = count_query.where(CreditLedger.created_at <= to_date)
+    normalized_from_date = _normalize_datetime(from_date)
+    normalized_to_date = _normalize_datetime(to_date)
+
+    if normalized_from_date is not None:
+        query = query.where(CreditLedger.created_at >= normalized_from_date)
+        count_query = count_query.where(CreditLedger.created_at >= normalized_from_date)
+
+    if normalized_to_date is not None:
+        query = query.where(CreditLedger.created_at <= normalized_to_date)
+        count_query = count_query.where(CreditLedger.created_at <= normalized_to_date)
     
     if model_filter is not None:
         query = query.where(CreditLedger.model_name == model_filter)
@@ -439,4 +455,3 @@ async def get_monthly_spending(
     
     # Convert to list of tuples
     return [(int(row.month), row.total or Decimal("0"), row.count or 0) for row in rows]
-
