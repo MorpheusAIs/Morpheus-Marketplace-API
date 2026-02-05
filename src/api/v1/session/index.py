@@ -380,6 +380,27 @@ async def create_model_session(
         }
         
         return result
+    except ModelSwitchRateLimitExceeded as e:
+        session_logger.warning("Model switch rate limit exceeded",
+                              api_key_prefix=e.api_key_prefix,
+                              user_email=e.user_email,
+                              limit_type=e.limit_type,
+                              current=e.current_count,
+                              limit=e.limit_value,
+                              event_type="rate_limit_response")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": "rate_limit_exceeded",
+                "message": str(e),
+                "limit_type": e.limit_type,
+                "limit": e.limit_value,
+                "current": e.current_count,
+                "retry_after_seconds": e.retry_after_seconds,
+                "user": e.user_email if e.user_email else "unknown"
+            },
+            headers={"Retry-After": str(e.retry_after_seconds)}
+        )
     except ValueError as e:
         session_logger.error("Error creating model session",
                             error=str(e),

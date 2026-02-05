@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
-from ..db.models import Session
+from ..db.models import Session, User
 from ..db.models import UserAutomationSettings
 from ..core.config import settings
 from ..crud import session as session_crud
@@ -15,6 +15,11 @@ from ..services import proxy_router_service
 from ..core.model_routing import model_router
 from ..core.logging_config import get_api_logger
 from ..db.models import APIKey
+from .model_switch_rate_limiter import (
+    check_model_switch_rate_limit,
+    record_model_switch,
+    ModelSwitchRateLimitExceeded
+)
 
 logger = get_api_logger()
 
@@ -116,13 +121,70 @@ async def get_session_for_api_key(
                                event_type="session_model_match")
             return session
         else:
-            session_logger.info("Session model mismatch, closing and creating new session",
+            # MODEL SWITCH DETECTED - CHECK RATE LIMIT
+            session_logger.info("Session model mismatch, checking rate limits before switching",
                                session_id=session.id,
                                current_model=session.model,
                                requested_model_id=requested_model_id,
                                event_type="session_model_mismatch")
+            
+            # Get user email for rate limit check and logging
+            user_result = await db.execute(
+                select(User.email).where(User.id == user_id)
+            )
+            user_email = user_result.scalar()
+            
+            try:
+                # Check rate limit before allowing switch
+                rate_limit_result = await check_model_switch_rate_limit(
+                    db=db,
+                    api_key_id=api_key_id,
+                    api_key_prefix=api_key.key_prefix,
+                    user_id=user_id,
+                    user_email=user_email,
+                    current_model=session.model,
+                    requested_model=requested_model_id
+                )
+                
+                session_logger.info("Rate limit check passed, proceeding with model switch",
+                                   limits=rate_limit_result.get("limits"),
+                                   event_type="rate_limit_passed")
+                
+            except ModelSwitchRateLimitExceeded as e:
+                # Rate limit exceeded - re-raise to be handled by API endpoint
+                session_logger.warning("Model switch rate limit exceeded, blocking switch",
+                                      api_key_prefix=api_key.key_prefix,
+                                      user_email=user_email,
+                                      limit_type=e.limit_type,
+                                      current_count=e.current_count,
+                                      limit=e.limit_value,
+                                      retry_after=e.retry_after_seconds,
+                                      event_type="model_switch_rate_limited")
+                raise
+            
+            # Rate limit passed - proceed with switch
+            session_logger.info("Closing current session and creating new one",
+                               event_type="model_switch_proceeding")
+            
             await close_session(db, session.id)
-            return await create_automated_session(db, api_key_id, user_id, requested_model, session_duration, model_type=model_type)
+            
+            # Create new session
+            new_session = await create_automated_session(
+                db, api_key_id, user_id, requested_model, 
+                session_duration, model_type=model_type
+            )
+            
+            # Record the switch
+            if new_session:
+                await record_model_switch(
+                    db=db,
+                    api_key_id=api_key_id,
+                    user_id=user_id,
+                    from_model=session.model,
+                    to_model=new_session.model
+                )
+            
+            return new_session
     
     # No session found - create one (we still hold the lock, so no other request can interfere)
     return await create_automated_session(db, api_key_id, user_id, requested_model, session_duration, model_type=model_type)

@@ -180,6 +180,38 @@ class Settings(BaseSettings):
     # Automation feature flag
     AUTOMATION_FEATURE_ENABLED: bool = Field(default=os.getenv("AUTOMATION_FEATURE_ENABLED", "False").lower() == "true")
     
+    # Model Switch Rate Limiting (hotfix for excessive model switching)
+    MODEL_SWITCH_RATE_LIMIT_ENABLED: bool = Field(
+        default=os.getenv("MODEL_SWITCH_RATE_LIMIT_ENABLED", "false").lower() == "true"
+    )
+    MODEL_SWITCH_MAX_PER_HOUR: int = Field(
+        default=int(os.getenv("MODEL_SWITCH_MAX_PER_HOUR", "10"))
+    )
+    MODEL_SWITCH_MAX_PER_DAY: int = Field(
+        default=int(os.getenv("MODEL_SWITCH_MAX_PER_DAY", "50"))
+    )
+    MODEL_SWITCH_WINDOW_SECONDS: int = Field(
+        default=int(os.getenv("MODEL_SWITCH_WINDOW_SECONDS", "300"))  # 5 minutes
+    )
+    
+    # Exemptions from rate limiting (by user email - comma-separated)
+    MODEL_SWITCH_RATE_LIMIT_EXEMPT_EMAILS: List[str] = Field(
+        default_factory=lambda: [
+            email.strip() 
+            for email in os.getenv("MODEL_SWITCH_RATE_LIMIT_EXEMPT_EMAILS", "").split(",") 
+            if email.strip()
+        ]
+    )
+    
+    # Exemptions from rate limiting (by user ID - comma-separated integers)
+    MODEL_SWITCH_RATE_LIMIT_EXEMPT_USER_IDS: List[int] = Field(
+        default_factory=lambda: [
+            int(user_id.strip()) 
+            for user_id in os.getenv("MODEL_SWITCH_RATE_LIMIT_EXEMPT_USER_IDS", "").split(",") 
+            if user_id.strip() and user_id.strip().isdigit()
+        ]
+    )
+    
     # Delegation
     GATEWAY_DELEGATE_ADDRESS: str = "0xGatewayDelegateAccountAddressPlaceholder" # Placeholder
     
