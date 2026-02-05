@@ -16,7 +16,6 @@ from ....dependencies import get_current_user, get_api_key_user
 from ....services.billing_service import billing_service
 from ....services.staking_service import staking_service
 from ....crud import credits as credits_crud
-from ....crud import user as user_crud
 from ....schemas.billing import (
     BalanceResponse,
     LedgerEntryResponse,
@@ -33,11 +32,12 @@ from ....schemas.billing import (
     ManualTopupResponse,
     LedgerStatusEnum,
     LedgerEntryTypeEnum,
+    BillingPreferencesResponse,
 )
-from ....core.logging_config import get_api_logger
+from ....core.logging_config import get_core_logger
 from ....core.config import settings
 
-logger = get_api_logger()
+logger = get_core_logger()
 
 router = APIRouter(tags=["Billing"])
 
@@ -103,6 +103,17 @@ async def get_balance(
     """
     balance = await billing_service.get_balance(db, current_user.id)
     return balance
+
+
+# === Billing Preferences Endpoints ===
+
+@router.get("/preferences", response_model=BillingPreferencesResponse)
+async def get_billing_preferences(
+    db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    balance = await credits_crud.get_or_create_balance(db, current_user.id)
+    return BillingPreferencesResponse(allow_overages=balance.allow_overages)
 
 
 # === Transactions List Endpoint ===
@@ -476,31 +487,13 @@ async def adjust_credits(
     
     - Positive amount: Adds credits (simulates a purchase)
     - Negative amount: Subtracts credits (admin correction/chargeback)
-    - user_id (optional): Target user ID (database primary key integer)
-    - cognito_user_id (optional): Target Cognito user ID (UUID)
-    - If neither provided, adjusts current user's credits.
     
     This endpoint is for development/admin purposes to manage credits
     without integrating with payment providers.
     """
-    # Determine target user ID
-    target_user_id = current_user.id
-    
-    if request.user_id is not None:
-        target_user_id = request.user_id
-    elif request.cognito_user_id is not None:
-        # Look up user by cognito_user_id
-        target_user = await user_crud.get_user_by_cognito_id(db, str(request.cognito_user_id))
-        if not target_user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User with cognito_user_id {request.cognito_user_id} not found"
-            )
-        target_user_id = target_user.id
-    
     entry, new_balance = await billing_service.adjust_credits(
         db=db,
-        user_id=target_user_id,
+        user_id=current_user.id,
         amount=request.amount_usd,
         description=request.description,
     )
@@ -508,8 +501,7 @@ async def adjust_credits(
     action = "added" if request.amount_usd >= 0 else "subtracted"
     logger.info(
         f"Manual credit adjustment by admin: {action}",
-        user_id=str(target_user_id),
-        admin_user_id=str(current_user.id),
+        user_id=current_user.id,
         amount=str(request.amount_usd),
         new_balance=str(new_balance),
         event_type="billing_admin_credit_adjust"
