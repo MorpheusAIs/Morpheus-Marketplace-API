@@ -101,8 +101,21 @@ async def get_balance(
     - staking: Staking bucket balance (daily amount, refresh date, available)
     - total_available: Sum of all available credits
     """
-    balance = await billing_service.get_balance(db, current_user.id)
-    return balance
+    try:
+        balance = await billing_service.get_balance(db, current_user.id)
+        return balance
+    except Exception as e:
+        logger.error(
+            "Error in get_balance endpoint",
+            user_id=current_user.id,
+            error=str(e),
+            error_type=type(e).__name__,
+            event_type="billing_balance_error"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching balance: {str(e)}"
+        )
 
 
 # === Transactions List Endpoint ===
@@ -129,62 +142,77 @@ async def list_transactions(
     
     Returns newest entries first.
     """
-    # Convert enum to model enum if provided
-    model_entry_type = None
-    if entry_type:
-        model_entry_type = LedgerEntryType(entry_type.value)
-    
-    entries, total = await credits_crud.get_transactions(
-        db=db,
-        user_id=current_user.id,
-        limit=limit,
-        offset=offset,
-        entry_type=model_entry_type,
-        from_date=from_date,
-        to_date=to_date,
-    )
-    
-    items = [
-        LedgerEntryResponse(
-            id=entry.id,
-            user_id=entry.user_id,
-            currency=entry.currency,
-            status=LedgerStatusEnum(entry.status.value),
-            entry_type=LedgerEntryTypeEnum(entry.entry_type.value),
-            amount_paid=entry.amount_paid,
-            amount_staking=entry.amount_staking,
-            amount_total=entry.amount_total,
-            payment_source=entry.payment_source,
-            external_transaction_id=entry.external_transaction_id,
-            payment_metadata=entry.payment_metadata,
-            idempotency_key=entry.idempotency_key,
-            related_entry_id=entry.related_entry_id,
-            request_id=entry.request_id,
-            api_key_id=entry.api_key_id,
-            model_name=entry.model_name,
-            model_id=entry.model_id,
-            endpoint=entry.endpoint,
-            tokens_input=entry.tokens_input,
-            tokens_output=entry.tokens_output,
-            tokens_total=entry.tokens_total,
-            input_price_per_million=entry.input_price_per_million,
-            output_price_per_million=entry.output_price_per_million,
-            failure_code=entry.failure_code,
-            failure_reason=entry.failure_reason,
-            description=entry.description,
-            created_at=entry.created_at,
-            updated_at=entry.updated_at,
+    try:
+        # Convert enum to model enum if provided
+        model_entry_type = None
+        if entry_type:
+            model_entry_type = LedgerEntryType(entry_type.value)
+        
+        entries, total = await credits_crud.get_transactions(
+            db=db,
+            user_id=current_user.id,
+            limit=limit,
+            offset=offset,
+            entry_type=model_entry_type,
+            from_date=from_date,
+            to_date=to_date,
         )
-        for entry in entries
-    ]
-    
-    return LedgerListResponse(
-        items=items,
-        total=total,
-        limit=limit,
-        offset=offset,
-        has_more=(offset + len(items)) < total,
-    )
+        
+        items = [
+            LedgerEntryResponse(
+                id=entry.id,
+                user_id=entry.user_id,
+                currency=entry.currency,
+                status=LedgerStatusEnum(entry.status.value),
+                entry_type=LedgerEntryTypeEnum(entry.entry_type.value),
+                amount_paid=entry.amount_paid,
+                amount_staking=entry.amount_staking,
+                amount_total=entry.amount_total,
+                payment_source=entry.payment_source,
+                external_transaction_id=entry.external_transaction_id,
+                payment_metadata=entry.payment_metadata,
+                idempotency_key=entry.idempotency_key,
+                related_entry_id=entry.related_entry_id,
+                request_id=entry.request_id,
+                api_key_id=entry.api_key_id,
+                model_name=entry.model_name,
+                model_id=entry.model_id,
+                endpoint=entry.endpoint,
+                tokens_input=entry.tokens_input,
+                tokens_output=entry.tokens_output,
+                tokens_total=entry.tokens_total,
+                input_price_per_million=entry.input_price_per_million,
+                output_price_per_million=entry.output_price_per_million,
+                failure_code=entry.failure_code,
+                failure_reason=entry.failure_reason,
+                description=entry.description,
+                created_at=entry.created_at,
+                updated_at=entry.updated_at,
+            )
+            for entry in entries
+        ]
+        
+        return LedgerListResponse(
+            items=items,
+            total=total,
+            limit=limit,
+            offset=offset,
+            has_more=(offset + len(items)) < total,
+        )
+    except Exception as e:
+        logger.error(
+            "Error in list_transactions endpoint",
+            user_id=current_user.id,
+            error=str(e),
+            error_type=type(e).__name__,
+            from_date=str(from_date) if from_date else None,
+            to_date=str(to_date) if to_date else None,
+            event_type="billing_transactions_error"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching transactions: {str(e)}"
+        )
 
 
 # === Spending Metrics Endpoint ===
@@ -207,41 +235,55 @@ async def get_monthly_spending(
     
     Returns 12 months of data including months with zero spending.
     """
-    if year is None:
-        year = datetime.now().year
-    
-    include_refunds = mode == SpendingModeEnum.net
-    
-    monthly_data = await credits_crud.get_monthly_spending(
-        db=db,
-        user_id=current_user.id,
-        year=year,
-        include_refunds=include_refunds,
-    )
-    
-    # Create a dict for easy lookup
-    data_by_month = {m: (amount, count) for m, amount, count in monthly_data}
-    
-    # Build all 12 months
-    months = []
-    total = Decimal("0")
-    for month in range(1, 13):
-        amount, count = data_by_month.get(month, (Decimal("0"), 0))
-        months.append(MonthlySpending(
+    try:
+        if year is None:
+            year = datetime.now().year
+        
+        include_refunds = mode == SpendingModeEnum.net
+        
+        monthly_data = await credits_crud.get_monthly_spending(
+            db=db,
+            user_id=current_user.id,
             year=year,
-            month=month,
-            amount=amount,
-            transaction_count=count,
-        ))
-        total += amount
-    
-    return MonthlySpendingResponse(
-        year=year,
-        mode=mode,
-        months=months,
-        total=total,
-        currency="USD",
-    )
+            include_refunds=include_refunds,
+        )
+        
+        # Create a dict for easy lookup
+        data_by_month = {m: (amount, count) for m, amount, count in monthly_data}
+        
+        # Build all 12 months
+        months = []
+        total = Decimal("0")
+        for month in range(1, 13):
+            amount, count = data_by_month.get(month, (Decimal("0"), 0))
+            months.append(MonthlySpending(
+                year=year,
+                month=month,
+                amount=amount,
+                transaction_count=count,
+            ))
+            total += amount
+        
+        return MonthlySpendingResponse(
+            year=year,
+            mode=mode,
+            months=months,
+            total=total,
+            currency="USD",
+        )
+    except Exception as e:
+        logger.error(
+            "Error in get_monthly_spending endpoint",
+            user_id=current_user.id,
+            error=str(e),
+            error_type=type(e).__name__,
+            year=year,
+            event_type="billing_spending_error"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching spending data: {str(e)}"
+        )
 
 
 # === Usage List Endpoint ===
@@ -268,42 +310,57 @@ async def list_usage(
     
     Returns newest entries first.
     """
-    entries, total = await credits_crud.get_usage_entries(
-        db=db,
-        user_id=current_user.id,
-        limit=limit,
-        offset=offset,
-        from_date=from_date,
-        to_date=to_date,
-        model_filter=model,
-    )
-    
-    items = [
-        UsageEntryResponse(
-            id=entry.id,
-            created_at=entry.created_at,
-            model_name=entry.model_name,
-            model_id=entry.model_id,
-            endpoint=entry.endpoint,
-            tokens_input=entry.tokens_input,
-            tokens_output=entry.tokens_output,
-            tokens_total=entry.tokens_total,
-            amount_paid=entry.amount_paid,
-            amount_staking=entry.amount_staking,
-            amount_total=entry.amount_total,
-            request_id=entry.request_id,
-            api_key_id=entry.api_key_id,
+    try:
+        entries, total = await credits_crud.get_usage_entries(
+            db=db,
+            user_id=current_user.id,
+            limit=limit,
+            offset=offset,
+            from_date=from_date,
+            to_date=to_date,
+            model_filter=model,
         )
-        for entry in entries
-    ]
-    
-    return UsageListResponse(
-        items=items,
-        total=total,
-        limit=limit,
-        offset=offset,
-        has_more=(offset + len(items)) < total,
-    )
+        
+        items = [
+            UsageEntryResponse(
+                id=entry.id,
+                created_at=entry.created_at,
+                model_name=entry.model_name,
+                model_id=entry.model_id,
+                endpoint=entry.endpoint,
+                tokens_input=entry.tokens_input,
+                tokens_output=entry.tokens_output,
+                tokens_total=entry.tokens_total,
+                amount_paid=entry.amount_paid,
+                amount_staking=entry.amount_staking,
+                amount_total=entry.amount_total,
+                request_id=entry.request_id,
+                api_key_id=entry.api_key_id,
+            )
+            for entry in entries
+        ]
+        
+        return UsageListResponse(
+            items=items,
+            total=total,
+            limit=limit,
+            offset=offset,
+            has_more=(offset + len(items)) < total,
+        )
+    except Exception as e:
+        logger.error(
+            "Error in list_usage endpoint",
+            user_id=current_user.id,
+            error=str(e),
+            error_type=type(e).__name__,
+            from_date=str(from_date) if from_date else None,
+            to_date=str(to_date) if to_date else None,
+            event_type="billing_usage_error"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching usage data: {str(e)}"
+        )
 
 
 @router.get("/usage/month", response_model=UsageListResponse)
@@ -326,48 +383,63 @@ async def list_usage_for_month(
     
     Returns newest entries first.
     """
-    # Calculate date range for the month
-    from_date = datetime(year, month, 1, 0, 0, 0)
-    if month == 12:
-        to_date = datetime(year + 1, 1, 1, 0, 0, 0)
-    else:
-        to_date = datetime(year, month + 1, 1, 0, 0, 0)
-    
-    entries, total = await credits_crud.get_usage_entries(
-        db=db,
-        user_id=current_user.id,
-        limit=limit,
-        offset=offset,
-        from_date=from_date,
-        to_date=to_date,
-    )
-    
-    items = [
-        UsageEntryResponse(
-            id=entry.id,
-            created_at=entry.created_at,
-            model_name=entry.model_name,
-            model_id=entry.model_id,
-            endpoint=entry.endpoint,
-            tokens_input=entry.tokens_input,
-            tokens_output=entry.tokens_output,
-            tokens_total=entry.tokens_total,
-            amount_paid=entry.amount_paid,
-            amount_staking=entry.amount_staking,
-            amount_total=entry.amount_total,
-            request_id=entry.request_id,
-            api_key_id=entry.api_key_id,
+    try:
+        # Calculate date range for the month
+        from_date = datetime(year, month, 1, 0, 0, 0)
+        if month == 12:
+            to_date = datetime(year + 1, 1, 1, 0, 0, 0)
+        else:
+            to_date = datetime(year, month + 1, 1, 0, 0, 0)
+        
+        entries, total = await credits_crud.get_usage_entries(
+            db=db,
+            user_id=current_user.id,
+            limit=limit,
+            offset=offset,
+            from_date=from_date,
+            to_date=to_date,
         )
-        for entry in entries
-    ]
-    
-    return UsageListResponse(
-        items=items,
-        total=total,
-        limit=limit,
-        offset=offset,
-        has_more=(offset + len(items)) < total,
-    )
+        
+        items = [
+            UsageEntryResponse(
+                id=entry.id,
+                created_at=entry.created_at,
+                model_name=entry.model_name,
+                model_id=entry.model_id,
+                endpoint=entry.endpoint,
+                tokens_input=entry.tokens_input,
+                tokens_output=entry.tokens_output,
+                tokens_total=entry.tokens_total,
+                amount_paid=entry.amount_paid,
+                amount_staking=entry.amount_staking,
+                amount_total=entry.amount_total,
+                request_id=entry.request_id,
+                api_key_id=entry.api_key_id,
+            )
+            for entry in entries
+        ]
+        
+        return UsageListResponse(
+            items=items,
+            total=total,
+            limit=limit,
+            offset=offset,
+            has_more=(offset + len(items)) < total,
+        )
+    except Exception as e:
+        logger.error(
+            "Error in list_usage_for_month endpoint",
+            user_id=current_user.id,
+            error=str(e),
+            error_type=type(e).__name__,
+            year=year,
+            month=month,
+            event_type="billing_usage_month_error"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching usage data for month: {str(e)}"
+        )
 
 
 # === Staking Settings Endpoints (Admin Protected) ===
@@ -387,23 +459,36 @@ async def set_staking_settings(
     This updates the configured daily amount but does NOT trigger an immediate refresh.
     The new amount will take effect on the next daily refresh.
     """
-    balance = await credits_crud.set_staking_daily_amount(
-        db=db,
-        user_id=current_user.id,
-        amount=staking_request.daily_amount,
-    )
-    
-    logger.info(
-        "Staking settings updated by admin",
-        user_id=current_user.id,
-        daily_amount=str(staking_request.daily_amount),
-        event_type="billing_admin_staking_settings"
-    )
-    
-    return StakingSettingsResponse(
-        daily_amount=balance.staking_daily_amount,
-        message="Staking daily amount updated",
-    )
+    try:
+        balance = await credits_crud.set_staking_daily_amount(
+            db=db,
+            user_id=current_user.id,
+            amount=staking_request.daily_amount,
+        )
+        
+        logger.info(
+            "Staking settings updated by admin",
+            user_id=current_user.id,
+            daily_amount=str(staking_request.daily_amount),
+            event_type="billing_admin_staking_settings"
+        )
+        
+        return StakingSettingsResponse(
+            daily_amount=balance.staking_daily_amount,
+            message="Staking daily amount updated",
+        )
+    except Exception as e:
+        logger.error(
+            "Error in set_staking_settings endpoint",
+            user_id=current_user.id,
+            error=str(e),
+            error_type=type(e).__name__,
+            event_type="billing_staking_settings_error"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating staking settings: {str(e)}"
+        )
 
 
 @router.post("/staking/refresh", response_model=StakingRefreshResponse)
@@ -483,46 +568,62 @@ async def adjust_credits(
     This endpoint is for development/admin purposes to manage credits
     without integrating with payment providers.
     """
-    # Determine target user ID
-    target_user_id = current_user.id
-    
-    if request.user_id is not None:
-        target_user_id = request.user_id
-    elif request.cognito_user_id is not None:
-        # Look up user by cognito_user_id
-        target_user = await user_crud.get_user_by_cognito_id(db, str(request.cognito_user_id))
-        if not target_user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User with cognito_user_id {request.cognito_user_id} not found"
-            )
-        target_user_id = target_user.id
-    
-    entry, new_balance = await billing_service.adjust_credits(
-        db=db,
-        user_id=target_user_id,
-        amount=request.amount_usd,
-        description=request.description,
-    )
-    
-    action = "added" if request.amount_usd >= 0 else "subtracted"
-    logger.info(
-        f"Manual credit adjustment by admin: {action}",
-        user_id=str(target_user_id),
-        admin_user_id=str(current_user.id),
-        amount=str(request.amount_usd),
-        new_balance=str(new_balance),
-        event_type="billing_admin_credit_adjust"
-    )
-    
-    message = f"Credits {action} successfully"
-    
-    return ManualTopupResponse(
-        ledger_entry_id=entry.id,
-        amount_added=request.amount_usd,
-        new_paid_balance=new_balance,
-        message=message,
-    )
+    try:
+        # Determine target user ID
+        target_user_id = current_user.id
+        
+        if request.user_id is not None:
+            target_user_id = request.user_id
+        elif request.cognito_user_id is not None:
+            # Look up user by cognito_user_id
+            target_user = await user_crud.get_user_by_cognito_id(db, str(request.cognito_user_id))
+            if not target_user:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User with cognito_user_id {request.cognito_user_id} not found"
+                )
+            target_user_id = target_user.id
+        
+        entry, new_balance = await billing_service.adjust_credits(
+            db=db,
+            user_id=target_user_id,
+            amount=request.amount_usd,
+            description=request.description,
+        )
+        
+        action = "added" if request.amount_usd >= 0 else "subtracted"
+        logger.info(
+            f"Manual credit adjustment by admin: {action}",
+            user_id=str(target_user_id),
+            admin_user_id=str(current_user.id),
+            amount=str(request.amount_usd),
+            new_balance=str(new_balance),
+            event_type="billing_admin_credit_adjust"
+        )
+        
+        message = f"Credits {action} successfully"
+        
+        return ManualTopupResponse(
+            ledger_entry_id=entry.id,
+            amount_added=request.amount_usd,
+            new_paid_balance=new_balance,
+            message=message,
+        )
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        logger.error(
+            "Error in adjust_credits endpoint",
+            user_id=current_user.id,
+            error=str(e),
+            error_type=type(e).__name__,
+            event_type="billing_credit_adjust_error"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error adjusting credits: {str(e)}"
+        )
 
 
 # Export router
