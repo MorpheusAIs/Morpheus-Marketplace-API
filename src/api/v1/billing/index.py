@@ -31,6 +31,8 @@ from ....schemas.billing import (
     StakingRefreshResponse,
     ManualTopupRequest,
     ManualTopupResponse,
+    OverageSettingsRequest,
+    OverageSettingsResponse,
     LedgerStatusEnum,
     LedgerEntryTypeEnum,
 )
@@ -115,6 +117,58 @@ async def get_balance(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching balance: {str(e)}"
+        )
+
+
+# === Overage Settings Endpoint ===
+
+@router.put("/settings/overage", response_model=OverageSettingsResponse)
+async def update_overage_setting(
+    request: OverageSettingsRequest,
+    db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Toggle the "Allow Overages" setting for the authenticated user.
+    
+    When **enabled** (`allow_overage: true`):
+    - If your Daily Staking Allowance is exhausted, the system automatically
+      deducts from your paid Credit Balance to prevent service interruption.
+    
+    When **disabled** (`allow_overage: false`, default):
+    - Requests will fail with an `insufficient_balance` error once your
+      Daily Staking Allowance is depleted. Your paid Credit Balance is not touched.
+    """
+    try:
+        balance = await credits_crud.set_allow_overage(
+            db=db,
+            user_id=current_user.id,
+            allow=request.allow_overage,
+        )
+        
+        state = "enabled" if balance.allow_overage else "disabled"
+        logger.info(
+            f"Overage setting {state}",
+            user_id=current_user.id,
+            allow_overage=balance.allow_overage,
+            event_type="billing_overage_setting_updated",
+        )
+        
+        return OverageSettingsResponse(
+            allow_overage=balance.allow_overage,
+            message=f"Allow overages {state}",
+        )
+    except Exception as e:
+        logger.error(
+            "Error updating overage setting",
+            user_id=current_user.id,
+            error=str(e),
+            error_type=type(e).__name__,
+            event_type="billing_overage_setting_error",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating overage setting: {str(e)}",
         )
 
 

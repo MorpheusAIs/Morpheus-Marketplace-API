@@ -449,6 +449,7 @@ class StakingService:
                     balance.staking_daily_amount = daily_amount
                     balance.staking_available = daily_amount
                     balance.staking_refresh_date = today
+                    balance.is_staker = daily_amount > 0
                     balance.updated_at = datetime.utcnow()
                     
                     # Commit all changes for this user atomically

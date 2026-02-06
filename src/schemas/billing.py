@@ -73,6 +73,19 @@ class BalanceResponse(BaseModel):
     paid: PaidBalanceInfo
     staking: StakingBalanceInfo
     total_available: DecimalStr = Field(..., description="Total available credits (paid + staking)")
+    is_staker: bool = Field(
+        default=False,
+        description="True if user has linked wallets with active MOR stake.",
+    )
+    allow_overage: bool = Field(
+        default=False,
+        description=(
+            "Stakers only. When enabled, the system automatically uses your paid Credit Balance "
+            "after the Daily Staking Allowance is exhausted, preventing service interruption. "
+            "When disabled, requests will fail once staking credits are depleted. "
+            "This setting has no effect for non-stakers."
+        ),
+    )
     currency: str = Field(default="USD", description="Currency code")
     
     model_config = ConfigDict(from_attributes=True)
@@ -197,6 +210,26 @@ class StakingSettingsResponse(BaseModel):
     """Response for staking settings update."""
     daily_amount: DecimalStr
     message: str = "Staking daily amount updated"
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OverageSettingsRequest(BaseModel):
+    """Request for PUT /billing/settings/overage."""
+    allow_overage: bool = Field(
+        ...,
+        description=(
+            "When enabled, the system automatically uses your paid Credit Balance "
+            "after the Daily Staking Allowance is exhausted. "
+            "When disabled, requests will fail once staking credits are depleted."
+        ),
+    )
+
+
+class OverageSettingsResponse(BaseModel):
+    """Response for overage settings update."""
+    allow_overage: bool
+    message: str
     
     model_config = ConfigDict(from_attributes=True)
 
