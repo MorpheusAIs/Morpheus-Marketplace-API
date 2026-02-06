@@ -310,17 +310,3 @@ class RefundResponse(BaseModel):
     amount_refunded: DecimalStr
     success: bool
     error: Optional[str] = None
-
-
-# === Billing Preferences Schemas ===
-
-class BillingPreferencesResponse(BaseModel):
-    allow_overages: bool = Field(
-        ...,
-        description="When enabled, automatically deduct from Credit Balance if Daily Staking Allowance is exhausted"
-    )
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-

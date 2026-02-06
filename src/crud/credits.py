@@ -403,8 +403,8 @@ async def get_usage_entries(
         count_query = count_query.where(CreditLedger.created_at <= normalized_to_date)
     
     if model_filter is not None:
-        query = query.where(CreditLedger.model == model_filter)
-        count_query = count_query.where(CreditLedger.model == model_filter)
+        query = query.where(CreditLedger.model_name == model_filter)
+        count_query = count_query.where(CreditLedger.model_name == model_filter)
     
     # Order and paginate
     query = query.order_by(CreditLedger.created_at.desc()).offset(offset).limit(limit)
