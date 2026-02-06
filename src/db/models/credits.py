@@ -1,7 +1,7 @@
 """
 Credit ledger and account balance models for the billing system.
 """
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, TEXT, Enum, Numeric, Date
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, TEXT, Enum, Numeric, Date, Boolean
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -101,6 +101,12 @@ class CreditAccountBalance(Base):
     staking_daily_amount = Column(Numeric(20, 8), nullable=False, default=0)
     staking_refresh_date = Column(Date, nullable=True)
     staking_available = Column(Numeric(20, 8), nullable=False, default=0)
+    
+    # Staker flag: cached from wallet links, set instantly on link/unlink and during daily sync
+    is_staker = Column(Boolean, nullable=False, default=False, server_default="false")
+    
+    # Overage setting (stakers only): when True, paid balance is used after staking is exhausted
+    allow_overage = Column(Boolean, nullable=False, default=False, server_default="false")
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
