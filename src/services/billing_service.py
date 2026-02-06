@@ -68,6 +68,8 @@ class BillingService:
             paid=paid_info,
             staking=staking_info,
             total_available=balance.total_available,
+            is_staker=balance.is_staker,
+            allow_overage=balance.allow_overage,
             currency="USD",
         )
     
@@ -212,9 +214,20 @@ class BillingService:
         
         estimated_cost = estimate.estimated_total_cost
         
-        # Check balance
+        # Check balance based on user class:
+        # - Non-staker or staker not yet synced: use paid balance
+        # - Staker with allow_overage: use staking + paid
+        # - Staker without allow_overage: use staking only
         balance = await credits_crud.get_or_create_balance(db, user_id)
-        available = balance.total_available
+        is_staker = balance.is_staker
+        has_staking = (balance.staking_daily_amount or Decimal("0")) > 0
+        
+        if not is_staker or not has_staking:
+            available = balance.paid_available
+        elif balance.allow_overage:
+            available = balance.total_available
+        else:
+            available = balance.staking_available or Decimal("0")
         
         if available < estimated_cost:
             logger.warning(
@@ -224,6 +237,8 @@ class BillingService:
                 ledger_entry_id=str(request.ledger_entry_id),
                 available=str(available),
                 estimated_cost=str(estimated_cost),
+                is_staker=is_staker,
+                allow_overage=balance.allow_overage,
             )
             return UsageHoldResponse(
                 success=False,
@@ -339,13 +354,21 @@ class BillingService:
         input_price_per_million = usage_cost.input_price_per_million
         output_price_per_million = usage_cost.output_price_per_million
         
-        # Get current balance for staking-first logic
+        # Get current balance for spending split logic
         balance = await credits_crud.get_or_create_balance(db, user_id)
         staking_available = balance.staking_available or Decimal("0")
+        is_staker = balance.is_staker
+        has_staking = (balance.staking_daily_amount or Decimal("0")) > 0
         
-        # Spend staking first
-        staking_charge = min(total_cost, staking_available)
-        paid_charge = total_cost - staking_charge
+        # Spending split based on user class:
+        # - Non-staker or staker not yet synced: all from paid
+        # - Active staker: staking first, paid remainder only if allow_overage
+        if not is_staker or not has_staking:
+            staking_charge = Decimal("0")
+            paid_charge = total_cost
+        else:
+            staking_charge = min(total_cost, staking_available)
+            paid_charge = (total_cost - staking_charge) if balance.allow_overage else Decimal("0")
         
         # Store the original hold amount for cache adjustment
         original_hold = hold_entry.amount_paid  # Negative

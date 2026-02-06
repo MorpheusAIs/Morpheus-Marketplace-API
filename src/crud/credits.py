@@ -105,6 +105,24 @@ async def set_staking_daily_amount(db: AsyncSession, user_id: int, amount: Decim
     return balance
 
 
+async def set_allow_overage(db: AsyncSession, user_id: int, allow: bool) -> CreditAccountBalance:
+    """
+    Toggle the allow_overage flag for an account.
+    
+    When enabled, the system automatically deducts from the paid Credit Balance
+    after the Daily Staking Allowance is exhausted.
+    """
+    balance = await get_or_create_balance(db, user_id)
+    balance.allow_overage = allow
+    balance.updated_at = datetime.utcnow()
+    
+    await db.commit()
+    await db.refresh(balance)
+    
+    logger.info("Updated allow_overage setting", user_id=user_id, allow_overage=allow)
+    return balance
+
+
 # === Ledger Entry Operations ===
 
 async def get_ledger_entry_by_id(

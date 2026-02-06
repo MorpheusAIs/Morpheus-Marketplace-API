@@ -19,6 +19,7 @@ from ....db.database import get_db_session
 from ....db.models import User, WalletLink, NONCE_TTL_SECONDS
 from ....dependencies import get_current_user
 from ....crud import wallet as wallet_crud
+from ....crud import credits as credits_crud
 from ....schemas.wallet import (
     NonceResponse,
     WalletLinkRequest,
@@ -214,6 +215,15 @@ async def link_wallet(
             detail="This wallet is already linked to another account."
         )
     
+    # 8. Mark user as staker if this wallet has stake
+    if staked_amount > 0:
+        balance = await credits_crud.get_or_create_balance(db, current_user.id)
+        if not balance.is_staker:
+            balance.is_staker = True
+            balance.updated_at = datetime.utcnow()
+            await db.commit()
+            link_logger.info("User marked as staker", event_type="user_marked_staker")
+    
     link_logger.info(
         "Wallet linked successfully",
         wallet_link_id=wallet_link.id,
@@ -323,6 +333,17 @@ async def unlink_wallet(
         )
     
     await wallet_crud.delete_wallet_link(db, wallet_link)
+    
+    # Re-check if user still has any staked wallets
+    remaining = await wallet_crud.get_user_wallet_links(db, current_user.id)
+    has_stake = any(Decimal(str(w.staked_amount or 0)) > 0 for w in remaining)
+    if not has_stake:
+        balance = await credits_crud.get_or_create_balance(db, current_user.id)
+        if balance.is_staker:
+            balance.is_staker = False
+            balance.updated_at = datetime.utcnow()
+            await db.commit()
+            delete_logger.info("User no longer a staker", event_type="user_unmarked_staker")
     
     delete_logger.info("Wallet unlinked successfully", event_type="wallet_unlinked")
     
