@@ -247,7 +247,23 @@ class BillingService:
                 available_balance=available,
             )
         
-        # Hold amount is negative (debit)
+        # Split hold between staking and paid based on user class
+        # (mirrors the balance check logic above)
+        staking_available = balance.staking_available or Decimal("0")
+        if not is_staker or not has_staking:
+            # Non-staker: entire hold from paid
+            staking_hold = Decimal("0")
+            paid_hold = estimated_cost
+        elif balance.allow_overage:
+            # Staker with overage: staking first, paid for remainder
+            staking_hold = min(estimated_cost, staking_available)
+            paid_hold = estimated_cost - staking_hold
+        else:
+            # Staker without overage: staking only
+            staking_hold = estimated_cost
+            paid_hold = Decimal("0")
+        
+        # Hold amounts are negative (debit)
         hold_amount = -abs(estimated_cost)
         
         # Create ledger entry with the provided ID
@@ -257,8 +273,8 @@ class BillingService:
             entry_type=LedgerEntryType.usage_hold,
             status=LedgerStatus.pending,
             entry_id=request.ledger_entry_id,
-            amount_paid=hold_amount,  # Negative for hold
-            amount_staking=Decimal("0"),
+            amount_paid=-paid_hold,  # Negative for hold
+            amount_staking=-staking_hold,  # Negative for hold
             request_id=request.request_id,
             api_key_id=request.api_key_id,
             model_name=request.model_name,
@@ -271,11 +287,12 @@ class BillingService:
             endpoint=request.endpoint,
         )
         
-        # Update balance cache - add to pending holds
+        # Update balance cache - deduct hold from appropriate buckets
         await credits_crud.update_balance(
             db=db,
             user_id=user_id,
-            paid_holds_delta=hold_amount,  # Negative
+            paid_holds_delta=-paid_hold,  # Negative (reduces paid_available)
+            staking_delta=-staking_hold,  # Negative (reduces staking_available)
         )
         
         logger.info(
@@ -283,6 +300,8 @@ class BillingService:
             user_id=user_id,
             request_id=request.request_id,
             hold_amount=str(hold_amount),
+            paid_hold=str(paid_hold),
+            staking_hold=str(staking_hold),
             estimated_cost=str(estimated_cost),
             ledger_entry_id=str(entry.id),
         )
@@ -370,8 +389,9 @@ class BillingService:
             staking_charge = min(total_cost, staking_available)
             paid_charge = (total_cost - staking_charge) if balance.allow_overage else Decimal("0")
         
-        # Store the original hold amount for cache adjustment
-        original_hold = hold_entry.amount_paid  # Negative
+        # Store the original hold amounts for cache adjustment (both are negative)
+        original_hold_paid = hold_entry.amount_paid  # Negative
+        original_hold_staking = hold_entry.amount_staking  # Negative
         
         # Update the ledger entry (convert hold to charge)
         hold_entry = await credits_crud.update_ledger_entry(
@@ -392,15 +412,16 @@ class BillingService:
         )
         
         # Update balance cache:
-        # 1. Remove the old hold from pending_holds
+        # 1. Remove the old paid hold from pending_holds
         # 2. Apply the paid charge to posted_balance
-        # 3. Decrease staking_available
+        # 3. Release the old staking hold and apply staking charge
+        #    Net staking delta = release_hold (-original_hold_staking) + charge (-staking_charge)
         await credits_crud.update_balance(
             db=db,
             user_id=user_id,
-            paid_holds_delta=-original_hold,  # Remove old hold (add back the negative)
-            paid_posted_delta=-paid_charge,  # Apply charge (negative)
-            staking_delta=-staking_charge,  # Decrease staking
+            paid_holds_delta=-original_hold_paid,  # Remove paid hold (add back the negative)
+            paid_posted_delta=-paid_charge,  # Apply paid charge (negative)
+            staking_delta=-original_hold_staking - staking_charge,  # Release staking hold + apply staking charge
         )
         
         logger.info(
@@ -458,8 +479,9 @@ class BillingService:
                 error="Cannot void a posted entry",
             )
         
-        # Store original hold amount for cache adjustment
-        original_hold = hold_entry.amount_paid  # Negative
+        # Store original hold amounts for cache adjustment (both are negative)
+        original_hold_paid = hold_entry.amount_paid  # Negative
+        original_hold_staking = hold_entry.amount_staking  # Negative
         
         # Update the ledger entry to voided
         hold_entry = await credits_crud.update_ledger_entry(
@@ -472,11 +494,12 @@ class BillingService:
             failure_reason=request.failure_reason,
         )
         
-        # Update balance cache - remove the hold
+        # Update balance cache - release the hold from both buckets
         await credits_crud.update_balance(
             db=db,
             user_id=user_id,
-            paid_holds_delta=-original_hold,  # Remove the hold (add back the negative)
+            paid_holds_delta=-original_hold_paid,  # Release paid hold (add back the negative)
+            staking_delta=-original_hold_staking,  # Release staking hold (add back the negative)
         )
         
         logger.info(
