@@ -24,7 +24,7 @@ from sqlalchemy import select
 
 from ..core.config import settings
 from ..core.logging_config import get_api_logger
-from ..db.models import WalletLink, LedgerStatus, LedgerEntryType
+from ..db.models import WalletLink, CreditAccountBalance, LedgerStatus, LedgerEntryType
 from ..crud import credits as credits_crud
 from .mor_pricing_service import get_mor_pricing_service
 from .mor_emission_service import get_mor_emission_service
@@ -477,6 +477,49 @@ class StakingService:
                         event_type="user_sync_failed"
                     )
             
+            # Step 7: Zero out staking balances for users who unlinked all wallets
+            # These users no longer appear in wallet_links but may still have
+            # non-zero staking_daily_amount / staking_available from a previous sync
+            linked_user_ids = set(user_wallets.keys())
+            users_zeroed = 0
+            
+            try:
+                stale_query = select(CreditAccountBalance).where(
+                    CreditAccountBalance.staking_daily_amount > 0,
+                )
+                stale_result = await db.execute(stale_query)
+                stale_balances = list(stale_result.scalars().all())
+                
+                for balance in stale_balances:
+                    if balance.user_id not in linked_user_ids:
+                        balance.staking_daily_amount = Decimal("0")
+                        balance.staking_available = Decimal("0")
+                        balance.staking_refresh_date = today
+                        balance.is_staker = False
+                        balance.updated_at = datetime.utcnow()
+                        users_zeroed += 1
+                        
+                        sync_logger.info(
+                            "Zeroed staking balance for unlinked user",
+                            user_id=balance.user_id,
+                            event_type="staking_balance_zeroed"
+                        )
+                
+                if users_zeroed > 0:
+                    await db.commit()
+                    sync_logger.info(
+                        "Zeroed staking balances for unlinked users",
+                        users_zeroed=users_zeroed,
+                        event_type="unlinked_users_zeroed"
+                    )
+            except Exception as e:
+                await db.rollback()
+                sync_logger.error(
+                    "Failed to zero staking balances for unlinked users",
+                    error=str(e),
+                    event_type="unlinked_users_zero_failed"
+                )
+            
             duration = (datetime.utcnow() - start_time).total_seconds()
             
             summary = {
@@ -493,6 +536,7 @@ class StakingService:
                 "users_processed": users_processed,
                 "users_skipped": users_skipped,  # Already refreshed today
                 "users_failed": users_failed,
+                "users_zeroed": users_zeroed,  # Unlinked users whose balance was reset
             }
             
             sync_logger.info(
