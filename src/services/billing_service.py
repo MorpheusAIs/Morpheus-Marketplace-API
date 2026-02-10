@@ -73,6 +73,36 @@ class BillingService:
             currency="USD",
         )
     
+    async def reconcile_balance(self, db: AsyncSession, user_id: int) -> BalanceResponse:
+        """
+        Reconcile the cached balance against the ledger (source of truth).
+        Fixes drift in paid_pending_holds caused by partial transaction failures.
+        
+        Returns the corrected balance.
+        """
+        balance = await credits_crud.reconcile_all_balances(db, user_id)
+        
+        paid_info = PaidBalanceInfo(
+            posted_balance=balance.paid_posted_balance or Decimal("0"),
+            pending_holds=balance.paid_pending_holds or Decimal("0"),
+            available=balance.paid_available,
+        )
+        
+        staking_info = StakingBalanceInfo(
+            daily_amount=balance.staking_daily_amount or Decimal("0"),
+            refresh_date=balance.staking_refresh_date,
+            available=balance.staking_available or Decimal("0"),
+        )
+        
+        return BalanceResponse(
+            paid=paid_info,
+            staking=staking_info,
+            total_available=balance.total_available,
+            is_staker=balance.is_staker,
+            allow_overage=balance.allow_overage,
+            currency="USD",
+        )
+    
     # === Staking Operations ===
     
     async def refresh_staking(
@@ -218,11 +248,14 @@ class BillingService:
         # - Non-staker or staker not yet synced: use paid balance
         # - Staker with allow_overage: use staking + paid
         # - Staker without allow_overage: use staking only
-        balance = await credits_crud.get_or_create_balance(db, user_id)
+        # FOR UPDATE: lock the balance row to prevent concurrent workers from
+        # both passing the sufficiency check and creating holds that exceed
+        # available funds.  The lock is held until the commit at the end.
+        balance = await credits_crud.get_or_create_balance(db, user_id, for_update=True)
         is_staker = balance.is_staker
         has_staking = (balance.staking_daily_amount or Decimal("0")) > 0
         
-        if not is_staker or not has_staking:
+        if not is_staker and not has_staking:
             available = balance.paid_available
         elif balance.allow_overage:
             available = balance.total_available
@@ -266,7 +299,8 @@ class BillingService:
         # Hold amounts are negative (debit)
         hold_amount = -abs(estimated_cost)
         
-        # Create ledger entry with the provided ID
+        # Create ledger entry and update balance in a single transaction
+        # Both operations use auto_commit=False, then we commit once at the end
         entry = await credits_crud.create_ledger_entry(
             db=db,
             user_id=user_id,
@@ -285,6 +319,7 @@ class BillingService:
             tokens_output=request.estimated_output_tokens,
             tokens_total=request.estimated_input_tokens + request.estimated_output_tokens,
             endpoint=request.endpoint,
+            auto_commit=False,
         )
         
         # Update balance cache - deduct hold from appropriate buckets
@@ -293,7 +328,12 @@ class BillingService:
             user_id=user_id,
             paid_holds_delta=-paid_hold,  # Negative (reduces paid_available)
             staking_delta=-staking_hold,  # Negative (reduces staking_available)
+            auto_commit=False,
         )
+        
+        # Commit both ledger entry and balance update atomically
+        await db.commit()
+        await db.refresh(entry)
         
         logger.info(
             "Created usage hold",
@@ -325,8 +365,8 @@ class BillingService:
         Updates the SAME ledger row and adjusts the balance cache.
         Implements staking-first spending strategy.
         """
-        # Find the hold entry by ID
-        hold_entry = await credits_crud.get_ledger_entry_by_id(db, request.ledger_entry_id)
+        # Find the hold entry by ID (FOR UPDATE to prevent concurrent finalize/void)
+        hold_entry = await credits_crud.get_ledger_entry_by_id(db, request.ledger_entry_id, for_update=True)
         
         if not hold_entry:
             logger.error(
@@ -393,7 +433,7 @@ class BillingService:
         original_hold_paid = hold_entry.amount_paid  # Negative
         original_hold_staking = hold_entry.amount_staking  # Negative
         
-        # Update the ledger entry (convert hold to charge)
+        # Update the ledger entry and balance in a single transaction
         hold_entry = await credits_crud.update_ledger_entry(
             db=db,
             entry=hold_entry,
@@ -409,6 +449,7 @@ class BillingService:
             model_name=model_name,
             model_id=request.model_id,
             endpoint=request.endpoint or hold_entry.endpoint,
+            auto_commit=False,
         )
         
         # Update balance cache:
@@ -422,7 +463,12 @@ class BillingService:
             paid_holds_delta=-original_hold_paid,  # Remove paid hold (add back the negative)
             paid_posted_delta=-paid_charge,  # Apply paid charge (negative)
             staking_delta=-original_hold_staking - staking_charge,  # Release staking hold + apply staking charge
+            auto_commit=False,
         )
+        
+        # Commit both ledger update and balance update atomically
+        await db.commit()
+        await db.refresh(hold_entry)
         
         logger.info(
             "Finalized usage",
@@ -450,8 +496,8 @@ class BillingService:
         """
         Void a usage hold when a request fails before producing billable output.
         """
-        # Find the hold entry by ID
-        hold_entry = await credits_crud.get_ledger_entry_by_id(db, request.ledger_entry_id)
+        # Find the hold entry by ID (FOR UPDATE to prevent concurrent void/finalize)
+        hold_entry = await credits_crud.get_ledger_entry_by_id(db, request.ledger_entry_id, for_update=True)
         
         if not hold_entry:
             logger.warning(
@@ -483,7 +529,7 @@ class BillingService:
         original_hold_paid = hold_entry.amount_paid  # Negative
         original_hold_staking = hold_entry.amount_staking  # Negative
         
-        # Update the ledger entry to voided
+        # Update the ledger entry and balance in a single transaction
         hold_entry = await credits_crud.update_ledger_entry(
             db=db,
             entry=hold_entry,
@@ -492,6 +538,7 @@ class BillingService:
             amount_staking=Decimal("0"),
             failure_code=request.failure_code,
             failure_reason=request.failure_reason,
+            auto_commit=False,
         )
         
         # Update balance cache - release the hold from both buckets
@@ -500,7 +547,12 @@ class BillingService:
             user_id=user_id,
             paid_holds_delta=-original_hold_paid,  # Release paid hold (add back the negative)
             staking_delta=-original_hold_staking,  # Release staking hold (add back the negative)
+            auto_commit=False,
         )
+        
+        # Commit both ledger update and balance update atomically
+        await db.commit()
+        await db.refresh(hold_entry)
         
         logger.info(
             "Voided usage hold",
@@ -566,7 +618,7 @@ class BillingService:
         refund_paid = refund_amount * paid_ratio
         refund_staking = refund_amount * staking_ratio
         
-        # Create refund ledger entry
+        # Create refund ledger entry and update balance in a single transaction
         entry = await credits_crud.create_ledger_entry(
             db=db,
             user_id=user_id,
@@ -578,6 +630,7 @@ class BillingService:
             related_entry_id=original_entry.id,
             request_id=request.request_id,
             description=f"Refund: {request.reason}",
+            auto_commit=False,
         )
         
         # Update balance cache
@@ -586,7 +639,12 @@ class BillingService:
             user_id=user_id,
             paid_posted_delta=refund_paid,
             staking_delta=refund_staking,
+            auto_commit=False,
         )
+        
+        # Commit both atomically
+        await db.commit()
+        await db.refresh(entry)
         
         logger.info(
             "Created refund",
@@ -629,7 +687,7 @@ class BillingService:
         
         idempotency_key = f"adjust:{user_id}:{datetime.utcnow().isoformat()}:{uuid.uuid4()}"
         
-        # Create ledger entry - amount sign determines credit vs debit
+        # Create ledger entry and update balance in a single transaction
         entry = await credits_crud.create_ledger_entry(
             db=db,
             user_id=user_id,
@@ -639,6 +697,7 @@ class BillingService:
             amount_paid=amount,  # Positive for credit, negative for debit
             amount_staking=Decimal("0"),  # Adjustments only affect paid bucket
             description=description or default_description,
+            auto_commit=False,
         )
         
         # Update balance cache
@@ -646,7 +705,13 @@ class BillingService:
             db=db,
             user_id=user_id,
             paid_posted_delta=amount,
+            auto_commit=False,
         )
+        
+        # Commit both atomically
+        await db.commit()
+        await db.refresh(entry)
+        await db.refresh(balance)
         
         action = "Added" if amount >= 0 else "Subtracted"
         logger.info(

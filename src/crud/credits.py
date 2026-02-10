@@ -29,13 +29,24 @@ def _normalize_datetime(dt: Optional[datetime]) -> Optional[datetime]:
 
 # === Account Balance Operations ===
 
-async def get_or_create_balance(db: AsyncSession, user_id: int) -> CreditAccountBalance:
+async def get_or_create_balance(
+    db: AsyncSession, user_id: int, for_update: bool = False
+) -> CreditAccountBalance:
     """
     Get account balance record, creating one if it doesn't exist.
+    
+    Args:
+        for_update: If True, acquires a row-level lock (SELECT ... FOR UPDATE).
+                    The lock is held until the transaction commits, serialising
+                    concurrent operations on the same user's balance.  Use this
+                    when the caller needs to read-then-write (e.g. balance
+                    sufficiency check followed by a hold creation).
     """
-    result = await db.execute(
-        select(CreditAccountBalance).where(CreditAccountBalance.user_id == user_id)
-    )
+    query = select(CreditAccountBalance).where(CreditAccountBalance.user_id == user_id)
+    if for_update:
+        query = query.with_for_update()
+    
+    result = await db.execute(query)
     balance = result.scalar_one_or_none()
     
     if not balance:
@@ -51,6 +62,15 @@ async def get_or_create_balance(db: AsyncSession, user_id: int) -> CreditAccount
         await db.commit()
         await db.refresh(balance)
         logger.info("Created new account balance record", user_id=user_id)
+        
+        # If caller requested a lock, re-acquire with FOR UPDATE
+        if for_update:
+            result = await db.execute(
+                select(CreditAccountBalance)
+                .where(CreditAccountBalance.user_id == user_id)
+                .with_for_update()
+            )
+            balance = result.scalar_one()
     
     return balance
 
@@ -63,29 +83,70 @@ async def update_balance(
     staking_delta: Decimal = Decimal("0"),
     staking_daily_amount: Optional[Decimal] = None,
     staking_refresh_date: Optional[date] = None,
+    auto_commit: bool = True,
 ) -> CreditAccountBalance:
     """
-    Update account balance atomically.
-    Deltas are added to existing values.
-    Optional values replace if provided.
+    Update account balance using SQL-level atomic arithmetic.
+    
+    Uses ``UPDATE ... SET column = column + delta`` to prevent lost-update race
+    conditions under concurrent access.  Python-level read-modify-write is NOT
+    used for delta operations.
+    
+    Deltas are added to existing values via server-side expressions.
+    Optional values (staking_daily_amount, staking_refresh_date) replace if provided.
+    
+    Args:
+        auto_commit: If False, the UPDATE is executed but not committed.
+                     Caller is responsible for committing the transaction.
     """
-    balance = await get_or_create_balance(db, user_id)
+    # Ensure the record exists (no-op for existing users)
+    await get_or_create_balance(db, user_id)
     
-    # Apply deltas
-    balance.paid_posted_balance = (balance.paid_posted_balance or Decimal("0")) + paid_posted_delta
-    balance.paid_pending_holds = (balance.paid_pending_holds or Decimal("0")) + paid_holds_delta
-    balance.staking_available = (balance.staking_available or Decimal("0")) + staking_delta
+    # Build SQL UPDATE with server-side arithmetic for deltas.
+    # This is atomic at the database level – concurrent transactions each see
+    # the latest committed value when the UPDATE executes, eliminating
+    # the lost-update race inherent in Python-level read-modify-write.
+    values: dict = {
+        "updated_at": datetime.utcnow(),
+    }
     
-    # Apply optional replacements
+    if paid_posted_delta != Decimal("0"):
+        values["paid_posted_balance"] = (
+            func.coalesce(CreditAccountBalance.paid_posted_balance, 0) + paid_posted_delta
+        )
+    if paid_holds_delta != Decimal("0"):
+        values["paid_pending_holds"] = (
+            func.coalesce(CreditAccountBalance.paid_pending_holds, 0) + paid_holds_delta
+        )
+    if staking_delta != Decimal("0"):
+        values["staking_available"] = (
+            func.coalesce(CreditAccountBalance.staking_available, 0) + staking_delta
+        )
+    
+    # Absolute replacements (not deltas)
     if staking_daily_amount is not None:
-        balance.staking_daily_amount = staking_daily_amount
+        values["staking_daily_amount"] = staking_daily_amount
     if staking_refresh_date is not None:
-        balance.staking_refresh_date = staking_refresh_date
+        values["staking_refresh_date"] = staking_refresh_date
     
-    balance.updated_at = datetime.utcnow()
+    stmt = (
+        update(CreditAccountBalance)
+        .where(CreditAccountBalance.user_id == user_id)
+        .values(**values)
+    )
+    await db.execute(stmt)
     
-    await db.commit()
-    await db.refresh(balance)
+    if auto_commit:
+        await db.commit()
+    
+    # Expire any stale ORM-cached object and re-read the updated row
+    # (the raw UPDATE bypasses ORM identity map, so cached objects are stale)
+    result = await db.execute(
+        select(CreditAccountBalance)
+        .where(CreditAccountBalance.user_id == user_id)
+        .execution_options(populate_existing=True)
+    )
+    balance = result.scalar_one()
     
     return balance
 
@@ -123,18 +184,113 @@ async def set_allow_overage(db: AsyncSession, user_id: int, allow: bool) -> Cred
     return balance
 
 
+# === Balance Reconciliation ===
+
+async def reconcile_pending_holds(db: AsyncSession, user_id: int) -> CreditAccountBalance:
+    """
+    Reconcile paid_pending_holds by recomputing from the ledger (source of truth).
+    
+    Sums amount_paid for all pending usage_hold entries and sets paid_pending_holds
+    to match. This fixes drift caused by partial commits where the ledger was updated
+    but the balance cache was not.
+    
+    Returns the updated balance record.
+    """
+    # Sum amount_paid from all PENDING usage_hold entries (should be negative or zero)
+    result = await db.execute(
+        select(func.coalesce(func.sum(CreditLedger.amount_paid), Decimal("0"))).where(
+            CreditLedger.user_id == user_id,
+            CreditLedger.entry_type == LedgerEntryType.usage_hold,
+            CreditLedger.status == LedgerStatus.pending,
+        )
+    )
+    actual_pending_holds = result.scalar() or Decimal("0")
+    
+    balance = await get_or_create_balance(db, user_id)
+    old_value = balance.paid_pending_holds or Decimal("0")
+    
+    if old_value != actual_pending_holds:
+        logger.warning(
+            "Balance reconciliation: paid_pending_holds mismatch detected",
+            user_id=user_id,
+            cached_value=str(old_value),
+            actual_value=str(actual_pending_holds),
+            drift=str(old_value - actual_pending_holds),
+        )
+        balance.paid_pending_holds = actual_pending_holds
+        balance.updated_at = datetime.utcnow()
+        await db.commit()
+        await db.refresh(balance)
+    else:
+        logger.info(
+            "Balance reconciliation: paid_pending_holds is consistent",
+            user_id=user_id,
+            value=str(actual_pending_holds),
+        )
+    
+    return balance
+
+
+async def reconcile_all_balances(db: AsyncSession, user_id: int) -> CreditAccountBalance:
+    """
+    Full reconciliation of paid_pending_holds AND staking_available pending holds
+    by recomputing from the ledger.
+    
+    Returns the updated balance record.
+    """
+    # Sum amount_paid for pending usage_hold entries
+    paid_result = await db.execute(
+        select(func.coalesce(func.sum(CreditLedger.amount_paid), Decimal("0"))).where(
+            CreditLedger.user_id == user_id,
+            CreditLedger.entry_type == LedgerEntryType.usage_hold,
+            CreditLedger.status == LedgerStatus.pending,
+        )
+    )
+    actual_pending_holds_paid = paid_result.scalar() or Decimal("0")
+    
+    balance = await get_or_create_balance(db, user_id)
+    old_paid_holds = balance.paid_pending_holds or Decimal("0")
+    
+    changed = False
+    if old_paid_holds != actual_pending_holds_paid:
+        logger.warning(
+            "Balance reconciliation: paid_pending_holds mismatch",
+            user_id=user_id,
+            cached=str(old_paid_holds),
+            actual=str(actual_pending_holds_paid),
+        )
+        balance.paid_pending_holds = actual_pending_holds_paid
+        changed = True
+    
+    if changed:
+        balance.updated_at = datetime.utcnow()
+        await db.commit()
+        await db.refresh(balance)
+        logger.info("Balance reconciliation complete - corrections applied", user_id=user_id)
+    else:
+        logger.info("Balance reconciliation complete - no corrections needed", user_id=user_id)
+    
+    return balance
+
+
 # === Ledger Entry Operations ===
 
 async def get_ledger_entry_by_id(
     db: AsyncSession,
-    entry_id: uuid.UUID
+    entry_id: uuid.UUID,
+    for_update: bool = False,
 ) -> Optional[CreditLedger]:
     """
     Get a ledger entry by its ID.
+    
+    Args:
+        for_update: If True, acquires a row-level lock (SELECT ... FOR UPDATE)
+                    to prevent concurrent modifications (e.g. double-void).
     """
-    result = await db.execute(
-        select(CreditLedger).where(CreditLedger.id == entry_id)
-    )
+    query = select(CreditLedger).where(CreditLedger.id == entry_id)
+    if for_update:
+        query = query.with_for_update()
+    result = await db.execute(query)
     return result.scalar_one_or_none()
 
 
@@ -220,6 +376,7 @@ async def create_ledger_entry(
     payment_source: Optional[str] = None,
     external_transaction_id: Optional[str] = None,
     payment_metadata: Optional[dict] = None,
+    auto_commit: bool = True,
 ) -> CreditLedger:
     """
     Create a new ledger entry.
@@ -232,6 +389,8 @@ async def create_ledger_entry(
         payment_metadata: Provider-specific metadata as a dict (stored as JSONB).
             Example for Stripe: {"checkout_session_id": "cs_xxx", "payment_intent_id": "pi_xxx"}
             Example for Coinbase: {"charge_id": "xxx", "charge_code": "xxx"}
+        auto_commit: If False, changes are flushed but not committed.
+                     Caller is responsible for committing the transaction.
     """
     entry = CreditLedger(
         id=entry_id or uuid.uuid4(),
@@ -263,8 +422,11 @@ async def create_ledger_entry(
     )
     
     db.add(entry)
-    await db.commit()
-    await db.refresh(entry)
+    if auto_commit:
+        await db.commit()
+        await db.refresh(entry)
+    else:
+        await db.flush()
     
     logger.info(
         "Created ledger entry",
@@ -296,9 +458,14 @@ async def update_ledger_entry(
     endpoint: Optional[str] = None,
     failure_code: Optional[str] = None,
     failure_reason: Optional[str] = None,
+    auto_commit: bool = True,
 ) -> CreditLedger:
     """
     Update an existing ledger entry.
+    
+    Args:
+        auto_commit: If False, changes are flushed but not committed.
+                     Caller is responsible for committing the transaction.
     """
     if status is not None:
         entry.status = status
@@ -331,8 +498,11 @@ async def update_ledger_entry(
     
     entry.updated_at = datetime.utcnow()
     
-    await db.commit()
-    await db.refresh(entry)
+    if auto_commit:
+        await db.commit()
+        await db.refresh(entry)
+    else:
+        await db.flush()
     
     return entry
 
