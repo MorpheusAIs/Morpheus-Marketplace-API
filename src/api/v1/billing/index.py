@@ -679,6 +679,54 @@ async def adjust_credits(
         )
 
 
+# === Balance Reconciliation (Admin endpoint) ===
+
+@router.post("/balance/reconcile", response_model=BalanceResponse)
+async def reconcile_balance(
+    user_id: Optional[int] = Query(default=None, description="Target user ID (defaults to current user)"),
+    db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+    _admin_verified: bool = Depends(verify_billing_admin_secret),
+):
+    """
+    Reconcile the cached balance against the ledger (source of truth).
+    
+    **Admin/Dev endpoint** - Requires X-Admin-Secret header.
+    
+    Fixes drift in `paid_pending_holds` caused by partial transaction failures
+    where the ledger entry was updated but the balance cache was not.
+    
+    Recomputes `paid_pending_holds` from the sum of all pending usage_hold entries in the ledger.
+    
+    Parameters:
+    - user_id: Target user ID (defaults to current user)
+    """
+    try:
+        target_user_id = user_id if user_id is not None else current_user.id
+        
+        logger.info(
+            "Balance reconciliation triggered by admin",
+            target_user_id=target_user_id,
+            admin_user_id=current_user.id,
+            event_type="billing_admin_reconcile",
+        )
+        
+        result = await billing_service.reconcile_balance(db, target_user_id)
+        return result
+    except Exception as e:
+        logger.error(
+            "Error in reconcile_balance endpoint",
+            user_id=current_user.id,
+            error=str(e),
+            error_type=type(e).__name__,
+            event_type="billing_reconcile_error",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error reconciling balance: {str(e)}",
+        )
+
+
 # Export router
 billing_router = router
 
