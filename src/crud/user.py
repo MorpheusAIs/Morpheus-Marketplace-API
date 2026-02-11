@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import User
 from src.schemas.user import UserCreate, UserUpdate
+from src.services.cache_service import cache_service
 from src.core.logging_config import get_auth_logger
 
 logger = get_auth_logger()
@@ -114,6 +115,9 @@ async def update_user(
                updated_fields=list(update_data.keys()),
                event_type="user_updated")
     
+    # Invalidate user cache
+    await cache_service.delete("user", db_user.cognito_user_id)
+    
     return db_user
 
 async def get_all_users(db: AsyncSession, skip: int = 0, limit: int = 100) -> List[User]:
@@ -157,6 +161,9 @@ async def delete_user(db: AsyncSession, user_id: int) -> Optional[User]:
                cognito_user_id=user.cognito_user_id,
                email=user.email,
                event_type="user_deletion")
+    
+    # Invalidate user cache
+    await cache_service.delete("user", user.cognito_user_id)
     
     # Delete user
     await db.delete(user)

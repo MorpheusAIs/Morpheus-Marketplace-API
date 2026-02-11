@@ -265,6 +265,12 @@ class Settings(BaseSettings):
     REDIS_SOCKET_TIMEOUT: float = Field(default=float(os.getenv("REDIS_SOCKET_TIMEOUT", "5.0")))
     REDIS_SOCKET_CONNECT_TIMEOUT: float = Field(default=float(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT", "5.0")))
     
+    # Cache Settings
+    # Enable Redis caching for API keys, users, sessions, and JWKS
+    # When disabled, all requests will hit the database directly
+    # Default: false (opt-in for safety - requires explicit enablement)
+    CACHE_ENABLED: bool = Field(default=os.getenv("CACHE_ENABLED", "false").lower() == "true")
+    
     # Rate Limiting Settings
     # Enable/disable rate limiting globally
     RATE_LIMIT_ENABLED: bool = Field(default=os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true")
