@@ -106,7 +106,7 @@ class CreditAccountBalance(Base):
     is_staker = Column(Boolean, nullable=False, default=False, server_default="false")
     
     # Overage setting (stakers only): when True, paid balance is used after staking is exhausted
-    allow_overage = Column(Boolean, nullable=False, default=False, server_default="false")
+    allow_overage = Column(Boolean, nullable=False, default=True, server_default="true")
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
