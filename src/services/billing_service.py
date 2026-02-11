@@ -199,6 +199,54 @@ class BillingService:
             message="Staking refreshed successfully",
         )
     
+    # === Spending Split Logic ===
+    
+    @staticmethod
+    def _compute_spending_split(
+        balance: "CreditAccountBalance",
+        amount: Decimal,
+        staking_reserved: Decimal = Decimal("0"),
+    ) -> Tuple[Decimal, Decimal, Decimal]:
+        """
+        Determine how to split a charge/hold between staking and paid buckets,
+        and what the effective available balance is for sufficiency checks.
+        
+        Rules:
+            - No staking at all (not is_staker AND no daily amount): entire amount from paid.
+            - Has staking with allow_overage: staking first, paid for remainder.
+            - Has staking without allow_overage: staking only, nothing from paid.
+        
+        Args:
+            balance: The current cached balance row.
+            amount: The total amount to split.
+            staking_reserved: Staking credits already held for THIS transaction
+                (e.g. from a pending hold being finalized). These are added back
+                to staking_available so the split sees the full pot that belongs
+                to this request.
+        
+        Returns:
+            (available, staking_amount, paid_amount)
+            - available: effective balance to check sufficiency against
+            - staking_amount: portion of `amount` to debit from staking
+            - paid_amount: portion of `amount` to debit from paid
+        """
+        is_staker = balance.is_staker
+        has_staking = (balance.staking_daily_amount or Decimal("0")) > 0
+        staking_available = (balance.staking_available or Decimal("0")) + staking_reserved
+        
+        if not is_staker and not has_staking:
+            # No staking credits at all — use paid balance only
+            return balance.paid_available, Decimal("0"), amount
+        
+        if balance.allow_overage:
+            # Staking first, paid covers the rest
+            staking_part = min(amount, staking_available)
+            paid_part = amount - staking_part
+            return balance.total_available + staking_reserved, staking_part, paid_part
+        
+        # Staking only — no paid fallback
+        return staking_available, min(amount, staking_available), Decimal("0")
+    
     # === Usage Hold/Finalize/Void Operations ===
     
     async def create_usage_hold(
@@ -244,23 +292,12 @@ class BillingService:
         
         estimated_cost = estimate.estimated_total_cost
         
-        # Check balance based on user class:
-        # - Non-staker or staker not yet synced: use paid balance
-        # - Staker with allow_overage: use staking + paid
-        # - Staker without allow_overage: use staking only
         # FOR UPDATE: lock the balance row to prevent concurrent workers from
         # both passing the sufficiency check and creating holds that exceed
         # available funds.  The lock is held until the commit at the end.
         balance = await credits_crud.get_or_create_balance(db, user_id, for_update=True)
-        is_staker = balance.is_staker
-        has_staking = (balance.staking_daily_amount or Decimal("0")) > 0
         
-        if not is_staker and not has_staking:
-            available = balance.paid_available
-        elif balance.allow_overage:
-            available = balance.total_available
-        else:
-            available = balance.staking_available or Decimal("0")
+        available, staking_hold, paid_hold = self._compute_spending_split(balance, estimated_cost)
         
         if available < estimated_cost:
             logger.warning(
@@ -270,7 +307,7 @@ class BillingService:
                 ledger_entry_id=str(request.ledger_entry_id),
                 available=str(available),
                 estimated_cost=str(estimated_cost),
-                is_staker=is_staker,
+                is_staker=balance.is_staker,
                 allow_overage=balance.allow_overage,
             )
             return UsageHoldResponse(
@@ -279,22 +316,6 @@ class BillingService:
                 estimated_cost=estimated_cost,
                 available_balance=available,
             )
-        
-        # Split hold between staking and paid based on user class
-        # (mirrors the balance check logic above)
-        staking_available = balance.staking_available or Decimal("0")
-        if not is_staker or not has_staking:
-            # Non-staker: entire hold from paid
-            staking_hold = Decimal("0")
-            paid_hold = estimated_cost
-        elif balance.allow_overage:
-            # Staker with overage: staking first, paid for remainder
-            staking_hold = min(estimated_cost, staking_available)
-            paid_hold = estimated_cost - staking_hold
-        else:
-            # Staker without overage: staking only
-            staking_hold = estimated_cost
-            paid_hold = Decimal("0")
         
         # Hold amounts are negative (debit)
         hold_amount = -abs(estimated_cost)
@@ -413,25 +434,19 @@ class BillingService:
         input_price_per_million = usage_cost.input_price_per_million
         output_price_per_million = usage_cost.output_price_per_million
         
-        # Get current balance for spending split logic
-        balance = await credits_crud.get_or_create_balance(db, user_id)
-        staking_available = balance.staking_available or Decimal("0")
-        is_staker = balance.is_staker
-        has_staking = (balance.staking_daily_amount or Decimal("0")) > 0
-        
-        # Spending split based on user class:
-        # - Non-staker or staker not yet synced: all from paid
-        # - Active staker: staking first, paid remainder only if allow_overage
-        if not is_staker or not has_staking:
-            staking_charge = Decimal("0")
-            paid_charge = total_cost
-        else:
-            staking_charge = min(total_cost, staking_available)
-            paid_charge = (total_cost - staking_charge) if balance.allow_overage else Decimal("0")
-        
         # Store the original hold amounts for cache adjustment (both are negative)
         original_hold_paid = hold_entry.amount_paid  # Negative
         original_hold_staking = hold_entry.amount_staking  # Negative
+        
+        # Get current balance for spending split logic.
+        # The hold already drained staking_available, so we pass the held
+        # staking amount back so the split sees the full pot reserved for
+        # THIS transaction and doesn't shift everything to paid.
+        balance = await credits_crud.get_or_create_balance(db, user_id)
+        staking_reserved = abs(original_hold_staking)
+        _available, staking_charge, paid_charge = self._compute_spending_split(
+            balance, total_cost, staking_reserved=staking_reserved
+        )
         
         # Update the ledger entry and balance in a single transaction
         hold_entry = await credits_crud.update_ledger_entry(
