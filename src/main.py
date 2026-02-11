@@ -26,6 +26,7 @@ from src.core.version import get_version, get_version_info
 from src.core.cors_middleware import CredentialSafeCORSMiddleware
 from src.db.models import Session as DbSession
 from src.services import session_service
+from src.services.cache_service import cache_service
 from src.db.database import engine, get_db
 from src.core.direct_model_service import direct_model_service
 from src.core.logging_config import configure_logging, get_core_logger, get_auth_logger
@@ -505,6 +506,13 @@ async def shutdown_event():
     except Exception as e:
         logger.warning("Error closing rate limiting service", error=str(e), event_type="rate_limit_shutdown_error")
     
+    # Close Redis cache service
+    try:
+        await cache_service.close()
+        logger.info("Redis cache service closed successfully", event_type="cache_service_shutdown")
+    except Exception as e:
+        logger.warning("Error closing Redis cache service", error=str(e), event_type="cache_service_shutdown_error")
+    
     # Close proxy router HTTP client
     try:
         from src.services import proxy_router_service
@@ -663,6 +671,9 @@ async def health_check():
     except Exception as e:
         model_service_status = f"unhealthy: {str(e)}"
     
+    # Check Redis cache health
+    cache_health = await cache_service.health_check()
+    
     # Check rate limiting service health
     rate_limit_health = {}
     try:
@@ -707,6 +718,7 @@ async def health_check():
         "timestamp": current_time.isoformat(),
         "version": APP_VERSION,
         "database": db_status,
+        "redis_cache": cache_health,
         "model_service": {
             "status": model_service_status,
             "model_count": model_count,

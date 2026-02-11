@@ -10,6 +10,7 @@ from src.core.security import generate_api_key, get_api_key_hash
 from src.core.encryption import APIKeyEncryption
 from src.db.models import APIKey, User
 from src.schemas.api_key import APIKeyCreate
+from src.services.cache_service import cache_service
 
 async def get_api_key_by_id(db: AsyncSession, api_key_id: int) -> Optional[APIKey]:
     """
@@ -211,7 +212,7 @@ async def set_default_api_key(db: AsyncSession, api_key_id: int, user_id: int) -
 
 async def deactivate_api_key(db: AsyncSession, api_key_id: int, user_id: Optional[int] = None) -> Optional[APIKey]:
     """
-    Deactivate an API key.
+    Deactivate an API key and invalidate cache.
     
     Args:
         db: Database session
@@ -239,6 +240,9 @@ async def deactivate_api_key(db: AsyncSession, api_key_id: int, user_id: Optiona
     api_key.is_active = False
     await db.commit()
     await db.refresh(api_key)
+    
+    # Invalidate cache
+    await cache_service.delete("api_key", api_key.key_prefix)
     
     return api_key
 
@@ -279,7 +283,7 @@ async def update_last_used(db: AsyncSession, api_key: APIKey) -> APIKey:
 
 async def delete_all_user_api_keys(db: AsyncSession, user_id: int) -> int:
     """
-    Delete all API keys for a user and return count of deleted keys.
+    Delete all API keys for a user, invalidate cache, and return count of deleted keys.
     
     Args:
         db: Database session
@@ -288,12 +292,16 @@ async def delete_all_user_api_keys(db: AsyncSession, user_id: int) -> int:
     Returns:
         Count of deleted API keys
     """
-    # Get count of API keys to delete
+    # Get API keys to delete (need prefixes for cache invalidation)
     count_result = await db.execute(
         select(APIKey).where(APIKey.user_id == user_id)
     )
     api_keys = count_result.scalars().all()
     count = len(api_keys)
+    
+    # Invalidate cache for each API key
+    for api_key in api_keys:
+        await cache_service.delete("api_key", api_key.key_prefix)
     
     # Delete all API keys for the user
     await db.execute(
