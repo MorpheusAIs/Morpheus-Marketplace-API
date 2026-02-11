@@ -162,9 +162,13 @@ async def handle_stripe_webhook(
                     stripe_event_id=event_id,
                     error=message,
                 )
-                # Return 200 anyway to acknowledge receipt
-                # Stripe will not retry if we return 200
-                # We log the error for manual investigation
+                # Return 500 so Stripe retries the webhook.
+                # Without this, a transient DB error would silently lose the payment.
+                # Stripe retries up to ~3 days with exponential backoff.
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to process event: {message}",
+                )
             
         elif event_type == stripe_webhook_service.EVENT_TYPE_INVOICE_PAID:
             # Invoice payment succeeded (subscription or one-time invoice)
@@ -181,6 +185,10 @@ async def handle_stripe_webhook(
                     "Failed to process invoice.paid",
                     stripe_event_id=event_id,
                     error=message,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to process event: {message}",
                 )
             
         elif event_type == stripe_webhook_service.EVENT_TYPE_INVOICE_PAYMENT_FAILED:
@@ -207,9 +215,10 @@ async def handle_stripe_webhook(
             )
         
         # Return success response
-        # Note: DB changes are already committed by the service layer
         return {"received": True}
         
+    except HTTPException:
+        raise
     except Exception as e:
         # Log the error with full context
         logger.exception(
@@ -219,7 +228,6 @@ async def handle_stripe_webhook(
             error=str(e),
         )
         
-        # Re-raise as HTTP exception
         # Return 500 so Stripe will retry the webhook
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
