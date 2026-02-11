@@ -20,29 +20,48 @@ from .provider import PricingProvider
 # Format: model_name -> (input_price, output_price)
 
 HARDCODED_PRICING: Dict[str, tuple[str, str]] = {
-    # Llama models
-    "llama-3.2-3b": ("0.05", "0.10"),
-    "llama-3-2-3b": ("0.05", "0.10"),  # Alternative format
-    "llama-3.3-70b": ("0.15", "0.45"),
-    "llama-3-3-70b": ("0.15", "0.45"),  # Alternative format
-    
-    # Mistral models  
-    "mistral-31-24b": ("0.10", "0.30"),
-    "mistral-small-24b": ("0.10", "0.30"),
-    
+    # Kimi models
+    "kimi-k2.5": ("0.60", "3.00"),
+    "kimi-k2-thinking": ("0.60", "3.00"),
+
+    # GLM models
+    "glm-4.7": ("0.50", "2.25"),
+    "glm-4.7-thinking": ("0.50", "2.25"),
+    "glm-4.7-flash": ("0.13", "0.50"),
+
     # Qwen models
-    "qwen3-4b": ("0.05", "0.10"),
-    "qwen-3-4b": ("0.05", "0.10"),
-    "qwen3-235b": ("0.20", "0.80"),
-    "qwen-3-235b": ("0.20", "0.80"),
-    
+    "qwen3-235b": ("0.40", "3.00"),
+    "qwen-3-235b": ("0.40", "3.00"),  # Alternative format
+    "qwen3-coder-480b-a35b-instruct": ("0.70", "2.80"),
+    "qwen3-coder-480b-a35b": ("0.70", "2.80"),  # Without -instruct suffix
+    "qwen3-next-80b": ("0.25", "1.75"),
+    "qwen3-4b": ("0.05", "0.15"),
+    "qwen-3-4b": ("0.05", "0.15"),  # Alternative format
+
+    # GPT OSS models
+    "gpt-oss-120b": ("0.07", "0.28"),
+
+    # Hermes / Llama models
+    "hermes-3-llama-3.1-405b": ("1.00", "2.75"),
+    "llama-3.3-70b": ("0.70", "2.50"),
+    "llama-3-3-70b": ("0.70", "2.50"),  # Alternative format
+    "llama-3.2-3b": ("0.10", "0.35"),
+    "llama-3-2-3b": ("0.10", "0.35"),  # Alternative format
+
+    # Mistral models
+    "mistral-31-24b": ("0.50", "2.00"),
+    "mistral-small-24b": ("0.50", "2.00"),  # Alternative format
+
     # Venice models
-    "venice-uncensored": ("0.20", "0.80"),
+    "venice-uncensored": ("0.20", "0.90"),
+
+    # Embedding models
+    "text-embedding-bge-m3": ("0.10", "0.50"),
 }
 
 # Default pricing for unknown models (conservative high estimate)
-DEFAULT_INPUT_PRICE = Decimal("0.20")
-DEFAULT_OUTPUT_PRICE = Decimal("0.80")
+DEFAULT_INPUT_PRICE = Decimal("0.50")
+DEFAULT_OUTPUT_PRICE = Decimal("2.00")
 
 
 class HardcodedPricingProvider(PricingProvider):
