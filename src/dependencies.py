@@ -1,5 +1,7 @@
 from typing import Annotated, Optional
 from uuid import UUID
+import asyncio
+from datetime import datetime
 
 from fastapi import Depends, HTTPException, status, Security
 from fastapi.security import HTTPBearer, APIKeyHeader, HTTPAuthorizationCredentials
@@ -24,6 +26,7 @@ from src.db.database import get_db, get_db_session
 from src.db.models import User, APIKey
 from src.schemas.token import TokenPayload
 from src.services.cognito_service import cognito_service
+from src.services.cache_service import cache_service
 from src.core.logging_config import get_auth_logger
 
 auth_logger = get_auth_logger()
@@ -118,12 +121,24 @@ async def get_current_user(
                          expected_issuer=f"https://cognito-idp.{settings.COGNITO_REGION}.amazonaws.com/{settings.COGNITO_USER_POOL_ID}",
                          event_type="jwt_validation_start")
         
-        # Fetch JWKS from Cognito
+        # Fetch JWKS from Cognito (with caching)
         jwks_url = settings.COGNITO_JWKS_URL
-        auth_logger.debug("Fetching JWKS", jwks_url=jwks_url)
-        jwks_response = requests.get(jwks_url)
-        jwks_response.raise_for_status()
-        jwks = jwks_response.json()
+        
+        # Try cache first
+        cached_jwks = await cache_service.get("jwks", "cognito")
+        if cached_jwks:
+            auth_logger.debug("Using cached JWKS", event_type="jwks_cache_hit")
+            jwks = cached_jwks
+        else:
+            # Cache miss - fetch from Cognito
+            auth_logger.debug("Fetching JWKS from Cognito", jwks_url=jwks_url)
+            jwks_response = requests.get(jwks_url)
+            jwks_response.raise_for_status()
+            jwks = jwks_response.json()
+            
+            # Cache JWKS for 1 hour (keys rarely change)
+            await cache_service.set("jwks", "cognito", jwks, ttl_seconds=3600)
+            auth_logger.debug("Cached JWKS", event_type="jwks_cached")
         
         # Get the key ID from token header
         header = jwt.get_unverified_header(token.credentials)
@@ -180,8 +195,32 @@ async def get_current_user(
                              event_type="jwt_validation_error")
             raise credentials_exception
             
-        # Get or create local user record
-        user = await user_crud.get_user_by_cognito_id(db, cognito_user_id)
+        # Try to get user from cache first
+        cached_user = await cache_service.get("user", cognito_user_id)
+        if cached_user:
+            auth_logger.debug("Using cached user", cognito_user_id=cognito_user_id[:8] + "...")
+            # Deserialize datetime fields
+            if cached_user.get("created_at"):
+                cached_user["created_at"] = datetime.fromisoformat(cached_user["created_at"])
+            if cached_user.get("updated_at"):
+                cached_user["updated_at"] = datetime.fromisoformat(cached_user["updated_at"])
+            user = User(**cached_user)
+        else:
+            # Cache miss - get from database
+            user = await user_crud.get_user_by_cognito_id(db, cognito_user_id)
+            
+            # Cache user if found
+            if user:
+                user_cache_data = {
+                    'id': user.id,
+                    'email': user.email,
+                    'name': user.name,
+                    'is_active': user.is_active,
+                    'cognito_user_id': user.cognito_user_id,
+                    'created_at': user.created_at.isoformat() if user.created_at else None,
+                    'updated_at': user.updated_at.isoformat() if user.updated_at else None,
+                }
+                await cache_service.set("user", cognito_user_id, user_cache_data, ttl_seconds=600)
         
         if not user:
             # Create new user with email and cognito_user_id
@@ -196,6 +235,18 @@ async def get_current_user(
                            user_email=user_data['email'] or 'not_provided',
                            cognito_user_id=cognito_user_id,
                            event_type="user_creation")
+            
+            # Cache newly created user
+            user_cache_data = {
+                'id': user.id,
+                'email': user.email,
+                'name': user.name,
+                'is_active': user.is_active,
+                'cognito_user_id': user.cognito_user_id,
+                'created_at': user.created_at.isoformat() if user.created_at else None,
+                'updated_at': user.updated_at.isoformat() if user.updated_at else None,
+            }
+            await cache_service.set("user", cognito_user_id, user_cache_data, ttl_seconds=600)
             
             # If email is missing, try to refresh from Cognito
             if not token_email:
@@ -271,6 +322,9 @@ async def get_current_user(
                 auth_logger.info("Updated user with email from JWT token",
                                user_id=user.id,
                                event_type="user_update_complete")
+                
+                # Invalidate user cache on update
+                await cache_service.delete("user", cognito_user_id)
         
         return user
         
@@ -312,7 +366,7 @@ async def get_api_key_user(
 ) -> Optional[User]:
     """
     Validate an API key and return the associated user.
-    Uses a short-lived DB connection that is released immediately after auth.
+    Uses Redis caching with read-through pattern to minimize database load.
     
     The API key is expected in the format: "Bearer sk-xxxxxx" or just "sk-xxxxxx"
     
@@ -369,7 +423,49 @@ async def get_api_key_user(
     key_prefix = api_key[:9] if len(api_key) >= 9 else api_key
     
     try:
-        # Use short-lived session for auth lookup
+        # Try cache first (read-through pattern)
+        cached_data = await cache_service.get("api_key", key_prefix)
+        
+        if cached_data:
+            # Cache hit - validate hash and return user
+            cached_hash = cached_data.get("hashed_key")
+            cached_encrypted = cached_data.get("encrypted_key")
+            user_data = cached_data.get("user")
+            
+            # Validate the full API key against cached hash
+            if cached_encrypted is None:
+                # LEGACY KEY: Only prefix verification
+                auth_logger.debug("Legacy API key verified (cached, prefix-only)",
+                                key_prefix=key_prefix,
+                                event_type="cached_legacy_api_key_verified")
+            else:
+                # MODERN KEY: Full hash verification
+                if not verify_api_key(api_key, cached_hash):
+                    auth_logger.error("Cached API key hash validation failed",
+                                     key_prefix=key_prefix,
+                                     event_type="cached_api_key_validation_failed")
+                    # Invalidate bad cache entry
+                    await cache_service.delete("api_key", key_prefix)
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Invalid API key",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            
+            # Update last_used_at in background (non-blocking)
+            # We do this async to avoid blocking the request
+            asyncio.create_task(_update_api_key_last_used_background(cached_data.get("id")))
+            
+            # Deserialize datetime fields from ISO strings
+            if user_data.get("created_at"):
+                user_data["created_at"] = datetime.fromisoformat(user_data["created_at"])
+            if user_data.get("updated_at"):
+                user_data["updated_at"] = datetime.fromisoformat(user_data["updated_at"])
+            
+            # Return user from cache
+            return User(**user_data)
+        
+        # Cache miss - fetch from database
         async with get_db() as db:
             # Get the API key with user relationship eagerly loaded
             api_key_query = select(APIKey).options(
@@ -388,10 +484,8 @@ async def get_api_key_user(
                 )
             
             # Validate the full API key
-            # For legacy keys (no encrypted_key), we can only verify the prefix
-            # For modern keys, verify against the stored hash
             if db_api_key.encrypted_key is None:
-                # LEGACY KEY: Only prefix verification (prefix already matched to get here)
+                # LEGACY KEY: Only prefix verification
                 auth_logger.info("Legacy API key verified (prefix-only)",
                                key_prefix=key_prefix,
                                event_type="legacy_api_key_verified")
@@ -420,7 +514,7 @@ async def get_api_key_user(
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             
-            # Extract all needed attributes before session closes
+            # Extract user data for return and caching
             user_dict = {
                 'id': user.id,
                 'email': user.email,
@@ -428,8 +522,27 @@ async def get_api_key_user(
                 'is_active': user.is_active,
                 'cognito_user_id': user.cognito_user_id,
                 'created_at': user.created_at,
-                'updated_at': user.updated_at
+                'updated_at': user.updated_at,
             }
+            
+            # Serialize for cache (convert datetimes to ISO strings)
+            user_dict_for_cache = {
+                **user_dict,
+                'created_at': user.created_at.isoformat() if user.created_at else None,
+                'updated_at': user.updated_at.isoformat() if user.updated_at else None,
+            }
+            
+            # Cache the API key + user data for future requests
+            cache_data = {
+                "id": db_api_key.id,
+                "user_id": db_api_key.user_id,
+                "key_prefix": db_api_key.key_prefix,
+                "hashed_key": db_api_key.hashed_key,
+                "encrypted_key": db_api_key.encrypted_key,
+                "is_active": db_api_key.is_active,
+                "user": user_dict_for_cache,
+            }
+            await cache_service.set("api_key", key_prefix, cache_data, ttl_seconds=300)
         
         return User(**user_dict)
         
@@ -447,6 +560,24 @@ async def get_api_key_user(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Unexpected error validating API key: {str(e)}"
+        )
+
+
+async def _update_api_key_last_used_background(api_key_id: int) -> None:
+    """Background task to update API key last_used_at timestamp."""
+    try:
+        async with get_db() as db:
+            # Get the API key
+            result = await db.execute(select(APIKey).where(APIKey.id == api_key_id))
+            api_key = result.scalar_one_or_none()
+            if api_key:
+                await api_key_crud.update_last_used(db, api_key)
+    except Exception as e:
+        auth_logger.warning(
+            "Background API key last_used update failed",
+            api_key_id=api_key_id,
+            error=str(e),
+            event_type="background_last_used_update_failed",
         )
 
 async def get_current_api_key(

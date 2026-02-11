@@ -4,12 +4,16 @@ from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import Session
+from src.services.cache_service import cache_service
+from src.core.logging_config import get_core_logger
+
+logger = get_core_logger()
 
 async def get_active_session_by_api_key(
     db: AsyncSession, api_key_id: int
 ) -> Optional[Session]:
     """
-    Get an existing active session for an API key.
+    Get an existing active session for an API key (with caching).
     
     Args:
         db: Database session
@@ -18,12 +22,42 @@ async def get_active_session_by_api_key(
     Returns:
         Session object if found, None otherwise
     """
+    cache_key = f"active_session_by_api_key:{api_key_id}"
+    
+    # Try cache first
+    cached = await cache_service.get("session", cache_key)
+    if cached:
+        logger.debug("Active session cache hit", api_key_id=api_key_id)
+        # Deserialize datetime fields
+        if cached.get("created_at"):
+            cached["created_at"] = datetime.fromisoformat(cached["created_at"])
+        if cached.get("expires_at"):
+            cached["expires_at"] = datetime.fromisoformat(cached["expires_at"])
+        return Session(**cached)
+    
+    # Cache miss - fetch from database
     result = await db.execute(
         select(Session)
         .where(Session.api_key_id == api_key_id, Session.is_active == True)
         .order_by(Session.created_at.desc())
     )
-    return result.scalars().first()
+    session = result.scalars().first()
+    
+    # Cache the result if found
+    if session:
+        session_data = {
+            'id': session.id,
+            'api_key_id': session.api_key_id,
+            'user_id': session.user_id,
+            'model': session.model,
+            'type': session.type,
+            'is_active': session.is_active,
+            'created_at': session.created_at.isoformat() if session.created_at else None,
+            'expires_at': session.expires_at.isoformat() if session.expires_at else None,
+        }
+        await cache_service.set("session", cache_key, session_data, ttl_seconds=300)
+    
+    return session
 
 async def get_all_active_sessions(
     db: AsyncSession
@@ -47,7 +81,7 @@ async def deactivate_existing_sessions(
     db: AsyncSession, api_key_id: int
 ) -> None:
     """
-    Deactivate any existing active sessions for an API key.
+    Deactivate any existing active sessions for an API key and invalidate cache.
     
     Args:
         db: Database session
@@ -59,6 +93,10 @@ async def deactivate_existing_sessions(
         .values(is_active=False)
     )
     await db.flush()  # Flush to DB but don't commit (keeps lock held)
+    
+    # Invalidate session cache
+    cache_key = f"active_session_by_api_key:{api_key_id}"
+    await cache_service.delete("session", cache_key)
 
 async def get_session_by_id(db: AsyncSession, session_id: str) -> Optional[Session]:
     """
@@ -84,7 +122,7 @@ async def create_session(
     expires_at: datetime = None,
 ) -> Session:
     """
-    Create a new session.
+    Create a new session and cache it.
     
     Args:
         db: Database session
@@ -120,13 +158,28 @@ async def create_session(
     await db.flush()  # Flush to DB but don't commit (keeps lock held)
     await db.refresh(session)
     
+    # Cache the new session
+    if api_key_id:
+        cache_key = f"active_session_by_api_key:{api_key_id}"
+        session_data = {
+            'id': session.id,
+            'api_key_id': session.api_key_id,
+            'user_id': session.user_id,
+            'model': session.model,
+            'type': session.type,
+            'is_active': session.is_active,
+            'created_at': session.created_at.isoformat() if session.created_at else None,
+            'expires_at': session.expires_at.isoformat() if session.expires_at else None,
+        }
+        await cache_service.set("session", cache_key, session_data, ttl_seconds=300)
+    
     return session
 
 async def mark_session_inactive(
     db: AsyncSession, session_id: str
 ) -> Optional[Session]:
     """
-    Mark a session as inactive.
+    Mark a session as inactive and invalidate cache.
     
     Args:
         db: Database session
@@ -144,6 +197,11 @@ async def mark_session_inactive(
         session.is_active = False
         await db.flush()  # Flush to DB but don't commit (keeps lock held)
         await db.refresh(session)
+        
+        # Invalidate cache
+        if session.api_key_id:
+            cache_key = f"active_session_by_api_key:{session.api_key_id}"
+            await cache_service.delete("session", cache_key)
     
     return session
 
