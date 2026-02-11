@@ -237,9 +237,14 @@ class Settings(BaseSettings):
     STRIPE_SECRET_KEY: str | None = Field(default=os.getenv("STRIPE_SECRET_KEY"))
     STRIPE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("STRIPE_WEBHOOK_SECRET"))
     
-    # Coinbase Commerce Settings
-    # Required for processing Coinbase payments and webhooks
+    # Coinbase Commerce Settings (Legacy - kept for backward compatibility)
+    # Required for processing legacy Coinbase Commerce charge webhooks
     COINBASE_COMMERCE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("COINBASE_COMMERCE_WEBHOOK_SECRET"))
+    
+    # Coinbase Payment Link Settings (New)
+    # Secret from metadata.secret returned when creating a webhook subscription
+    # See: https://docs.cdp.coinbase.com/coinbase-business/payment-link-apis/webhooks
+    COINBASE_PAYMENT_LINK_WEBHOOK_SECRET: str | None = Field(default=os.getenv("COINBASE_PAYMENT_LINK_WEBHOOK_SECRET"))
     
     # Web3 Provider Settings (optional - enables EIP-1271 smart contract wallet verification)
     # If not set, only EOA wallets will be supported

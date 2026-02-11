@@ -215,6 +215,7 @@ class StripeWebhookService:
         """
         idempotency_key = self._get_idempotency_key(event_id, event_type)
         
+        # Create ledger entry and update balance in a single atomic transaction
         entry = await credits_crud.create_ledger_entry(
             db=db,
             user_id=user_id,
@@ -227,13 +228,19 @@ class StripeWebhookService:
             payment_source=self.SOURCE_NAME,
             external_transaction_id=transaction_id,
             payment_metadata=payment_metadata,
+            auto_commit=False,
         )
         
         await credits_crud.update_balance(
             db=db,
             user_id=user_id,
             paid_posted_delta=amount_usd,
+            auto_commit=False,
         )
+        
+        # Commit both atomically — if either fails, neither is persisted
+        await db.commit()
+        await db.refresh(entry)
         
         return entry
     
