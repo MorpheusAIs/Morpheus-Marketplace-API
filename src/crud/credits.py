@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from src.core.config import settings
 from src.db.models import CreditLedger, CreditAccountBalance, LedgerStatus, LedgerEntryType
+from src.services.cache_service import cache_service
 from src.core.logging_config import get_core_logger
 
 logger = get_core_logger()
@@ -34,14 +35,39 @@ async def get_or_create_balance(
 ) -> CreditAccountBalance:
     """
     Get account balance record, creating one if it doesn't exist.
+    Uses Redis caching for read-only access (when for_update=False).
     
     Args:
         for_update: If True, acquires a row-level lock (SELECT ... FOR UPDATE).
                     The lock is held until the transaction commits, serialising
-                    concurrent operations on the same user's balance.  Use this
+                    concurrent operations on the same user's balance. Use this
                     when the caller needs to read-then-write (e.g. balance
                     sufficiency check followed by a hold creation).
+                    NOTE: When for_update=True, caching is bypassed for data consistency.
     """
+    # Skip cache if we need a lock (for_update requires fresh data)
+    if not for_update:
+        # Try cache first for read-only access
+        cache_key = f"user_balance:{user_id}"
+        cached = await cache_service.get("balance", cache_key)
+        
+        if cached:
+            logger.debug("Credits balance cache hit", user_id=user_id)
+            # Deserialize Decimal fields
+            balance_data = {
+                'user_id': cached['user_id'],
+                'paid_posted_balance': Decimal(str(cached['paid_posted_balance'])),
+                'paid_pending_holds': Decimal(str(cached['paid_pending_holds'])),
+                'staking_daily_amount': Decimal(str(cached['staking_daily_amount'])),
+                'staking_available': Decimal(str(cached['staking_available'])),
+                'staking_refresh_date': datetime.fromisoformat(cached['staking_refresh_date']).date() if cached.get('staking_refresh_date') else None,
+                'allow_overage': cached['allow_overage'],
+                'created_at': datetime.fromisoformat(cached['created_at']) if cached.get('created_at') else None,
+                'updated_at': datetime.fromisoformat(cached['updated_at']) if cached.get('updated_at') else None,
+            }
+            return CreditAccountBalance(**balance_data)
+    
+    # Cache miss or for_update=True - fetch from database
     query = select(CreditAccountBalance).where(CreditAccountBalance.user_id == user_id)
     if for_update:
         query = query.with_for_update()
@@ -71,6 +97,23 @@ async def get_or_create_balance(
                 .with_for_update()
             )
             balance = result.scalar_one()
+    
+    # Cache the balance (only if not locked - for_update means it might change)
+    if not for_update and balance:
+        cache_data = {
+            'user_id': balance.user_id,
+            'paid_posted_balance': str(balance.paid_posted_balance or Decimal("0")),
+            'paid_pending_holds': str(balance.paid_pending_holds or Decimal("0")),
+            'staking_daily_amount': str(balance.staking_daily_amount or Decimal("0")),
+            'staking_available': str(balance.staking_available or Decimal("0")),
+            'staking_refresh_date': balance.staking_refresh_date.isoformat() if balance.staking_refresh_date else None,
+            'allow_overage': balance.allow_overage,
+            'created_at': balance.created_at.isoformat() if balance.created_at else None,
+            'updated_at': balance.updated_at.isoformat() if balance.updated_at else None,
+        }
+        # Use 30 second TTL for balance - short enough to stay relatively fresh
+        # but long enough to absorb burst traffic
+        await cache_service.set("balance", cache_key, cache_data, ttl_seconds=30)
     
     return balance
 
@@ -148,6 +191,10 @@ async def update_balance(
     )
     balance = result.scalar_one()
     
+    # Invalidate balance cache since it changed
+    cache_key = f"user_balance:{user_id}"
+    await cache_service.delete("balance", cache_key)
+    
     return balance
 
 
@@ -161,6 +208,10 @@ async def set_staking_daily_amount(db: AsyncSession, user_id: int, amount: Decim
     
     await db.commit()
     await db.refresh(balance)
+    
+    # Invalidate balance cache
+    cache_key = f"user_balance:{user_id}"
+    await cache_service.delete("balance", cache_key)
     
     logger.info("Updated staking daily amount", user_id=user_id, amount=str(amount))
     return balance
@@ -179,6 +230,10 @@ async def set_allow_overage(db: AsyncSession, user_id: int, allow: bool) -> Cred
     
     await db.commit()
     await db.refresh(balance)
+    
+    # Invalidate balance cache
+    cache_key = f"user_balance:{user_id}"
+    await cache_service.delete("balance", cache_key)
     
     logger.info("Updated allow_overage setting", user_id=user_id, allow_overage=allow)
     return balance
@@ -221,6 +276,10 @@ async def reconcile_pending_holds(db: AsyncSession, user_id: int) -> CreditAccou
         balance.updated_at = datetime.utcnow()
         await db.commit()
         await db.refresh(balance)
+        
+        # Invalidate balance cache
+        cache_key = f"user_balance:{user_id}"
+        await cache_service.delete("balance", cache_key)
     else:
         logger.info(
             "Balance reconciliation: paid_pending_holds is consistent",
@@ -266,6 +325,11 @@ async def reconcile_all_balances(db: AsyncSession, user_id: int) -> CreditAccoun
         balance.updated_at = datetime.utcnow()
         await db.commit()
         await db.refresh(balance)
+        
+        # Invalidate balance cache
+        cache_key = f"user_balance:{user_id}"
+        await cache_service.delete("balance", cache_key)
+        
         logger.info("Balance reconciliation complete - corrections applied", user_id=user_id)
     else:
         logger.info("Balance reconciliation complete - no corrections needed", user_id=user_id)

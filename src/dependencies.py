@@ -585,7 +585,7 @@ async def get_current_api_key(
 ) -> APIKey:
     """
     Validate an API key and return the APIKey object.
-    Uses a short-lived DB connection that is released immediately after auth.
+    Uses Redis caching with read-through pattern to minimize database load.
     
     The API key is expected in the format: "Bearer sk-xxxxxx" or just "sk-xxxxxx"
     
@@ -621,7 +621,59 @@ async def get_current_api_key(
     key_prefix = api_key_str[:9] if len(api_key_str) >= 9 else api_key_str
     
     try:
-        # Use short-lived session for auth lookup
+        # Try cache first (read-through pattern)
+        cached_data = await cache_service.get("api_key", key_prefix)
+        
+        if cached_data:
+            # Cache hit - validate hash and return APIKey
+            cached_hash = cached_data.get("hashed_key")
+            cached_encrypted = cached_data.get("encrypted_key")
+            
+            # Validate the full API key against cached hash
+            if cached_encrypted is None:
+                # LEGACY KEY: Only prefix verification
+                auth_logger.debug("Legacy API key verified (cached, prefix-only)",
+                                key_prefix=key_prefix,
+                                event_type="cached_legacy_api_key_verified")
+            else:
+                # MODERN KEY: Full hash verification
+                if not verify_api_key(api_key_str, cached_hash):
+                    auth_logger.error("Cached API key hash validation failed",
+                                     key_prefix=key_prefix,
+                                     event_type="cached_api_key_validation_failed")
+                    # Invalidate bad cache entry
+                    await cache_service.delete("api_key", key_prefix)
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Invalid API key",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            
+            # Update last_used_at in background (non-blocking)
+            asyncio.create_task(_update_api_key_last_used_background(cached_data.get("id")))
+            
+            # Deserialize datetime fields if present
+            if cached_data.get("last_used_at"):
+                cached_data["last_used_at"] = datetime.fromisoformat(cached_data["last_used_at"])
+            if cached_data.get("created_at"):
+                cached_data["created_at"] = datetime.fromisoformat(cached_data["created_at"])
+            
+            # Return APIKey from cache (exclude user data)
+            return APIKey(
+                id=cached_data["id"],
+                user_id=cached_data["user_id"],
+                key_prefix=cached_data["key_prefix"],
+                hashed_key=cached_data["hashed_key"],
+                encrypted_key=cached_data["encrypted_key"],
+                is_active=cached_data["is_active"],
+                last_used_at=cached_data.get("last_used_at"),
+                created_at=cached_data.get("created_at"),
+                name=cached_data.get("name"),
+                encryption_version=cached_data.get("encryption_version"),
+                is_default=cached_data.get("is_default"),
+            )
+        
+        # Cache miss - fetch from database
         async with get_db() as db:
             # Get the API key with its user relationship loaded
             api_key_query = select(APIKey).options(
@@ -641,10 +693,8 @@ async def get_current_api_key(
                 )
             
             # Validate the full API key
-            # For legacy keys (no encrypted_key), we can only verify the prefix
-            # For modern keys, verify against the stored hash
             if db_api_key.encrypted_key is None:
-                # LEGACY KEY: Only prefix verification (prefix already matched to get here)
+                # LEGACY KEY: Only prefix verification
                 auth_logger.info("Legacy API key verified (prefix-only)",
                                key_prefix=key_prefix,
                                event_type="legacy_api_key_verified")
@@ -663,7 +713,7 @@ async def get_current_api_key(
             # Update last used timestamp
             await api_key_crud.update_last_used(db, db_api_key)
             
-            # Extract all needed attributes before session closes
+            # Extract attributes for return and caching
             api_key_dict = {
                 'id': db_api_key.id,
                 'user_id': db_api_key.user_id,
@@ -675,8 +725,29 @@ async def get_current_api_key(
                 'created_at': db_api_key.created_at,
                 'name': db_api_key.name,
                 'encryption_version': db_api_key.encryption_version,
-                'is_default': db_api_key.is_default
+                'is_default': db_api_key.is_default,
             }
+            
+            # Prepare cache data (include user data for get_api_key_user() compatibility)
+            user = db_api_key.user
+            user_dict_for_cache = {
+                'id': user.id,
+                'email': user.email,
+                'name': user.name,
+                'is_active': user.is_active,
+                'cognito_user_id': user.cognito_user_id,
+                'created_at': user.created_at.isoformat() if user.created_at else None,
+                'updated_at': user.updated_at.isoformat() if user.updated_at else None,
+            }
+            
+            # Cache for both functions (same cache key)
+            cache_data = {
+                **api_key_dict,
+                'last_used_at': db_api_key.last_used_at.isoformat() if db_api_key.last_used_at else None,
+                'created_at': db_api_key.created_at.isoformat() if db_api_key.created_at else None,
+                'user': user_dict_for_cache,
+            }
+            await cache_service.set("api_key", key_prefix, cache_data, ttl_seconds=300)
         
         return APIKey(**api_key_dict)
         
