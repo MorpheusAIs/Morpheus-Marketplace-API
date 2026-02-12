@@ -187,7 +187,7 @@ async def list_transactions(
     Get paginated list of credit transactions (ledger entries).
     
     Parameters:
-    - limit: Maximum number of items to return (1-100)
+    - limit: Maximum number of items to return (1-∞)
     - offset: Number of items to skip
     - type: Filter by entry type (purchase, usage_charge, refund, etc.)
     - from: Filter entries created after this datetime
@@ -355,7 +355,7 @@ async def list_usage(
     Get paginated list of usage entries (posted usage charges only).
     
     Parameters:
-    - limit: Maximum number of items to return (1-100)
+    - limit: Maximum number of items to return (1-∞)
     - offset: Number of items to skip
     - from: Filter entries created after this datetime
     - to: Filter entries created before this datetime
@@ -431,7 +431,7 @@ async def list_usage_for_month(
     Parameters:
     - year: Year
     - month: Month (1-12)
-    - limit: Maximum number of items to return (1-∞)
+    - limit: Maximum number of items to return (1-12)
     - offset: Number of items to skip
     
     Returns newest entries first.
