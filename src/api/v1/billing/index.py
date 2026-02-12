@@ -431,7 +431,7 @@ async def list_usage_for_month(
     Parameters:
     - year: Year
     - month: Month (1-12)
-    - limit: Maximum number of items to return (1-12)
+    - limit: Maximum number of items to return (1-∞)
     - offset: Number of items to skip
     
     Returns newest entries first.
