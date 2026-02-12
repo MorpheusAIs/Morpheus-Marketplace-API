@@ -52,20 +52,32 @@ async def get_or_create_balance(
         cached = await cache_service.get("balance", cache_key)
         
         if cached:
-            logger.debug("Credits balance cache hit", user_id=user_id)
-            # Deserialize Decimal fields
-            balance_data = {
-                'user_id': cached['user_id'],
-                'paid_posted_balance': Decimal(str(cached['paid_posted_balance'])),
-                'paid_pending_holds': Decimal(str(cached['paid_pending_holds'])),
-                'staking_daily_amount': Decimal(str(cached['staking_daily_amount'])),
-                'staking_available': Decimal(str(cached['staking_available'])),
-                'staking_refresh_date': datetime.fromisoformat(cached['staking_refresh_date']).date() if cached.get('staking_refresh_date') else None,
-                'allow_overage': cached['allow_overage'],
-                'created_at': datetime.fromisoformat(cached['created_at']) if cached.get('created_at') else None,
-                'updated_at': datetime.fromisoformat(cached['updated_at']) if cached.get('updated_at') else None,
-            }
-            return CreditAccountBalance(**balance_data)
+            # Validate cache data has all required fields
+            # If missing critical fields (like is_staker), invalidate and fetch fresh
+            if 'is_staker' not in cached:
+                logger.warning(
+                    "Cache entry missing required field 'is_staker', invalidating",
+                    user_id=user_id,
+                    event_type="cache_format_invalid"
+                )
+                await cache_service.delete("balance", cache_key)
+                # Fall through to database fetch
+            else:
+                logger.debug("Credits balance cache hit", user_id=user_id)
+                # Deserialize Decimal fields
+                balance_data = {
+                    'user_id': cached['user_id'],
+                    'paid_posted_balance': Decimal(str(cached['paid_posted_balance'])),
+                    'paid_pending_holds': Decimal(str(cached['paid_pending_holds'])),
+                    'staking_daily_amount': Decimal(str(cached['staking_daily_amount'])),
+                    'staking_available': Decimal(str(cached['staking_available'])),
+                    'staking_refresh_date': datetime.fromisoformat(cached['staking_refresh_date']).date() if cached.get('staking_refresh_date') else None,
+                    'is_staker': cached['is_staker'],
+                    'allow_overage': cached['allow_overage'],
+                    'created_at': datetime.fromisoformat(cached['created_at']) if cached.get('created_at') else None,
+                    'updated_at': datetime.fromisoformat(cached['updated_at']) if cached.get('updated_at') else None,
+                }
+                return CreditAccountBalance(**balance_data)
     
     # Cache miss or for_update=True - fetch from database
     query = select(CreditAccountBalance).where(CreditAccountBalance.user_id == user_id)
@@ -107,6 +119,7 @@ async def get_or_create_balance(
             'staking_daily_amount': str(balance.staking_daily_amount or Decimal("0")),
             'staking_available': str(balance.staking_available or Decimal("0")),
             'staking_refresh_date': balance.staking_refresh_date.isoformat() if balance.staking_refresh_date else None,
+            'is_staker': balance.is_staker,  # Include staker flag in cache
             'allow_overage': balance.allow_overage,
             'created_at': balance.created_at.isoformat() if balance.created_at else None,
             'updated_at': balance.updated_at.isoformat() if balance.updated_at else None,
