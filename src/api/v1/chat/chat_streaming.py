@@ -294,13 +294,12 @@ def build_stream_generator(
         finally:
             # Release the session after streaming completes
             try:
-                async with get_db() as db:
-                    await session_routing_service.release_session(db, session_id)
-                    stream_logger.debug(
-                        "Session released after streaming",
-                        session_id=session_id,
-                        event_type="session_released_after_stream",
-                    )
+                await session_routing_service.release_session(session_id)
+                stream_logger.debug(
+                    "Session released after streaming",
+                    session_id=session_id,
+                    event_type="session_released_after_stream",
+                )
             except Exception as release_err:
                 stream_logger.warning(
                     "Failed to release session after streaming",
@@ -516,17 +515,15 @@ async def _handle_session_retry(
     
     new_session_id = None
     try:
-        async with get_db() as db:
-            # Release the old session first
-            await session_routing_service.release_session(db, original_session_id)
-            
-            # Route to a new session
-            new_session_id = await session_routing_service.route_request(
-                db=db,
-                user_id=user.id,
-                requested_model=requested_model,
-                model_type="LLM",
-            )
+        # Release the old session first
+        await session_routing_service.release_session(original_session_id)
+        
+        # Route to a new session
+        new_session_id = await session_routing_service.route_request(
+            user_id=user.id,
+            requested_model=requested_model,
+            model_type="LLM",
+        )
         
         if not new_session_id:
             logger.error(
@@ -571,8 +568,7 @@ async def _handle_session_retry(
         # Release the new session after retry completes
         if new_session_id:
             try:
-                async with get_db() as db:
-                    await session_routing_service.release_session(db, new_session_id)
+                await session_routing_service.release_session(new_session_id)
             except Exception as release_err:
                 logger.warning(
                     "Failed to release retry session",

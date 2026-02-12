@@ -25,7 +25,6 @@ from src.core.config import settings
 from src.core.version import get_version, get_version_info
 from src.core.cors_middleware import CredentialSafeCORSMiddleware
 from src.db.models import Session as DbSession
-from src.services import session_service
 from src.services.cache_service import cache_service
 from src.db.database import engine, get_db
 from src.core.direct_model_service import direct_model_service
@@ -254,114 +253,6 @@ async def daily_staking_sync():
             await asyncio.sleep(3600)
 
 
-# Background task to clean up expired sessions
-async def cleanup_expired_sessions():
-    """
-    Background task to clean up expired sessions and synchronize session states.
-    
-    Flow:
-    1. FIRST: Synchronize all active sessions with proxy-router to mark any 
-       already-closed sessions as inactive in the database
-    2. THEN: Close any remaining expired sessions that are still active
-    
-    This prevents unnecessary close requests to the proxy-router for sessions
-    that are already closed on the blockchain.
-    """
-    from src.db.models import Session as DbSession
-    from sqlalchemy import select
-    from src.services import session_service
-    from src.db.database import AsyncSessionLocal, engine
-    from sqlalchemy.ext.asyncio import AsyncSession
-    import traceback
-    
-    cleanup_logger = get_core_logger().bind(component="session_cleanup")
-    cleanup_logger.info("Starting expired session cleanup task")
-    
-    while True:
-        try:
-            # Log connection attempt for debugging
-            cleanup_logger.info("Attempting to connect to database for session cleanup")
-            
-            async with AsyncSessionLocal() as db:
-                # STEP 1: Synchronize session states with proxy-router FIRST
-                # This marks any already-closed sessions as inactive in the database,
-                # preventing unnecessary close requests later
-                try:
-                    cleanup_logger.info("Starting session state synchronization (pre-cleanup)", 
-                                       event_type="sync_start")
-                    sync_result = await session_service.synchronize_sessions(db)
-                    
-                    # Commit the sync changes to persist them
-                    await db.commit()
-                    
-                    cleanup_logger.info("Session state synchronization completed and committed", 
-                                       synced_count=len(sync_result.get("synced", [])),
-                                       active_count=len(sync_result.get("active", [])),
-                                       error_count=len(sync_result.get("errors", [])),
-                                       event_type="sync_complete")
-                except Exception as sync_error:
-                    cleanup_logger.error("Error during session synchronization",
-                                        error=str(sync_error),
-                                        event_type="sync_error",
-                                        exc_info=True)
-                    await db.rollback()
-                    # Continue with cleanup even if sync fails
-                
-                # STEP 2: Find and close expired sessions that are STILL active
-                # (after synchronization, some expired sessions may already be marked inactive)
-                now_with_tz = datetime.now(timezone.utc)
-                # Convert to naive datetime for DB compatibility
-                now = now_with_tz.replace(tzinfo=None)
-                result = await db.execute(
-                    select(DbSession)
-                    .where(DbSession.is_active == True, DbSession.expires_at < now)
-                )
-                expired_sessions = result.scalars().all()
-                
-                if expired_sessions:
-                    cleanup_logger.info("Found expired sessions to clean up (after sync)", 
-                                       expired_session_count=len(expired_sessions))
-                    
-                    # Process each expired session
-                    closed_count = 0
-                    failed_count = 0
-                    for session in expired_sessions:
-                        try:
-                            cleanup_logger.info("Cleaning up expired session", 
-                                              session_id=session.id,
-                                              expires_at=session.expires_at.isoformat() if session.expires_at else None,
-                                              event_type="session_cleanup")
-                            success = await session_service.close_session(db, session.id)
-                            if success:
-                                closed_count += 1
-                            else:
-                                failed_count += 1
-                        except Exception as close_error:
-                            cleanup_logger.error("Error closing expired session",
-                                               session_id=session.id,
-                                               error=str(close_error),
-                                               event_type="session_close_error")
-                            failed_count += 1
-                    
-                    # Commit the cleanup changes
-                    await db.commit()
-                    
-                    cleanup_logger.info("Expired session cleanup completed and committed",
-                                       closed_count=closed_count,
-                                       failed_count=failed_count,
-                                       event_type="cleanup_complete")
-                else:
-                    cleanup_logger.info("No expired sessions found to clean up (after sync)")
-        
-        except Exception as e:
-            cleanup_logger.error("Error in session cleanup task",
-                                error=str(e),
-                                event_type="cleanup_error",
-                                exc_info=True)
-        
-        # Run every 15 minutes
-        await asyncio.sleep(1 * 60)
-
 @app.on_event("startup")
 async def startup_event():
     """
@@ -429,18 +320,6 @@ async def startup_event():
                         event_type="startup_failure")
             raise e
         logger.warning("Continuing startup with minimal initialization")
-    
-
-    # Start the background tasks
-    try:
-        asyncio.create_task(cleanup_expired_sessions())
-        logger.info("Started background task for expired session cleanup",
-                   event_type="background_task_start")
-    except Exception as e:
-        logger.error("Failed to start background cleanup task",
-                    error=str(e),
-                    event_type="background_task_error")
-        logger.warning("Continuing startup without background session cleanup")
     
     # Start the daily staking sync task
     try:

@@ -102,13 +102,11 @@ async def create_audio_transcription(
                     requested_model=requested_model,
                     event_type="session_routing_start"
                 )
-                async with get_db() as db:
-                    session_id = await session_routing_service.route_request(
-                        db=db,
-                        user_id=user.id,
-                        requested_model=requested_model,
-                        model_type='STT'
-                    )
+                session_id = await session_routing_service.route_request(
+                    user_id=user.id,
+                    requested_model=requested_model,
+                    model_type='STT'
+                )
                 
                 if session_id:
                     transcription_logger.info(
@@ -259,11 +257,10 @@ async def create_audio_transcription(
             # Release the session after request completes
             if session_id:
                 try:
-                    async with get_db() as db:
-                        await session_routing_service.release_session(db, session_id)
-                        transcription_logger.debug("Session released",
-                                                   session_id=session_id,
-                                                   event_type="session_released")
+                    await session_routing_service.release_session(session_id)
+                    transcription_logger.debug("Session released",
+                                               session_id=session_id,
+                                               event_type="session_released")
                 except Exception as release_err:
                     transcription_logger.warning("Failed to release session",
                                                  session_id=session_id,
@@ -358,13 +355,11 @@ async def create_audio_speech(
                     requested_model=requested_model,
                     event_type="session_routing_start"
                 )
-                async with get_db() as db:
-                    session_id = await session_routing_service.route_request(
-                        db=db,
-                        user_id=user.id,
-                        requested_model=requested_model,
-                        model_type='TTS'
-                    )
+                session_id = await session_routing_service.route_request(
+                    user_id=user.id,
+                    requested_model=requested_model,
+                    model_type='TTS'
+                )
                 
                 if session_id:
                     speech_logger.info(
@@ -525,11 +520,10 @@ async def create_audio_speech(
             # Release the session after request completes
             if session_id:
                 try:
-                    async with get_db() as db:
-                        await session_routing_service.release_session(db, session_id)
-                        speech_logger.debug("Session released",
-                                            session_id=session_id,
-                                            event_type="session_released")
+                    await session_routing_service.release_session(session_id)
+                    speech_logger.debug("Session released",
+                                        session_id=session_id,
+                                        event_type="session_released")
                 except Exception as release_err:
                     speech_logger.warning("Failed to release session",
                                           session_id=session_id,

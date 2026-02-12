@@ -187,6 +187,8 @@ class Settings(BaseSettings):
     AUTOMATION_FEATURE_ENABLED: bool = Field(default=os.getenv("AUTOMATION_FEATURE_ENABLED", "False").lower() == "true")
     
     # Session Routing Service Configuration
+    # Storage backend for routed sessions: "db" (PostgreSQL) or "redis"
+    SESSION_STORAGE_BACKEND: str = Field(default=os.getenv("SESSION_STORAGE_BACKEND", "db"))
     # Interval in seconds for automated activity loop (session scaling)
     SESSION_AUTOMATION_INTERVAL_SECONDS: int = Field(default=int(os.getenv("SESSION_AUTOMATION_INTERVAL_SECONDS", "30")))
     # Grace period before closing idle sessions (prevents thrashing)

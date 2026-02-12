@@ -94,13 +94,11 @@ async def create_embeddings(
                        api_key_id=db_api_key.id,
                        requested_model=requested_model,
                        event_type="session_routing_start")
-            async with get_db() as db:
-                session_id = await session_routing_service.route_request(
-                    db=db,
-                    user_id=user.id,
-                    requested_model=requested_model,
-                    model_type='EMBEDDINGS'
-                )
+            session_id = await session_routing_service.route_request(
+                user_id=user.id,
+                requested_model=requested_model,
+                model_type='EMBEDDINGS'
+            )
             
             embeddings_logger.info("Session routed successfully",
                         request_id=request_id,
@@ -225,11 +223,10 @@ async def create_embeddings(
             # Release the session after request completes
             if session_id:
                 try:
-                    async with get_db() as db:
-                        await session_routing_service.release_session(db, session_id)
-                        embeddings_logger.debug("Session released",
-                                               session_id=session_id,
-                                               event_type="session_released")
+                    await session_routing_service.release_session(session_id)
+                    embeddings_logger.debug("Session released",
+                                           session_id=session_id,
+                                           event_type="session_released")
                 except Exception as release_err:
                     embeddings_logger.warning("Failed to release session",
                                              session_id=session_id,

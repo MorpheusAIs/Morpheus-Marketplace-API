@@ -314,19 +314,17 @@ async def _resolve_session(
     )
     
     try:
-        async with get_db() as db:
-            routed_session_id = await session_routing_service.route_request(
-                db=db,
-                user_id=user.id,
-                requested_model=requested_model,
-                model_type="LLM"
-            )
-            chat_logger.info(
-                "Session routed successfully",
-                session_id=routed_session_id,
-                event_type="session_routing_success",
-            )
-            return routed_session_id
+        routed_session_id = await session_routing_service.route_request(
+            user_id=user.id,
+            requested_model=requested_model,
+            model_type="LLM"
+        )
+        chat_logger.info(
+            "Session routed successfully",
+            session_id=routed_session_id,
+            event_type="session_routing_success",
+        )
+        return routed_session_id
     except NoSessionAvailableError as e:
         raise SessionNotFoundError() from e
     except SessionOpenError as e:
@@ -539,13 +537,12 @@ async def _handle_non_streaming_request(
     finally:
         # Release the session after non-streaming request completes
         try:
-            async with get_db() as db:
-                await session_routing_service.release_session(db, session_id)
-                chat_logger.debug(
-                    "Session released after non-streaming request",
-                    session_id=session_id,
-                    event_type="session_released",
-                )
+            await session_routing_service.release_session(session_id)
+            chat_logger.debug(
+                "Session released after non-streaming request",
+                session_id=session_id,
+                event_type="session_released",
+            )
         except Exception as release_err:
             chat_logger.warning(
                 "Failed to release session",

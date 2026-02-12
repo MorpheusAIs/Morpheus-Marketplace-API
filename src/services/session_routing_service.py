@@ -12,18 +12,21 @@ Key concepts:
 - Open session: session in state OPEN
 - Utilized session: session with active_requests > 0
 - Preferred model: configured list for automatic session pre-warming
+
+Storage backend is selected via the SESSION_STORAGE_BACKEND env var
+("db" or "redis") and accessed through the RoutedSessionStore abstraction.
 """
 
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 
-from sqlalchemy import select, update, func, and_, or_
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from ..db.models import RoutedSession, SessionState
-from ..db.database import get_db, AsyncSessionLocal
+from ..crud.routed_session_base import (
+    SessionData,
+    SessionState,
+    get_session_store,
+)
 from ..core.config import settings
 from ..core.model_routing import model_router
 from ..core.logging_config import get_api_logger
@@ -57,7 +60,7 @@ class SessionRoutingService:
     
     Thread-safety:
     - Uses per-model locking to prevent race conditions
-    - Database operations use row-level locking where needed
+    - Storage operations are atomic where needed
     """
     
     def __init__(self):
@@ -72,6 +75,11 @@ class SessionRoutingService:
         logger.info("SessionRoutingService initialized",
                    event_type="session_routing_service_init")
     
+    @property
+    def _store(self):
+        """Lazy access to the session store singleton."""
+        return get_session_store()
+
     async def _get_model_lock(self, model_id: str) -> asyncio.Lock:
         """Get or create a lock for a specific model."""
         async with self._locks_lock:
@@ -91,7 +99,6 @@ class SessionRoutingService:
     
     async def route_request(
         self,
-        db: AsyncSession,
         user_id: int,
         requested_model: Optional[str] = None,
         model_type: str = "LLM"
@@ -104,7 +111,6 @@ class SessionRoutingService:
         private key lookup when opening new sessions.
         
         Args:
-            db: Database session
             user_id: User ID for private key lookup when opening sessions
             requested_model: Model name or blockchain ID requested
             model_type: Type of model (LLM, EMBEDDINGS, TTS, STT)
@@ -134,16 +140,16 @@ class SessionRoutingService:
         
         async with model_lock:
             # Step 1: Check if any open sessions exist for this model
-            open_sessions = await self._get_open_sessions_for_model(db, model_id)
+            open_sessions = await self._store.get_open_for_model(model_id)
             
             if not open_sessions:
                 # No open sessions - create one
                 route_logger.info("No open sessions for model, creating new session",
                                  event_type="no_open_sessions")
                 session = await self._open_session_for_model(
-                    db, model_id, requested_model, model_type, user_id
+                    model_id, requested_model, model_type, user_id
                 )
-                return await self._assign_request_to_session(db, session.id)
+                return await self._store.assign_request(session.id)
             
             # Step 2: Check if all sessions are utilized
             unutilized_sessions = [s for s in open_sessions if not s.is_utilized]
@@ -157,43 +163,30 @@ class SessionRoutingService:
                 route_logger.info("Routing to unutilized session",
                                  session_id=session.id,
                                  event_type="route_to_unutilized")
-                return await self._assign_request_to_session(db, session.id)
+                return await self._store.assign_request(session.id)
             
             # Step 3: All sessions utilized - open another
             route_logger.info("All sessions utilized, opening another",
                              current_count=len(open_sessions),
                              event_type="all_sessions_utilized")
             session = await self._open_session_for_model(
-                db, model_id, requested_model, model_type, user_id
+                model_id, requested_model, model_type, user_id
             )
-            return await self._assign_request_to_session(db, session.id)
+            return await self._store.assign_request(session.id)
     
-    async def release_session(self, db: AsyncSession, session_id: str) -> None:
+    async def release_session(self, session_id: str) -> None:
         """
         Release a session after request completion.
         
         Decrements active_requests counter atomically.
         
         Args:
-            db: Database session
             session_id: Session ID to release
         """
         release_logger = logger.bind(session_id=session_id)
         
         try:
-            # Atomic decrement of active_requests (never go below 0)
-            await db.execute(
-                update(RoutedSession)
-                .where(
-                    RoutedSession.id == session_id,
-                    RoutedSession.active_requests > 0
-                )
-                .values(
-                    active_requests=RoutedSession.active_requests - 1,
-                    updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
-                )
-            )
-            await db.commit()
+            await self._store.release_request(session_id)
             
             release_logger.debug("Session released",
                                event_type="session_released")
@@ -203,7 +196,6 @@ class SessionRoutingService:
                                error=str(e),
                                event_type="session_release_error",
                                exc_info=True)
-            await db.rollback()
     
     @asynccontextmanager
     async def session_context(
@@ -221,16 +213,14 @@ class SessionRoutingService:
                 ...
             # Session automatically released on exit
         """
-        async with get_db() as db:
-            session_id = await self.route_request(
-                db, user_id, requested_model, model_type
-            )
+        session_id = await self.route_request(
+            user_id, requested_model, model_type
+        )
         
         try:
             yield session_id
         finally:
-            async with get_db() as db:
-                await self.release_session(db, session_id)
+            await self.release_session(session_id)
     
     # =========================================================================
     # SESSION LIFECYCLE: Open and close sessions
@@ -238,29 +228,27 @@ class SessionRoutingService:
     
     async def _open_session_for_model(
         self,
-        db: AsyncSession,
         model_id: str,
         model_name: Optional[str] = None,
         model_type: str = "LLM",
         user_id: Optional[int] = None
-    ) -> RoutedSession:
+    ) -> SessionData:
         """
         Open a new session for a model.
         
         Sessions are shared across users. The user_id is only used for
         private key lookup when calling the proxy router.
         
-        Note: DB row is only created after successful session opening (no OPENING state).
+        Note: Record is only created after successful session opening (no OPENING state).
         
         Args:
-            db: Database session
             model_id: Blockchain model ID (hex string)
             model_name: Human-readable model name
             model_type: Type of model
             user_id: Optional user ID for private key lookup (uses fallback if not provided)
             
         Returns:
-            RoutedSession: The newly opened session
+            SessionData: The newly opened session
             
         Raises:
             SessionOpenError: If session opening fails
@@ -278,7 +266,6 @@ class SessionRoutingService:
         
         try:
             # Call proxy router to open session
-            # Uses user's private key if provided, otherwise uses fallback key
             open_logger.info("Calling proxy router to open session",
                            user_id=user_id,
                            event_type="proxy_open_session_start")
@@ -298,14 +285,15 @@ class SessionRoutingService:
                     model_id=model_id
                 )
             
-            # Create session record only after successful open
+            # Determine endpoint
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             endpoint = "/v1/chat/completions"
             if model_type == "EMBEDDINGS":
                 endpoint = "/v1/embeddings"
             elif model_type == "AUTOMATION":
                 endpoint = ""
-            session = RoutedSession(
+            
+            session_data = SessionData(
                 id=blockchain_session_id,
                 model_id=model_id,
                 model_name=model_name,
@@ -314,12 +302,10 @@ class SessionRoutingService:
                 active_requests=0,
                 created_at=now,
                 updated_at=now,
-                endpoint=endpoint
+                endpoint=endpoint,
             )
             
-            db.add(session)
-            await db.commit()
-            await db.refresh(session)
+            session = await self._store.create(session_data)
             
             open_logger.info("Session opened successfully",
                            session_id=blockchain_session_id,
@@ -348,16 +334,11 @@ class SessionRoutingService:
                 model_id=model_id
             ) from e
     
-    async def _close_session(
-        self,
-        db: AsyncSession,
-        session: RoutedSession
-    ) -> bool:
+    async def _close_session(self, session: SessionData) -> bool:
         """
         Close a session safely.
         
         Args:
-            db: Database session
             session: Session to close
             
         Returns:
@@ -373,9 +354,7 @@ class SessionRoutingService:
             return False
         
         # Mark as CLOSING
-        session.state = SessionState.CLOSING
-        session.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        await db.commit()
+        await self._store.update_state(session.id, SessionState.CLOSING)
         
         close_logger.info("Closing session",
                          event_type="session_close_start")
@@ -385,20 +364,17 @@ class SessionRoutingService:
             await proxy_router_service.closeSession(session.id)
             
             # Mark as CLOSED
-            session.state = SessionState.CLOSED
-            session.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
-            await db.commit()
+            await self._store.update_state(session.id, SessionState.CLOSED)
             
             close_logger.info("Session closed successfully",
                             event_type="session_closed")
             return True
             
         except proxy_router_service.ProxyRouterServiceError as e:
-            # Mark as FAILED but leave the error reason
-            session.state = SessionState.FAILED
-            session.error_reason = f"Close failed: {str(e)}"
-            session.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
-            await db.commit()
+            await self._store.update_state(
+                session.id, SessionState.FAILED,
+                error_reason=f"Close failed: {str(e)}"
+            )
             
             close_logger.error("Error closing session",
                              error=str(e),
@@ -406,103 +382,16 @@ class SessionRoutingService:
             return False
         
         except Exception as e:
-            # Mark as FAILED
-            session.state = SessionState.FAILED
-            session.error_reason = f"Close failed: {str(e)}"
-            session.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
-            await db.commit()
+            await self._store.update_state(
+                session.id, SessionState.FAILED,
+                error_reason=f"Close failed: {str(e)}"
+            )
             
             close_logger.error("Unexpected error closing session",
                              error=str(e),
                              event_type="session_close_unexpected_error",
                              exc_info=True)
             return False
-    
-    async def _assign_request_to_session(
-        self,
-        db: AsyncSession,
-        session_id: str
-    ) -> str:
-        """
-        Assign a request to a session (increment active_requests).
-        
-        Args:
-            db: Database session
-            session_id: Session ID to assign to
-            
-        Returns:
-            str: The session ID
-        """
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        
-        # Atomic increment of active_requests and update last_used_at
-        await db.execute(
-            update(RoutedSession)
-            .where(RoutedSession.id == session_id)
-            .values(
-                active_requests=RoutedSession.active_requests + 1,
-                last_used_at=now,
-                updated_at=now
-            )
-        )
-        await db.commit()
-        
-        logger.debug("Request assigned to session",
-                    session_id=session_id,
-                    event_type="request_assigned")
-        
-        return session_id
-    
-    # =========================================================================
-    # QUERY HELPERS
-    # =========================================================================
-    
-    async def _get_open_sessions_for_model(
-        self,
-        db: AsyncSession,
-        model_id: str
-    ) -> List[RoutedSession]:
-        """Get all OPEN and non-expired sessions for a model."""
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        result = await db.execute(
-            select(RoutedSession)
-            .where(
-                RoutedSession.model_id == model_id,
-                RoutedSession.state == SessionState.OPEN,
-                RoutedSession.expires_at > now  # Filter out expired sessions
-            )
-            .order_by(RoutedSession.last_used_at.asc().nullsfirst())
-        )
-        return list(result.scalars().all())
-    
-    async def _get_all_open_sessions(
-        self,
-        db: AsyncSession
-    ) -> List[RoutedSession]:
-        """Get all OPEN and non-expired sessions across all models."""
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        result = await db.execute(
-            select(RoutedSession)
-            .where(
-                RoutedSession.state == SessionState.OPEN
-            )
-        )
-        return list(result.scalars().all())
-    
-    async def _get_sessions_by_model(
-        self,
-        db: AsyncSession
-    ) -> Dict[str, List[RoutedSession]]:
-        """Get all OPEN sessions grouped by model_id."""
-        sessions = await self._get_all_open_sessions(db)
-        
-        by_model: Dict[str, List[RoutedSession]] = {}
-        for session in sessions:
-            if session.model_id not in by_model:
-                by_model[session.model_id] = []
-            by_model[session.model_id].append(session)
-        
-        return by_model
     
     # =========================================================================
     # AUTOMATED ACTIVITY LOOP
@@ -562,8 +451,7 @@ class SessionRoutingService:
                 auto_logger.debug("Running automation cycle",
                                 event_type="automation_cycle_start")
                 
-                async with get_db() as db:
-                    await self._run_automation_cycle(db)
+                await self._run_automation_cycle()
                 
             except asyncio.CancelledError:
                 break
@@ -573,7 +461,7 @@ class SessionRoutingService:
                                 event_type="automation_cycle_error",
                                 exc_info=True)
     
-    async def _run_automation_cycle(self, db: AsyncSession) -> None:
+    async def _run_automation_cycle(self) -> None:
         """
         Run one cycle of the automation loop.
         
@@ -584,17 +472,17 @@ class SessionRoutingService:
         auto_logger = logger.bind(component="automation_cycle")
         
         preferred_models = self._get_preferred_models()
-        sessions_by_model = await self._get_sessions_by_model(db)
+        sessions_by_model = await self._get_sessions_by_model()
         
-        # Also check for expired sessions
-        await self._cleanup_expired_sessions(db)
+        # Clean up expired sessions
+        await self._cleanup_expired_sessions()
         
         # Process each model
         for model_id, sessions in sessions_by_model.items():
             is_preferred = model_id in preferred_models
             
             await self._process_model_sessions(
-                db, model_id, sessions, is_preferred
+                model_id, sessions, is_preferred
             )
         
         # For preferred models with no sessions, open one
@@ -606,7 +494,6 @@ class SessionRoutingService:
                 
                 try:
                     await self._open_session_for_model(
-                        db=db,
                         model_id=model_id,
                         model_name=None,
                         model_type="AUTOMATION",
@@ -622,9 +509,8 @@ class SessionRoutingService:
     
     async def _process_model_sessions(
         self,
-        db: AsyncSession,
         model_id: str,
-        sessions: List[RoutedSession],
+        sessions: List[SessionData],
         is_preferred: bool
     ) -> None:
         """
@@ -671,7 +557,6 @@ class SessionRoutingService:
                                   event_type="preferred_all_utilized")
                 try:
                     await self._open_session_for_model(
-                        db=db,
                         model_id=model_id,
                         model_name=None,
                         model_type="LLM",
@@ -694,7 +579,7 @@ class SessionRoutingService:
                 process_logger.info("Closing excess idle session for preferred model",
                                   session_id=to_close.id,
                                   event_type="preferred_close_excess")
-                await self._close_session(db, to_close)
+                await self._close_session(to_close)
         else:
             # Non-preferred model logic
             if idle_long_enough:
@@ -706,30 +591,20 @@ class SessionRoutingService:
                 process_logger.info("Closing idle session for non-preferred model",
                                   session_id=to_close.id,
                                   event_type="non_preferred_close_idle")
-                await self._close_session(db, to_close)
+                await self._close_session(to_close)
     
-    async def _cleanup_expired_sessions(self, db: AsyncSession) -> None:
-        """Mark expired sessions and attempt to close them."""
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        
-        result = await db.execute(
-            select(RoutedSession)
-            .where(
-                RoutedSession.state == SessionState.OPEN,
-                RoutedSession.expires_at < now
-            )
-        )
-        expired_sessions = result.scalars().all()
+    async def _cleanup_expired_sessions(self) -> None:
+        """Mark expired sessions and attempt to close them on the proxy."""
+        expired_sessions = await self._store.get_expired_open()
         
         for session in expired_sessions:
             logger.info("Closing expired session",
                        session_id=session.id,
-                       expired_at=session.expires_at.isoformat(),
+                       expired_at=session.expires_at.isoformat() if session.expires_at else "n/a",
                        event_type="closing_expired_session")
             
-            # Mark as EXPIRED rather than going through close flow
-            session.state = SessionState.EXPIRED
-            session.updated_at = now
+            # Mark as EXPIRED
+            await self._store.update_state(session.id, SessionState.EXPIRED)
             
             # Still try to close on proxy router
             try:
@@ -742,33 +617,37 @@ class SessionRoutingService:
                              event_type="expired_session_close_error")
         
         if expired_sessions:
-            await db.commit()
             logger.info("Cleaned up expired sessions",
                        count=len(expired_sessions),
                        event_type="expired_sessions_cleaned")
     
     # =========================================================================
+    # QUERY HELPERS
+    # =========================================================================
+    
+    async def _get_sessions_by_model(self) -> Dict[str, List[SessionData]]:
+        """Get all OPEN sessions grouped by model_id."""
+        sessions = await self._store.get_all_open()
+        
+        by_model: Dict[str, List[SessionData]] = {}
+        for session in sessions:
+            if session.model_id not in by_model:
+                by_model[session.model_id] = []
+            by_model[session.model_id].append(session)
+        
+        return by_model
+    
+    # =========================================================================
     # SESSION INFO
     # =========================================================================
     
-    async def get_session_info(
-        self,
-        db: AsyncSession,
-        session_id: str
-    ) -> Optional[RoutedSession]:
+    async def get_session_info(self, session_id: str) -> Optional[SessionData]:
         """Get information about a specific session."""
-        result = await db.execute(
-            select(RoutedSession).where(RoutedSession.id == session_id)
-        )
-        return result.scalar_one_or_none()
+        return await self._store.get(session_id)
     
-    async def get_model_sessions_summary(
-        self,
-        db: AsyncSession,
-        model_id: str
-    ) -> Dict[str, Any]:
+    async def get_model_sessions_summary(self, model_id: str) -> Dict[str, Any]:
         """Get a summary of sessions for a model."""
-        sessions = await self._get_open_sessions_for_model(db, model_id)
+        sessions = await self._store.get_open_for_model(model_id)
         
         return {
             "model_id": model_id,
@@ -779,10 +658,10 @@ class SessionRoutingService:
             "sessions": [
                 {
                     "id": s.id,
-                    "state": s.state.value,
+                    "state": s.state,
                     "active_requests": s.active_requests,
                     "last_used_at": s.last_used_at.isoformat() if s.last_used_at else None,
-                    "expires_at": s.expires_at.isoformat()
+                    "expires_at": s.expires_at.isoformat() if s.expires_at else None,
                 }
                 for s in sessions
             ]
@@ -791,4 +670,3 @@ class SessionRoutingService:
 
 # Singleton instance
 session_routing_service = SessionRoutingService()
-

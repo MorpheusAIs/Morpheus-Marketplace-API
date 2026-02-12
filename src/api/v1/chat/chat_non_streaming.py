@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 
 from ....services import proxy_router_service
 from ....services import session_routing_service
-from ....db.database import get_db
+
 from .chat_exceptions import (
     RequestParseError,
     SessionExpiredError,
@@ -97,34 +97,32 @@ async def _create_new_session(
     )
     
     try:
-        async with get_db() as db:
-            # Release the old session first if provided
-            if original_session_id:
-                await session_routing_service.release_session(db, original_session_id)
-            
-            # Route to a new session
-            new_session_id = await session_routing_service.route_request(
-                db=db,
-                user_id=user.id,
-                requested_model=requested_model,
-                model_type="LLM",
+        # Release the old session first if provided
+        if original_session_id:
+            await session_routing_service.release_session(original_session_id)
+        
+        # Route to a new session
+        new_session_id = await session_routing_service.route_request(
+            user_id=user.id,
+            requested_model=requested_model,
+            model_type="LLM",
+        )
+        
+        if not new_session_id:
+            logger.error(
+                "Failed to route to new session",
+                event_type="new_session_creation_failed",
             )
-            
-            if not new_session_id:
-                logger.error(
-                    "Failed to route to new session",
-                    event_type="new_session_creation_failed",
-                )
-                return None
-            
-            logger.info(
-                "Routed to new session successfully",
-                new_session_id=new_session_id,
-                event_type="new_session_created",
-            )
-            
-            await asyncio.sleep(1.0)  # Brief delay to ensure session is registered
-            return new_session_id
+            return None
+        
+        logger.info(
+            "Routed to new session successfully",
+            new_session_id=new_session_id,
+            event_type="new_session_created",
+        )
+        
+        await asyncio.sleep(1.0)  # Brief delay to ensure session is registered
+        return new_session_id
             
     except Exception as e:
         logger.error(
