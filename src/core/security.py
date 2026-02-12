@@ -123,27 +123,34 @@ def generate_api_key() -> tuple[str, str]:
 
 def get_api_key_hash(api_key: str) -> str:
     """
-    Hash an API key for storage.
+    Hash an API key for storage using SHA-256.
+    
+    Fast cryptographic hashing suitable for 256-bit random API keys.
+    SHA-256 is secure for API keys with high entropy (unlike passwords).
     
     Args:
         api_key: Full API key
     
     Returns:
-        Hashed API key
+        SHA-256 hash of the API key (hex encoded)
     """
-    truncated_api_key = api_key[3:]
-    return pwd_context.hash(truncated_api_key)
+    import hashlib
+    return hashlib.sha256(api_key.encode()).hexdigest()
 
 def verify_api_key(plain_api_key: str, hashed_api_key: str) -> bool:
     """
-    Verify an API key against a hash.
+    Verify an API key against a SHA-256 hash.
+    
+    Fast verification (~0.001ms vs ~500ms with bcrypt).
+    Secure for cryptographically random API keys (256 bits entropy).
     
     Args:
         plain_api_key: Plain text API key
-        hashed_api_key: Hashed API key to compare against
+        hashed_api_key: SHA-256 hash to compare against
     
     Returns:
         True if the API key matches, False otherwise
     """
-    truncated_api_key = plain_api_key[3:]
-    return pwd_context.verify(truncated_api_key, hashed_api_key) 
+    import hashlib
+    computed_hash = hashlib.sha256(plain_api_key.encode()).hexdigest()
+    return computed_hash == hashed_api_key 

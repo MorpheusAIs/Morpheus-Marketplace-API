@@ -468,8 +468,9 @@ async def get_api_key_user(
         # Cache miss - fetch from database
         async with get_db() as db:
             # Get the API key with user relationship eagerly loaded
+            # Only load the user, not all of the user's API keys (performance)
             api_key_query = select(APIKey).options(
-                joinedload(APIKey.user).selectinload(User.api_keys)
+                joinedload(APIKey.user)
             ).where(APIKey.key_prefix == key_prefix)
             db_api_key = (await db.execute(api_key_query)).scalar_one_or_none()
             
@@ -581,22 +582,27 @@ async def _update_api_key_last_used_background(api_key_id: int) -> None:
         )
 
 async def get_current_api_key(
+    user: User = Depends(get_api_key_user),  # ← Reuse verified user (avoids duplicate verification)
     api_key_str: str = Security(api_key_header)
 ) -> APIKey:
     """
-    Validate an API key and return the APIKey object.
-    Uses Redis caching with read-through pattern to minimize database load.
+    Get the APIKey object for an already-verified API key.
+    
+    This dependency reuses get_api_key_user() to avoid duplicate verification.
+    The API key has already been validated by get_api_key_user(), so we just
+    fetch the APIKey object from cache/database without re-verifying the hash.
     
     The API key is expected in the format: "Bearer sk-xxxxxx" or just "sk-xxxxxx"
     
     Args:
+        user: User object from get_api_key_user (already verified)
         api_key_str: API key from Authorization header
         
     Returns:
-        APIKey object if valid
+        APIKey object
         
     Raises:
-        HTTPException: If API key is invalid or missing
+        HTTPException: If API key cannot be found (should not happen after user verification)
     """
     if not api_key_str:
         raise HTTPException(
@@ -621,33 +627,14 @@ async def get_current_api_key(
     key_prefix = api_key_str[:9] if len(api_key_str) >= 9 else api_key_str
     
     try:
-        # Try cache first (read-through pattern)
+        # Try cache first (already verified by get_api_key_user, just fetch APIKey object)
         cached_data = await cache_service.get("api_key", key_prefix)
         
         if cached_data:
-            # Cache hit - validate hash and return APIKey
-            cached_hash = cached_data.get("hashed_key")
-            cached_encrypted = cached_data.get("encrypted_key")
-            
-            # Validate the full API key against cached hash
-            if cached_encrypted is None:
-                # LEGACY KEY: Only prefix verification
-                auth_logger.debug("Legacy API key verified (cached, prefix-only)",
-                                key_prefix=key_prefix,
-                                event_type="cached_legacy_api_key_verified")
-            else:
-                # MODERN KEY: Full hash verification
-                if not verify_api_key(api_key_str, cached_hash):
-                    auth_logger.error("Cached API key hash validation failed",
-                                     key_prefix=key_prefix,
-                                     event_type="cached_api_key_validation_failed")
-                    # Invalidate bad cache entry
-                    await cache_service.delete("api_key", key_prefix)
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Invalid API key",
-                        headers={"WWW-Authenticate": "Bearer"},
-                    )
+            # Cache hit - return APIKey without re-verifying (already done by get_api_key_user)
+            auth_logger.debug("APIKey retrieved from cache (already verified)",
+                            key_prefix=key_prefix,
+                            event_type="api_key_cached_retrieval")
             
             # Update last_used_at in background (non-blocking)
             asyncio.create_task(_update_api_key_last_used_background(cached_data.get("id")))
@@ -673,7 +660,7 @@ async def get_current_api_key(
                 is_default=cached_data.get("is_default"),
             )
         
-        # Cache miss - fetch from database
+        # Cache miss - fetch from database (should rarely happen after get_api_key_user)
         async with get_db() as db:
             # Get the API key with its user relationship loaded
             api_key_query = select(APIKey).options(
@@ -692,23 +679,10 @@ async def get_current_api_key(
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             
-            # Validate the full API key
-            if db_api_key.encrypted_key is None:
-                # LEGACY KEY: Only prefix verification
-                auth_logger.info("Legacy API key verified (prefix-only)",
-                               key_prefix=key_prefix,
-                               event_type="legacy_api_key_verified")
-            else:
-                # MODERN KEY: Full hash verification
-                if not verify_api_key(api_key_str, db_api_key.hashed_key):
-                    auth_logger.error("API key hash validation failed",
-                                     key_prefix=key_prefix,
-                                     event_type="api_key_validation_failed")
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Invalid API key",
-                        headers={"WWW-Authenticate": "Bearer"},
-                    )
+            # No verification needed - already done by get_api_key_user()
+            auth_logger.debug("APIKey retrieved from database (already verified)",
+                            key_prefix=key_prefix,
+                            event_type="api_key_db_retrieval")
             
             # Update last used timestamp
             await api_key_crud.update_last_used(db, db_api_key)
