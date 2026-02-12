@@ -175,7 +175,7 @@ async def update_overage_setting(
 # === Transactions List Endpoint ===
 @router.get("/transactions", response_model=LedgerListResponse)
 async def list_transactions(
-    limit: int = Query(default=50, ge=1, le=100),
+    limit: int = Query(default=50, ge=1),
     offset: int = Query(default=0, ge=0),
     entry_type: Optional[LedgerEntryTypeEnum] = Query(default=None),
     from_date: Optional[datetime] = Query(default=None, alias="from"),
@@ -343,7 +343,7 @@ async def get_monthly_spending(
 
 @router.get("/usage", response_model=UsageListResponse)
 async def list_usage(
-    limit: int = Query(default=50, ge=1, le=100),
+    limit: int = Query(default=50, ge=1),
     offset: int = Query(default=0, ge=0),
     from_date: Optional[datetime] = Query(default=None, alias="from"),
     to_date: Optional[datetime] = Query(default=None, alias="to"),
@@ -420,7 +420,7 @@ async def list_usage(
 async def list_usage_for_month(
     year: int = Query(..., description="Year"),
     month: int = Query(..., ge=1, le=12, description="Month (1-12)"),
-    limit: int = Query(default=50, ge=1, le=100),
+    limit: int = Query(default=50, ge=1),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
@@ -431,7 +431,7 @@ async def list_usage_for_month(
     Parameters:
     - year: Year
     - month: Month (1-12)
-    - limit: Maximum number of items to return (1-100)
+    - limit: Maximum number of items to return (1-∞)
     - offset: Number of items to skip
     
     Returns newest entries first.
