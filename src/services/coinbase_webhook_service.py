@@ -128,30 +128,20 @@ class CoinbaseWebhookService:
         """
         log_context = log_context or {}
 
-        user_id_str = metadata.get("user_id") if metadata else None
+        cognito_user_id = metadata.get("user_id") if metadata else None
 
-        if not user_id_str:
+        if not cognito_user_id:
             logger.error(
                 "Missing user_id in metadata",
                 **log_context,
             )
             return None, "Missing user_id in metadata"
 
-        try:
-            user_id = int(user_id_str)
-        except ValueError:
-            logger.error(
-                "Invalid user_id in metadata",
-                user_id_str=user_id_str,
-                **log_context,
-            )
-            return None, "Invalid user_id in metadata"
-
-        user = await user_crud.get_user_by_id(db, user_id)
+        user = await user_crud.get_user_by_cognito_id(db, cognito_user_id)
         if not user:
             logger.error(
                 "User not found",
-                user_id=user_id,
+                cognito_user_id=cognito_user_id,
                 **log_context,
             )
             return None, "User not found"
