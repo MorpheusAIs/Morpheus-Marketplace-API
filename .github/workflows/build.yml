@@ -16,6 +16,8 @@ name: Morpheus-Mktplc-API-CI-CD
 #   • Database rollback on deployment failures
 #   • Git tags only created after successful deployment (safe to re-run on failure)
 
+# 2026-02-12: Added stg branch support
+
 on:
   workflow_dispatch:
     inputs:
