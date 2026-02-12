@@ -795,6 +795,9 @@ jobs:
           if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
             DB_HOST="db.dev.mor.org"
+          elif [ "${{ github.ref_name }}" == "stg" ]; then
+            ENV="stg"
+            DB_HOST="db.stg.mor.org"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
             DB_HOST="db.mor.org"
