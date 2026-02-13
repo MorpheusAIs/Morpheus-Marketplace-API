@@ -3,7 +3,7 @@ Coinbase webhook service for processing payment events.
 
 Supports both:
 - NEW: Payment Link API events (payment_link.payment.success/failed/expired)
-- LEGACY: Commerce Charge API events (charge:confirmed, etc.)
+- LEGACY: Commerce Charge API events (charge:pending, charge:confirmed, etc.)
 
 Docs: https://docs.cdp.coinbase.com/coinbase-business/payment-link-apis/webhooks
 Migration: https://docs.cdp.coinbase.com/coinbase-business/payment-link-apis/migrate/overview
@@ -480,7 +480,10 @@ class CoinbaseWebhookService:
         event_type: str,
     ) -> Tuple[bool, str]:
         """
-        Handle a legacy charge:confirmed event (payment received).
+        Handle a legacy charge:pending or charge:confirmed event (payment received).
+
+        charge:pending fires first (~seconds); charge:confirmed fires later (~12 min).
+        Idempotency by transaction_id prevents double-credit if both fire.
 
         DEPRECATED: Will be removed after migration to Payment Link API.
         """
@@ -533,12 +536,12 @@ class CoinbaseWebhookService:
             event_type=event_type,
             transaction_id=transaction_id,
             payment_metadata=payment_metadata,
-            description="Coinbase payment - Charge Confirmed (Legacy)",
+            description=f"Coinbase payment - {event_type} (Legacy)",
         )
 
         logger.info(
-            "Processed legacy Coinbase charge:confirmed",
-            event_type=self.EVENT_TYPE_CHARGE_CONFIRMED,
+            f"Processed legacy Coinbase {event_type}",
+            event_type=event_type,
             user_id=user.id,
             amount_usd=str(amount_usd),
             ledger_entry_id=str(entry.id),

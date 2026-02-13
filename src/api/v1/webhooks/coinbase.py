@@ -6,7 +6,7 @@ Supports both:
        Signature: X-Hook0-Signature header (t=timestamp,h=headers,v1=hmac)
        Docs: https://docs.cdp.coinbase.com/coinbase-business/payment-link-apis/webhooks
 
-- LEGACY: Commerce Charge API webhooks (charge:confirmed, etc.)
+- LEGACY: Commerce Charge API webhooks (charge:pending, charge:confirmed, etc.)
           Signature: X-CC-Webhook-Signature header (HMAC-SHA256 of body)
           Will be removed after migration is complete.
 """
@@ -370,7 +370,13 @@ async def _handle_legacy_commerce_webhook(
 
     event_data = event.get("data", {})
 
-    if event_type == coinbase_webhook_service.EVENT_TYPE_CHARGE_CONFIRMED:
+    # charge:pending = payment detected on chain (fast, ~seconds)
+    # charge:confirmed = fully finalized (slow, ~12 min for some chains)
+    # Both credit the user; idempotency prevents double-credit if both fire
+    if event_type in (
+        coinbase_webhook_service.EVENT_TYPE_CHARGE_PENDING,
+        coinbase_webhook_service.EVENT_TYPE_CHARGE_CONFIRMED,
+    ):
         success, message = await coinbase_webhook_service.handle_charge_confirmed(
             db=db,
             event_data=event_data,
@@ -379,7 +385,7 @@ async def _handle_legacy_commerce_webhook(
         )
         if not success:
             logger.error(
-                "Failed to process charge:confirmed",
+                f"Failed to process {event_type}",
                 coinbase_event_id=event_id,
                 error=message,
             )
@@ -419,7 +425,8 @@ async def handle_coinbase_webhook(
     - payment_link.payment.expired: Payment link expired
 
     Legacy event types (deprecated):
-    - charge:confirmed: Payment confirmed
+    - charge:pending: Payment detected on chain (fast, ~seconds)
+    - charge:confirmed: Payment fully finalized (slow, ~12 min for some chains)
     """
     # Read body once for verification and parsing
     try:
