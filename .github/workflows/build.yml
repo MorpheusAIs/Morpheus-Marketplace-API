@@ -16,6 +16,8 @@ name: Morpheus-Mktplc-API-CI-CD
 #   • Database rollback on deployment failures
 #   • Git tags only created after successful deployment (safe to re-run on failure)
 
+# 2026-02-12: Added stg branch support again
+
 on:
   workflow_dispatch:
     inputs:
@@ -128,7 +130,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev')) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/stg')) ||
         (github.event_name == 'workflow_dispatch') 
       )
     runs-on: ubuntu-latest
@@ -793,6 +795,9 @@ jobs:
           if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
             DB_HOST="db.dev.mor.org"
+          elif [ "${{ github.ref_name }}" == "stg" ]; then
+            ENV="stg"
+            DB_HOST="db.stg.mor.org"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
             DB_HOST="db.mor.org"
