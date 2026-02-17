@@ -379,9 +379,9 @@ jobs:
             --secret-id "${ENV}-morpheus-api" \
             --query SecretString --output text)
           
-          DB_USER=$(echo "$SECRET_VALUE" | jq -r '.postgres_user')
-          DB_PASSWORD=$(echo "$SECRET_VALUE" | jq -r '.postgres_password')
-          DB_NAME=$(echo "$SECRET_VALUE" | jq -r '.postgres_db')
+          DB_USER=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_USER')
+          DB_PASSWORD=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_PASSWORD')
+          DB_NAME=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_DB')
           
           # Set database URL for migrations
           export DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}"
@@ -814,9 +814,9 @@ jobs:
             --secret-id "${ENV}-morpheus-api" \
             --query SecretString --output text)
           
-          DB_USER=$(echo "$SECRET_VALUE" | jq -r '.postgres_user')
-          DB_PASSWORD=$(echo "$SECRET_VALUE" | jq -r '.postgres_password')
-          DB_NAME=$(echo "$SECRET_VALUE" | jq -r '.postgres_db')
+          DB_USER=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_USER')
+          DB_PASSWORD=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_PASSWORD')
+          DB_NAME=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_DB')
           
           export DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}"
           
