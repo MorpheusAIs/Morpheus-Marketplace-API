@@ -646,7 +646,6 @@ async def chatCompletions(
         "Content-Type": "application/json",
         "Accept": "application/json",
         "session_id": session_id,
-        "X-Session-ID": session_id,
     }
     
     # Add basic auth
@@ -659,11 +658,11 @@ async def chatCompletions(
         # Increased timeout for large token responses (user experiencing issues at ~7K tokens)
         response = await _execute_request(
             "POST",
-            f"v1/chat/completions?session_id={session_id}",
+            f"v1/chat/completions",
             headers=headers,
             json_data=payload,
-            timeout=180.0,  # 3 minutes for large token responses
-            max_retries=2   # Reduced retries since timeout is longer
+            timeout=settings.PROXY_ROUTER_CHAT_TIMEOUT,
+            max_retries=1   # Reduced retries since timeout is longer
         )
         return response
             
@@ -715,7 +714,6 @@ async def chatCompletionsStream(
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
         "session_id": session_id,
-        "X-Session-ID": session_id,
     }
     
     # Add basic auth
@@ -724,7 +722,7 @@ async def chatCompletionsStream(
     headers["authorization"] = f"Basic {auth_b64}"
     
     # Build URL with session_id parameter
-    url = f"{settings.PROXY_ROUTER_URL.rstrip('/')}/v1/chat/completions?session_id={session_id}"
+    url = f"{settings.PROXY_ROUTER_URL.rstrip('/')}/v1/chat/completions"
     
     try:
         async with httpx.AsyncClient() as client:
@@ -733,7 +731,7 @@ async def chatCompletionsStream(
                 url,
                 json=payload,
                 headers=headers,
-                timeout=60.0
+                timeout=settings.PROXY_ROUTER_STREAM_TIMEOUT,
             ) as response:
                 # Check for errors
                 if response.status_code >= 400:
