@@ -18,8 +18,6 @@ The gateway provides OpenAI-compatible endpoints that connect to the Morpheus bl
 - **Asynchronous HTTP Client:** `httpx` (for communicating with the proxy-router)
 - **JWT Handling:** `python-jose`
 - **Password Hashing:** `passlib[bcrypt]`
-- **Cryptography:** `cryptography` for private key encryption
-- **KMS Integration:** AWS KMS for secure key management
 - **Containerization:** Docker, Docker Compose
 
 ## Project Structure
@@ -31,17 +29,19 @@ morpheus_api_python/
 ├── src/
 │   ├── api/                  # FastAPI routers/endpoints
 │   │   ├── v1/
-│   │   │   ├── auth.py       # User registration, login, API keys, private key mgmt
-│   │   │   ├── models.py     # OpenAI compatible models endpoint
-│   │   │   ├── chat.py       # OpenAI compatible chat completions
-│   │   │   ├── chat_history.py # Chat history management
-│   │   │   ├── session.py    # Session management
-│   │   │   └── automation.py # Automation settings
+│   │   │   ├── auth/         # User management, API keys
+│   │   │   ├── models/       # OpenAI compatible models endpoint
+│   │   │   ├── chat/         # OpenAI compatible chat completions
+│   │   │   ├── chat_history/ # Chat history management
+│   │   │   ├── embeddings/   # Embeddings endpoint
+│   │   │   ├── audio/        # Audio transcription & speech
+│   │   │   ├── billing/      # Billing & credits management
+│   │   │   ├── webhooks/     # Stripe & Coinbase webhooks
+│   │   │   └── wallet/       # Wallet linking & management
 │   │   └── __init__.py
 │   ├── core/                 # Core logic, configuration, security
 │   │   ├── config.py         # Pydantic settings
 │   │   ├── security.py       # JWT generation/validation, password hashing, API key handling
-│   │   ├── key_vault.py      # Private key encryption/decryption, KMS interaction
 │   │   ├── direct_model_service.py # Direct model fetching with in-memory cache
 │   │   ├── model_routing.py  # Model name to blockchain ID routing
 │   │   ├── local_testing.py  # Local testing mode and authentication bypass
@@ -49,25 +49,27 @@ morpheus_api_python/
 │   ├── crud/                 # Database interaction functions
 │   │   ├── user.py
 │   │   ├── api_key.py
-│   │   ├── private_key.py
 │   │   ├── chat.py           # Chat and message CRUD operations
-│   │   ├── session.py        # Session CRUD operations
+│   │   ├── credits.py        # Credits/billing CRUD operations
+│   │   ├── wallet.py         # Wallet CRUD operations
 │   │   └── __init__.py
 │   ├── db/                   # Database session management, base model
 │   │   ├── database.py
-│   │   ├── models.py         # SQLAlchemy models (includes Chat, Message)
+│   │   ├── models/           # SQLAlchemy models
 │   │   └── __init__.py
 │   ├── schemas/              # Pydantic schemas for request/response validation
 │   │   ├── user.py
-│   │   ├── token.py
 │   │   ├── api_key.py
-│   │   ├── private_key.py
+│   │   ├── billing.py
 │   │   ├── openai.py         # Schemas for OpenAI compatibility
 │   │   └── __init__.py
 │   ├── services/             # Business logic layer
-│   │   ├── cognito_service.py    # Cognito integration
-│   │   ├── session_service.py    # Session management logic
-│   │   ├── proxy_router.py       # Proxy router communication
+│   │   ├── cognito_service.py         # Cognito integration
+│   │   ├── session_routing_service.py # Session routing for inference requests
+│   │   ├── proxy_router_service.py    # Proxy router communication
+│   │   ├── billing_service.py         # Billing logic
+│   │   ├── staking_service.py         # Staking logic
+│   │   ├── pricing/                   # Pricing providers
 │   │   └── __init__.py
 │   ├── dependencies.py       # FastAPI dependency injection functions
 │   └── main.py               # FastAPI application instance and root setup
@@ -124,7 +126,6 @@ cp env.local.example .env.local
 - Python 3.11+
 - Docker and Docker Compose
 - PostgreSQL (if running locally without Docker)
-- AWS Account with KMS access (for production)
 
 ### Production Installation
 
@@ -169,11 +170,6 @@ DEFAULT_FALLBACK_MODEL=mistral-31-24b
 DEFAULT_FALLBACK_EMBEDDINGS_MODEL=text-embedding-bge-m3
 DEFAULT_FALLBACK_TTS_MODEL=tts-kokoro
 DEFAULT_FALLBACK_STT_MODEL=whisper-1
-
-# JWT
-JWT_SECRET_KEY=generate_this_with_openssl_rand_-hex_32
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-REFRESH_TOKEN_EXPIRE_DAYS=7
 
 # Logging
 LOG_LEVEL=INFO                        # Master log level: DEBUG, INFO, WARNING, ERROR (controls all components)
@@ -242,16 +238,6 @@ LOG_LEVEL_API=DEBUG          # Chat completion and API flow
 LOG_LEVEL_CORE=WARN          # Reduce infrastructure noise
 ```
 
-# AWS KMS (for production)
-KMS_PROVIDER=aws
-KMS_MASTER_KEY_ID=your_kms_key_id_or_arn
-AWS_REGION=us-east-1
-# AWS_ACCESS_KEY_ID=your_access_key_id         # If not using IAM roles
-# AWS_SECRET_ACCESS_KEY=your_secret_access_key # If not using IAM roles
-
-# Development mode local encryption (not for production)
-MASTER_ENCRYPTION_KEY=generate_this_with_openssl_rand_-hex_32
-
 # Proxy Router
 PROXY_ROUTER_URL=http://localhost:8545  # URL of the Morpheus-Lumerin Node proxy-router
 ```
@@ -304,13 +290,6 @@ alembic downgrade -1  # Roll back one migration
 ## Model Service
 
 The API uses an in-memory caching system for model data fetched from CloudFront. No external caching service is required.
-
-## AWS KMS Setup (Production)
-
-1. Create a KMS key in the AWS console or using AWS CLI
-2. Note the key ARN or ID
-3. Configure IAM permissions for your service principal
-4. Update environment variables with key details
 
 ## Running the Application
 
@@ -395,29 +374,38 @@ FastAPI automatically generates interactive API documentation:
 
 ### Core Endpoints
 
-#### Authentication
+#### Authentication & User Management
 
-- `POST /api/v1/auth/register` - Create a new user
-- `POST /api/v1/auth/login` - Log in and get JWT tokens
-- `POST /api/v1/auth/refresh` - Refresh access token
+- `GET /api/v1/auth/me` - Get current user information
+- `DELETE /api/v1/auth/register` - Delete user account
 
 #### API Key Management
 
 - `POST /api/v1/auth/keys` - Create a new API key
 - `GET /api/v1/auth/keys` - List your API keys
 - `DELETE /api/v1/auth/keys/{key_id}` - Delete an API key
-
-#### Private Key Management
-
-- `POST /api/v1/auth/private-key` - Store your blockchain private key
-- `GET /api/v1/auth/private-key/status` - Check if you have a stored private key
-- `DELETE /api/v1/auth/private-key` - Delete your stored private key
+- `GET /api/v1/auth/keys/default` - Get default API key
+- `PUT /api/v1/auth/keys/{key_id}/default` - Set default API key
 
 #### OpenAI-Compatible Endpoints
 
 - `GET /api/v1/models` - List available models
-- `GET /api/v1/models/{model_id}` - Get model details
 - `POST /api/v1/chat/completions` - Create a chat completion
+- `POST /api/v1/embeddings` - Create embeddings
+- `POST /api/v1/audio/transcriptions` - Audio transcription
+- `POST /api/v1/audio/speech` - Text-to-speech
+
+#### Billing & Credits
+
+- `GET /api/v1/billing/balance` - Get credit balance
+- `GET /api/v1/billing/transactions` - List transactions
+- `GET /api/v1/billing/spending` - Monthly spending metrics
+
+#### Wallet Management
+
+- `POST /api/v1/auth/wallet/link` - Link a wallet
+- `GET /api/v1/auth/wallet/` - Get wallet status
+- `DELETE /api/v1/auth/wallet/{wallet_address}` - Unlink a wallet
 
 ### Example: Testing Chat Completion
 
@@ -448,21 +436,9 @@ curl http://localhost:8000/api/v1/models
 
 #### 🏭 Production (Full Authentication Flow)
 
-1. Register a user:
-   ```bash
-   curl -X POST http://localhost:8000/api/v1/auth/register \
-     -H "Content-Type: application/json" \
-     -d '{"name": "Test User", "email": "user@example.com", "password": "securepassword"}'
-   ```
+1. Authenticate via Cognito OAuth2 flow to obtain a JWT token.
 
-2. Login to get tokens:
-   ```bash
-   curl -X POST http://localhost:8000/api/v1/auth/login \
-     -H "Content-Type: application/json" \
-     -d '{"email": "user@example.com", "password": "securepassword"}'
-   ```
-
-3. Create an API key (using JWT from login):
+2. Create an API key (using JWT from Cognito):
    ```bash
    curl -X POST http://localhost:8000/api/v1/auth/keys \
      -H "Authorization: Bearer YOUR_JWT_TOKEN" \
@@ -470,15 +446,7 @@ curl http://localhost:8000/api/v1/models
      -d '{"name": "My API Key"}'
    ```
 
-4. Store a private key:
-   ```bash
-   curl -X POST http://localhost:8000/api/v1/auth/private-key \
-     -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"private_key": "YOUR_BLOCKCHAIN_PRIVATE_KEY"}'
-   ```
-
-5. Create a chat completion using the API key:
+3. Create a chat completion using the API key:
    ```bash
    curl -X POST http://localhost:8000/api/v1/chat/completions \
      -H "Authorization: Bearer YOUR_API_KEY" \
@@ -498,16 +466,8 @@ curl http://localhost:8000/api/v1/models
 
 ## Open Questions and TODOs
 
-This implementation is based on the [FastAPI Implementation Plan](fastapi_implementation_plan.md) and has the following open questions:
-
 1. **Proxy-Router API Specifics:** The exact API contract of the `morpheus-lumerin-node` `proxy-router` needs clarification.
 2. **Model Mapping Source:** The source of mapping between OpenAI model names and blockchain model IDs needs to be determined.
-3. **Token Spending Approval:** The mechanism for the `/auth/approve-spending` endpoint needs specification.
-4. **Private Key Scope:** Confirm if a single private key per user is sufficient.
-5. **Rate Limiting:** Determine rate-limiting requirements and implement if needed.
-6. **Security Requirements:** Confirm if there are any specific compliance or advanced security requirements.
-
-The current implementation uses placeholder/mock data for model information and chat completions until the proxy-router integration is finalized.
 
 ## 🔄 Development Workflow
 
@@ -563,9 +523,7 @@ python load_test.py \
 The load testing script focuses on endpoints that don't depend on the proxy-router:
 - ✅ Authentication and API key management
 - ✅ Chat history CRUD operations
-- ✅ Automation settings
 - ✅ Model listing and health checks
-- ❌ Session management (requires proxy-router)
 - ❌ Chat completions (requires proxy-router)
 - ❌ Embeddings (requires proxy-router)
 

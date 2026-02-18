@@ -132,12 +132,12 @@ async def verify_migrations():
             print('Run: ./manage_migrations.sh upgrade')
             return False
             
-        # Check sessions table
-        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sessions')\"))
-        sessions_exists = result.scalar()
+        # Check routed_sessions table
+        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'routed_sessions')\"))
+        routed_sessions_exists = result.scalar()
         
-        if not sessions_exists:
-            print('ERROR: Sessions table does not exist despite migrations being up to date!')
+        if not routed_sessions_exists:
+            print('ERROR: routed_sessions table does not exist despite migrations being up to date!')
             print('Run: ./manage_migrations.sh fix')
             return False
             

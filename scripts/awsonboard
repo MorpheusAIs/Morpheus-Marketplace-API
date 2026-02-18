@@ -258,15 +258,10 @@ async def verify_migrations():
         users_exists = result.scalar()
         print(f'Users table exists: {users_exists}')
 
-        # Check sessions table
-        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sessions')\"))
-        sessions_exists = result.scalar()
-        print(f'Sessions table exists: {sessions_exists}')
-        
-        # Check delegations table
-        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'delegations')\"))
-        delegations_exists = result.scalar()
-        print(f'Delegations table exists: {delegations_exists}')
+        # Check routed_sessions table
+        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'routed_sessions')\"))
+        routed_sessions_exists = result.scalar()
+        print(f'Routed sessions table exists: {routed_sessions_exists}')
 
 asyncio.run(verify_migrations())
 "
@@ -516,44 +511,11 @@ recovery_procedure() {
         echo "Alembic upgrade head successful during recovery."
     fi
 
-    echo "5. Checking for orphaned sessions in the database..."
-    python3 -c "
-import asyncio, os, sys
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-
-sys.path.insert(0, os.path.abspath('.'))
-from src.core.config import settings
-
-async def cleanup_orphaned_sessions():
-    db_url = os.getenv('DATABASE_URL', str(settings.DATABASE_URL))
-    engine = create_async_engine(db_url)
-    
-    async with AsyncSession(engine) as session:
-        # Check if sessions table exists
-        result = await session.execute(text(\"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sessions')\"))
-        if not result.scalar():
-            print('Sessions table does not exist, skipping cleanup')
-            return
-            
-        # Deactivate all sessions (mark as inactive)
-        try:
-            print('Marking all sessions as inactive...')
-            result = await session.execute(text(\"UPDATE sessions SET is_active = false\"))
-            await session.commit()
-            print(f'Successfully deactivated all sessions')
-        except Exception as e:
-            print(f'Error deactivating sessions: {e}')
-            await session.rollback()
-
-asyncio.run(cleanup_orphaned_sessions())
-"
-
-    echo "6. Starting up the application..."
+    echo "5. Starting up the application..."
     sudo systemctl start morpheus-api
     sleep 5
 
-    echo "7. Checking application status..."
+    echo "6. Checking application status..."
     sudo systemctl status morpheus-api --no-pager
 
     echo "Recovery procedure complete."

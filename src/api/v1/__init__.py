@@ -4,8 +4,6 @@ from fastapi import APIRouter
 from .auth.index import router as auth_router
 from .models.index import router as models_router
 from .chat.index import router as chat_router
-from .session.index import router as session_router
-from .automation.index import router as automation_router
 from .chat_history.index import router as chat_history_router
 from .embeddings.index import router as embeddings_router
 from .audio.index import router as audio_router
@@ -26,13 +24,6 @@ embeddings.include_router(embeddings_router)
 
 audio = APIRouter()
 audio.include_router(audio_router)
-
-session = APIRouter()
-session.include_router(session_router)
-
-# Automation router
-automation = APIRouter()
-automation.include_router(automation_router)
 
 # Wrap auth router in a router with our fixed route class
 auth = APIRouter()
