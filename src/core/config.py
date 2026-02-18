@@ -146,12 +146,6 @@ class Settings(BaseSettings):
     
     DEFAULT_BALANCE_AMOUNT: int = Field(default=int(os.getenv("DEFAULT_BALANCE_AMOUNT", "10")))
 
-    # JWT Settings
-    JWT_SECRET_KEY: str = Field(default=os.getenv("JWT_SECRET_KEY", "super_secret_key_change_me"))
-    JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
-    REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
-    
     # API Key Encryption
     ENCRYPTION_SECRET_KEY: str = Field(default=os.getenv("ENCRYPTION_SECRET_KEY", "encryption_secret_change_me"))
 
@@ -162,14 +156,7 @@ class Settings(BaseSettings):
     PROXY_ROUTER_CHAT_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_CHAT_TIMEOUT", "300.0")))
     PROXY_ROUTER_STREAM_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_STREAM_TIMEOUT", "300.0")))
 
-    # Blockchain Private Key Fallback
-    FALLBACK_PRIVATE_KEY: str | None = Field(default=os.getenv("FALLBACK_PRIVATE_KEY"))
-
-    # KMS Settings (placeholders - specific config depends on KMS choice)
-    KMS_PROVIDER: str | None = Field(default=os.getenv("KMS_PROVIDER", "aws"))
-    KMS_MASTER_KEY_ID: str | None = Field(default=os.getenv("KMS_MASTER_KEY_ID"))
-    
-    # AWS KMS specific settings
+    # AWS settings
     AWS_REGION: str = os.getenv("AWS_REGION", "us-east-2")
     AWS_ACCESS_KEY_ID: str | None = Field(default=os.getenv("AWS_ACCESS_KEY_ID"))
     AWS_SECRET_ACCESS_KEY: str | None = Field(default=os.getenv("AWS_SECRET_ACCESS_KEY"))
@@ -182,12 +169,6 @@ class Settings(BaseSettings):
     COGNITO_DOMAIN: str = Field(default=os.getenv("COGNITO_DOMAIN", "auth.mor.org"))
     COGNITO_JWKS_URL: str = Field(default=f"https://cognito-idp.{os.getenv('COGNITO_REGION', 'us-east-2')}.amazonaws.com/{os.getenv('COGNITO_USER_POOL_ID', 'us-east-2_tqCTHoSST')}/.well-known/jwks.json")
     
-    # Local encryption key (for development)
-    MASTER_ENCRYPTION_KEY: str | None = Field(default=os.getenv("MASTER_ENCRYPTION_KEY"))
-    
-    # Automation feature flag
-    AUTOMATION_FEATURE_ENABLED: bool = Field(default=os.getenv("AUTOMATION_FEATURE_ENABLED", "False").lower() == "true")
-    
     # Session Routing Service Configuration
     # Interval in seconds for automated activity loop (session scaling)
     SESSION_AUTOMATION_INTERVAL_SECONDS: int = Field(default=int(os.getenv("SESSION_AUTOMATION_INTERVAL_SECONDS", "30")))
@@ -197,9 +178,6 @@ class Settings(BaseSettings):
     SESSION_DEFAULT_DURATION_SECONDS: int = Field(default=int(os.getenv("SESSION_DEFAULT_DURATION_SECONDS", "1800")))
     # Comma-separated list of preferred models (keep at least one idle session)
     SESSION_PREFERRED_MODELS: str = Field(default=os.getenv("SESSION_PREFERRED_MODELS", ""))
-    
-    # Delegation
-    GATEWAY_DELEGATE_ADDRESS: str = "0xGatewayDelegateAccountAddressPlaceholder" # Placeholder
     
     # Direct Model Fetching Settings (replaces model sync)
     ACTIVE_MODELS_URL: str = Field(default=os.getenv("ACTIVE_MODELS_URL", "https://active.dev.mor.org/active_models.json"))

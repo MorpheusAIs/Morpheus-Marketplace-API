@@ -22,10 +22,6 @@ class User(Base):
     
     # Relationships
     api_keys = relationship("APIKey", back_populates="user")
-    sessions = relationship("Session", back_populates="user")
-    private_key = relationship("UserPrivateKey", back_populates="user", uselist=False, cascade="all, delete-orphan")
-    automation_settings = relationship("UserAutomationSettings", back_populates="user", uselist=False, cascade="all, delete-orphan")
-    delegations = relationship("Delegation", back_populates="user", cascade="all, delete-orphan")
     chats = relationship("Chat", back_populates="user", cascade="all, delete-orphan")
     wallet_links = relationship("WalletLink", back_populates="user", cascade="all, delete-orphan")
     wallet_nonces = relationship("WalletNonce", back_populates="user", cascade="all, delete-orphan")

@@ -53,36 +53,6 @@ api_key_header = APIKeyHeader(
 
 cognito_client = boto3.client('cognito-idp', region_name=settings.AWS_REGION)
 
-async def get_api_key_model(
-    db: AsyncSession = Depends(get_db_session),
-    api_key: str = Depends(api_key_header)
-) -> Optional[APIKey]:
-    """
-    Get the API key for an API key header.
-    """
-    # Derive API key prefix from Authorization header value
-    api_key_str = api_key or ""
-    if api_key_str.startswith("Bearer "):
-        api_key_str = api_key_str.replace("Bearer ", "")
-    if not api_key_str.startswith("sk-"):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key format. Must start with sk-"
-        )
-    api_key_prefix = api_key_str[:9] if len(api_key_str) >= 9 else api_key_str
-    auth_logger.debug("Looking up API key", api_key_prefix=api_key_prefix)
-    db_api_key = await api_key_crud.get_api_key_by_prefix(db, api_key_prefix)
-    
-    if not db_api_key:
-        auth_logger.error("API key not found", 
-                         api_key_prefix=api_key_prefix,
-                         event_type="api_key_lookup_failed")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="API key not found"
-        )
-    return db_api_key
-
 async def get_current_user(
     db: AsyncSession = Depends(get_db_session),
     token: Optional[HTTPAuthorizationCredentials] = Depends(oauth2_scheme_optional)

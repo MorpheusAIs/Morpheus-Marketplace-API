@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 
 
 from ....schemas import openai as openai_schemas
-from ....crud import session as session_crud
 from ....crud import api_key as api_key_crud
 from ....core.config import settings
 from ....services import session_routing_service, NoSessionAvailableError, SessionOpenError

@@ -11,12 +11,8 @@ from .base import Base
 # User and authentication models
 from .user import User
 from .api_key import APIKey
-from .user_private_key import UserPrivateKey
-from .user_automation_settings import UserAutomationSettings
-from .delegation import Delegation
 
 # Session models
-from .session import Session
 from .routed_session import RoutedSession, SessionState
 
 # Chat models
@@ -41,11 +37,7 @@ __all__ = [
     # User models
     "User",
     "APIKey",
-    "UserPrivateKey",
-    "UserAutomationSettings",
-    "Delegation",
     # Session
-    "Session",
     "RoutedSession",
     "SessionState",
     # Chat
@@ -62,4 +54,3 @@ __all__ = [
     "WalletNonce",
     "NONCE_TTL_SECONDS",
 ]
-

@@ -26,5 +26,4 @@ class APIKey(Base):
     
     # Relationships
     user = relationship("User", back_populates="api_keys")
-    sessions = relationship("Session", back_populates="api_key")
 
