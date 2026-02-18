@@ -39,7 +39,7 @@ async def verify_tables():
             ))
             tables = [row[0] for row in result.fetchall()]
             
-            required_tables = ['users', 'api_keys', 'chats', 'messages', 'sessions']
+            required_tables = ['users', 'api_keys', 'chats', 'messages', 'routed_sessions']
             missing_tables = [t for t in required_tables if t not in tables]
             
             if missing_tables:
