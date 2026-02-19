@@ -357,15 +357,17 @@ jobs:
           BUILDTAG=${{ needs.Generate-Tag.outputs.tag_name }}
           
           # Determine environment and database
+          # Note: Using Aurora Serverless v2 endpoints (cypher.*.mor.org)
+          # Aurora has replaced the old RDS instances (db.*.mor.org)
           if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
-            DB_HOST="db.dev.mor.org"
+            DB_HOST="cypher.dev.mor.org"
           elif [ "${{ github.ref_name }}" == "stg" ]; then
             ENV="stg"
-            DB_HOST="db.stg.mor.org"
+            DB_HOST="cypher.stg.mor.org"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
-            DB_HOST="db.mor.org"
+            DB_HOST="cypher.mor.org"
           else
             echo "❌ Unsupported branch for deployment: ${{ github.ref_name }}"
             exit 1
@@ -792,15 +794,17 @@ jobs:
           fi
           
           # Determine environment and database
+          # Note: Using Aurora Serverless v2 endpoints (cypher.*.mor.org)
+          # Aurora has replaced the old RDS instances (db.*.mor.org)
           if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
-            DB_HOST="db.dev.mor.org"
+            DB_HOST="cypher.dev.mor.org"
           elif [ "${{ github.ref_name }}" == "stg" ]; then
             ENV="stg"
-            DB_HOST="db.stg.mor.org"
+            DB_HOST="cypher.stg.mor.org"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
-            DB_HOST="db.mor.org"
+            DB_HOST="cypher.mor.org"
           else
             echo "❌ Unknown environment for rollback"
             exit 1
