@@ -15,6 +15,7 @@ Create Date: 2026-02-17 00:01:00.000000
 
 """
 from alembic import op
+import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
@@ -29,21 +30,21 @@ def upgrade() -> None:
     op.drop_index('sessions_active_api_key_unique', table_name='sessions', if_exists=True)
     op.drop_index('ix_sessions_is_active', table_name='sessions', if_exists=True)
     op.drop_index('ix_sessions_api_key_id', table_name='sessions', if_exists=True)
-    op.drop_table('sessions')
+    op.execute('DROP TABLE IF EXISTS sessions CASCADE')
 
     # Drop delegations table and its indexes
     op.drop_index('ix_delegations_user_id', table_name='delegations', if_exists=True)
     op.drop_index('ix_delegations_is_active', table_name='delegations', if_exists=True)
     op.drop_index('ix_delegations_id', table_name='delegations', if_exists=True)
     op.drop_index('ix_delegations_delegate_address', table_name='delegations', if_exists=True)
-    op.drop_table('delegations')
+    op.execute('DROP TABLE IF EXISTS delegations CASCADE')
 
     # Drop user_private_keys table
-    op.drop_table('user_private_keys')
+    op.execute('DROP TABLE IF EXISTS user_private_keys CASCADE')
 
     # Drop user_automation_settings table and its indexes
     op.drop_index('ix_user_automation_settings_id', table_name='user_automation_settings', if_exists=True)
-    op.drop_table('user_automation_settings')
+    op.execute('DROP TABLE IF EXISTS user_automation_settings CASCADE')
 
 
 def downgrade() -> None:
