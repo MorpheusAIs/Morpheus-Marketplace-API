@@ -70,11 +70,12 @@ def _make_error_response(status_code: int, message: str, error_type: str = "prox
     )
 
 
-async def _make_proxy_request(session_id: str, messages: list, chat_params: dict) -> httpx.Response:
+async def _make_proxy_request(session_id: str, messages: list, chat_params: dict, request_id: str = None) -> httpx.Response:
     """Make a chat completion request to the proxy router."""
     return await proxy_router_service.chatCompletions(
         session_id=session_id,
         messages=messages,
+        request_id=request_id,
         **chat_params,
     )
 
@@ -159,7 +160,7 @@ async def handle_non_streaming_request(
 
     # First attempt
     try:
-        response = await _make_proxy_request(session_id, messages, chat_params)
+        response = await _make_proxy_request(session_id, messages, chat_params, request_id=request_id)
     except proxy_router_service.ProxyRouterServiceError as e:
         logger.error(
             "Proxy router error on initial request",
@@ -228,7 +229,7 @@ async def _retry_with_new_session(
     messages: list,
     chat_params: dict,
     logger,
-    request_id: str,
+    request_id: str = None,
 ) -> JSONResponse:
     """Retry the request with a new session."""
     logger.info(
@@ -239,7 +240,7 @@ async def _retry_with_new_session(
     )
 
     try:
-        response = await _make_proxy_request(new_session_id, messages, chat_params)
+        response = await _make_proxy_request(new_session_id, messages, chat_params, request_id=request_id)
     except proxy_router_service.ProxyRouterServiceError as e:
         logger.error(
             "Retry request failed",
