@@ -254,6 +254,7 @@ def build_stream_generator(
                 chat_params=chat_params,
                 logger=stream_logger,
                 accumulator=accumulator,
+                request_id=billing_params.request_id if billing_params else None,
             ):
                 if isinstance(chunk_data, StreamResult):
                     chunk_count = chunk_data.chunk_count
@@ -270,6 +271,7 @@ def build_stream_generator(
                             requested_model=requested_model,
                             logger=stream_logger,
                             accumulator=accumulator,
+                            request_id=billing_params.request_id if billing_params else None,
                         ):
                             if isinstance(retry_chunk, StreamResult):
                                 chunk_count = retry_chunk.chunk_count
@@ -370,6 +372,7 @@ async def _process_stream_request(
     chat_params: dict,
     logger: "BoundLogger",
     accumulator: Optional[StreamingUsageAccumulator] = None,
+    request_id: Optional[str] = None,
 ) -> AsyncIterator[bytes | StreamResult]:
     """
     Process a single streaming request attempt.
@@ -385,6 +388,7 @@ async def _process_stream_request(
         async with proxy_router_service.chatCompletionsStream(
             session_id=session_id,
             messages=messages,
+            request_id=request_id,
             **chat_params,
         ) as response:
             logger.info(
@@ -504,6 +508,7 @@ async def _handle_session_retry(
     requested_model: Optional[str],
     logger: "BoundLogger",
     accumulator: Optional[StreamingUsageAccumulator] = None,
+    request_id: Optional[str] = None,
 ) -> AsyncIterator[bytes | StreamResult]:
     """Handle session expiry by routing to a new session and retrying."""
     logger.info(
@@ -557,6 +562,7 @@ async def _handle_session_retry(
             chat_params=chat_params,
             logger=logger.bind(retry_session_id=new_session_id),
             accumulator=accumulator,
+            request_id=request_id,
         ):
             yield chunk
             
