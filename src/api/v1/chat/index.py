@@ -446,6 +446,7 @@ def _handle_streaming_request(
     headers = {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
+        "X-Request-Id": request_id,
     }
     
     # Add rate limit headers if available
@@ -524,6 +525,7 @@ async def _handle_non_streaming_request(
                 for key, value in rate_headers.to_dict().items():
                     response.headers[key] = value
         
+        response.headers["X-Request-Id"] = request_id
         return response
         
     except Exception as e:
