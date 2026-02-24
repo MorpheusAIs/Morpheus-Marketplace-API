@@ -145,7 +145,7 @@ async def create_chat_completion(
     body = json.dumps(json_body).encode("utf-8")
         
     # Create billing hold
-    ledger_entry_id, model_id, token_estimate = await _create_billing_hold(
+    ledger_entry_id, model_id, token_estimate, real_model_name = await _create_billing_hold(
         request_id=request_id,
         requested_model=requested_model,
         json_body=json_body,
@@ -193,7 +193,7 @@ async def create_chat_completion(
             request_id=request_id,
             session_id=session_id,
             body=body,
-            requested_model=requested_model,
+            requested_model=real_model_name,
             model_id=model_id,
             db_api_key=db_api_key,
             user=user,
@@ -207,7 +207,7 @@ async def create_chat_completion(
             request_id=request_id,
             session_id=session_id,
             body=body,
-            requested_model=requested_model,
+            requested_model=real_model_name,
             model_id=model_id,
             db_api_key=db_api_key,
             user=user,
@@ -346,14 +346,28 @@ async def _create_billing_hold(
     db_api_key: APIKey,
     user: User,
     chat_logger,
-) -> tuple[uuid.UUID, Optional[str], any]:
-    """Create a billing hold for the request. Raises on failure."""
+) -> tuple[uuid.UUID, Optional[str], any, Optional[str]]:
+    """Create a billing hold for the request. Raises on failure.
+    
+    Returns:
+        Tuple of (ledger_entry_id, model_id, token_estimate, real_model_name)
+    """
     ledger_entry_id = uuid.uuid4()
     chat_logger = chat_logger.bind(ledger_entry_id=str(ledger_entry_id))
     
     try:
         model_id = await model_router.get_target_model(requested_model, type="LLM")
+        real_model_name = await model_router.get_model_name_from_id(model_id) or requested_model
         token_estimate = token_estimation_service.estimate(json_body, model_type="LLM")
+        
+        if real_model_name != requested_model:
+            chat_logger.info(
+                "Resolved real model name from ID",
+                requested_model=requested_model,
+                real_model_name=real_model_name,
+                model_id=model_id,
+                event_type="model_name_resolved",
+            )
         
         async with get_db() as db:
             hold_request = UsageHoldRequest(
@@ -362,7 +376,7 @@ async def _create_billing_hold(
                 estimated_input_tokens=token_estimate.input_tokens,
                 estimated_output_tokens=token_estimate.output_tokens,
                 api_key_id=db_api_key.id,
-                model_name=requested_model,
+                model_name=real_model_name,
                 model_id=model_id,
                 endpoint="/v1/chat/completions",
             )
@@ -383,7 +397,7 @@ async def _create_billing_hold(
             event_type="usage_hold_created",
         )
         
-        return ledger_entry_id, model_id, token_estimate
+        return ledger_entry_id, model_id, token_estimate, real_model_name
         
     except ChatError:
         raise
@@ -577,7 +591,7 @@ async def _finalize_billing(
     
     try:
         response_body = json.loads(response.body.decode("utf-8"))
-        usage = response_body.get("usage_from_provider", {})
+        usage = response_body.get("usage_from_consumer", {})
         tokens_input = usage.get("prompt_tokens", 0)
         tokens_output = usage.get("completion_tokens", 0)
         tokens_total = usage.get("total_tokens", tokens_input + tokens_output)

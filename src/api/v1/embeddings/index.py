@@ -78,7 +78,7 @@ async def create_embeddings(
         )
         
         # Create billing hold
-        ledger_entry_id, model_id = await _create_billing_hold(
+        ledger_entry_id, model_id, real_model_name = await _create_billing_hold(
             request_id=request_id,
             requested_model=requested_model,
             request_data=request_data,
@@ -159,7 +159,7 @@ async def create_embeddings(
                 updated_rate_limit_result = await _finalize_billing(
                     response_data=response_data,
                     ledger_entry_id=ledger_entry_id,
-                    requested_model=requested_model,
+                    requested_model=real_model_name,
                     model_id=model_id,
                     user=user,
                     embeddings_logger=embeddings_logger,
@@ -352,13 +352,27 @@ async def _create_billing_hold(
     db_api_key: APIKey,
     user: User,
     embeddings_logger,
-) -> tuple[uuid.UUID, Optional[str]]:
-    """Create a billing hold for the embeddings request. Raises on failure."""
+) -> tuple[uuid.UUID, Optional[str], Optional[str]]:
+    """Create a billing hold for the embeddings request. Raises on failure.
+    
+    Returns:
+        Tuple of (ledger_entry_id, model_id, real_model_name)
+    """
     ledger_entry_id = uuid.uuid4()
     embeddings_logger = embeddings_logger.bind(ledger_entry_id=str(ledger_entry_id))
     
     try:
         model_id = await model_router.get_target_model(requested_model, type="EMBEDDINGS")
+        real_model_name = await model_router.get_model_name_from_id(model_id) or requested_model
+        
+        if real_model_name != requested_model:
+            embeddings_logger.info(
+                "Resolved real model name from ID",
+                requested_model=requested_model,
+                real_model_name=real_model_name,
+                model_id=model_id,
+                event_type="model_name_resolved",
+            )
         
         # Build request body for token estimation
         request_body = {
@@ -374,7 +388,7 @@ async def _create_billing_hold(
                 estimated_input_tokens=token_estimate.input_tokens,
                 estimated_output_tokens=token_estimate.output_tokens,
                 api_key_id=db_api_key.id,
-                model_name=requested_model,
+                model_name=real_model_name,
                 model_id=model_id,
                 endpoint="/v1/embeddings",
             )
@@ -409,7 +423,7 @@ async def _create_billing_hold(
             event_type="usage_hold_created",
         )
         
-        return ledger_entry_id, model_id
+        return ledger_entry_id, model_id, real_model_name
         
     except HTTPException:
         raise
