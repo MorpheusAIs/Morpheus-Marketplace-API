@@ -18,6 +18,7 @@ import platform
 from src.api.v1 import models, chat, auth, chat_history, embeddings, audio, billing, webhooks, wallet
 from src.api.v1.chat.chat_exceptions import ChatError
 from src.services import session_routing_service
+from src.utils.error_sanitizer import sanitize_error_message
 from src.services.staking_service import staking_service
 from src.services.rate_limiting import rate_limit_service
 
@@ -188,7 +189,7 @@ async def openai_exception_handler(request: Request, exc: Exception):
         status_code=status_code,
         content={
             "error": {
-                "message": str(exc),
+                "message": sanitize_error_message(str(exc)),
                 "type": exc.__class__.__name__,
                 "param": None,
                 "code": None

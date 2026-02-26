@@ -21,6 +21,7 @@ from ....services.billing_service import billing_service
 from ....services.rate_limiting import rate_limit_service
 from ....schemas.billing import UsageFinalizeRequest, UsageVoidRequest
 from ....db.database import get_db
+from ....utils.error_sanitizer import sanitize_error_message
 
 if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
@@ -404,7 +405,7 @@ async def _process_stream_request(
                     yield result
                     return
                 if result.error:
-                    yield _format_sse_error("proxy_error", f"Proxy router error: {result.error}", status=response.status_code)
+                    yield _format_sse_error("proxy_error", f"Proxy router error: {sanitize_error_message(result.error)}", status=response.status_code)
                 yield result
                 return
             
@@ -456,7 +457,7 @@ async def _process_stream_request(
             status_code=e.status_code,
             event_type="stream_proxy_router_error",
         )
-        yield _format_sse_error(e.error_type, str(e), status=e.status_code)
+        yield _format_sse_error(e.error_type, sanitize_error_message(str(e)), status=e.status_code)
         yield StreamResult(success=False, chunk_count=chunk_count, error=str(e))
 
 

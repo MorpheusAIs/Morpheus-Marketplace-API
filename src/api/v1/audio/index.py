@@ -21,6 +21,7 @@ from ....db.database import get_db
 from ....dependencies import get_api_key_user, get_current_api_key
 from ....db.models import User, APIKey
 from ....core.logging_config import get_api_logger
+from ....utils.error_sanitizer import sanitize_error_message
 
 router = APIRouter(tags=["Audio"])
 
@@ -149,7 +150,7 @@ async def create_audio_transcription(
                 )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Error handling session: {str(e)}"
+                    detail=f"Error handling session: {sanitize_error_message(str(e))}"
                 )
         
         # If we still don't have a session_id, return an error
@@ -229,7 +230,7 @@ async def create_audio_transcription(
                     status_code=response.status_code,
                     content={
                         "error": {
-                            "message": error_message,
+                            "message": sanitize_error_message(error_message),
                             "type": "proxy_error",
                         }
                     }
@@ -248,7 +249,7 @@ async def create_audio_transcription(
                 status_code=e.get_http_status_code(),
                 content={
                     "error": {
-                        "message": e.message,
+                        "message": sanitize_error_message(e.message),
                         "type": "proxy_error",
                     }
                 }
@@ -281,7 +282,7 @@ async def create_audio_transcription(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}"
+            detail=f"Internal server error: {sanitize_error_message(str(e))}"
         )
 
 
@@ -405,7 +406,7 @@ async def create_audio_speech(
                 )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Error handling session: {str(e)}"
+                    detail=f"Error handling session: {sanitize_error_message(str(e))}"
                 )
         
         # If we still don't have a session_id, return an error
@@ -495,7 +496,7 @@ async def create_audio_speech(
                     status_code=response.status_code,
                     content={
                         "error": {
-                            "message": error_message,
+                            "message": sanitize_error_message(error_message),
                             "type": "proxy_error",
                         }
                     }
@@ -514,7 +515,7 @@ async def create_audio_speech(
                 status_code=e.get_http_status_code(),
                 content={
                     "error": {
-                        "message": e.message,
+                        "message": sanitize_error_message(e.message),
                         "type": "proxy_error",
                     }
                 }
@@ -547,6 +548,6 @@ async def create_audio_speech(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}"
+            detail=f"Internal server error: {sanitize_error_message(str(e))}"
         )
 
