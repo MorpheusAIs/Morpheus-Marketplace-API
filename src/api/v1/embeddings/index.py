@@ -23,6 +23,7 @@ from ....services.rate_limiting import rate_limit_service, RateLimitResult
 from ....db.database import get_db
 from ....dependencies import get_api_key_user, get_current_api_key
 from ....db.models import User, APIKey
+from ....utils.error_sanitizer import sanitize_error_message
 from ....core.logging_config import get_api_logger
 
 router = APIRouter(tags=["Embeddings"])
@@ -136,7 +137,7 @@ async def create_embeddings(
             await _void_billing_hold(user.id, ledger_entry_id, "session_error", str(e), embeddings_logger)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error handling session: {str(e)}"
+                detail=f"Error handling session: {sanitize_error_message(str(e))}"
             )
         
         try:
@@ -205,7 +206,7 @@ async def create_embeddings(
                 
                 raise HTTPException(
                     status_code=response.status_code,
-                    detail=f"Embeddings request failed: {error_message}"
+                    detail=f"Embeddings request failed: {sanitize_error_message(error_message)}"
                 )
         
         except proxy_router_service.ProxyRouterServiceError as e:
@@ -218,7 +219,7 @@ async def create_embeddings(
             await _void_billing_hold(user.id, ledger_entry_id, e.error_type, e.message, embeddings_logger)
             raise HTTPException(
                 status_code=e.get_http_status_code(),
-                detail=f"Embeddings request failed: {e.message}"
+                detail=f"Embeddings request failed: {sanitize_error_message(e.message)}"
             )
         
         finally:
@@ -248,7 +249,7 @@ async def create_embeddings(
             await _void_billing_hold(user.id, ledger_entry_id, "exception", str(e), embeddings_logger)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}"
+            detail=f"Internal server error: {sanitize_error_message(str(e))}"
         )
 
 

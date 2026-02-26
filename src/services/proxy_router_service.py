@@ -10,6 +10,7 @@ from typing import AsyncIterator, Dict, Optional, Any, List
 import httpx
 from ..core.config import settings
 from ..core.logging_config import get_proxy_logger
+from ..utils.error_sanitizer import sanitize_error_message
 import base64
 
 logger = get_proxy_logger()
@@ -229,7 +230,7 @@ async def _execute_request(
                     error_type = "client_error"
                 
                 raise ProxyRouterServiceError(
-                    f"HTTP {status_code}: {response.text}",
+                    sanitize_error_message(f"HTTP {status_code}: {response.text}"),
                     status_code=status_code,
                     error_type=error_type
                 )
@@ -257,7 +258,7 @@ async def _execute_request(
                             error=str(e),
                             event_type="proxy_request_failed")
                 raise ProxyRouterServiceError(
-                    f"Request failed after {max_retries} attempts: {str(e)}",
+                    sanitize_error_message(f"Request failed after {max_retries} attempts: {str(e)}"),
                     error_type="network_error"
                 )
             
@@ -678,7 +679,7 @@ async def chatCompletions(
                     event_type="chat_completions_error")
         if isinstance(e, ProxyRouterServiceError):
             raise
-        raise ProxyRouterServiceError(f"Failed to send chat completions: {str(e)}")
+        raise ProxyRouterServiceError(sanitize_error_message(f"Failed to send chat completions: {str(e)}"))
 
 
 @asynccontextmanager
@@ -748,7 +749,7 @@ async def chatCompletionsStream(
                     error_text = error_body.decode("utf-8", errors="replace")
                     error_type = "server_error" if response.status_code >= 500 else "client_error"
                     raise ProxyRouterServiceError(
-                        f"HTTP {response.status_code}: {error_text}",
+                        sanitize_error_message(f"HTTP {response.status_code}: {error_text}"),
                         status_code=response.status_code,
                         error_type=error_type
                     )
@@ -760,7 +761,7 @@ async def chatCompletionsStream(
                     event_type="chat_completions_stream_error")
         if isinstance(e, ProxyRouterServiceError):
             raise
-        raise ProxyRouterServiceError(f"Failed to create chat completions stream: {str(e)}")
+        raise ProxyRouterServiceError(sanitize_error_message(f"Failed to create chat completions stream: {str(e)}"))
 
 
 async def embeddings(
@@ -827,7 +828,7 @@ async def embeddings(
                     event_type="embeddings_request_error")
         if isinstance(e, ProxyRouterServiceError):
             raise
-        raise ProxyRouterServiceError(f"Failed to send embeddings request: {str(e)}")
+        raise ProxyRouterServiceError(sanitize_error_message(f"Failed to send embeddings request: {str(e)}"))
 
 
 async def audio_transcription(
@@ -939,7 +940,7 @@ async def audio_transcription(
                     event_type="audio_transcription_request_error")
         if isinstance(e, ProxyRouterServiceError):
             raise
-        raise ProxyRouterServiceError(f"Failed to send audio transcription request: {str(e)}")
+        raise ProxyRouterServiceError(sanitize_error_message(f"Failed to send audio transcription request: {str(e)}"))
 
 
 async def audio_speech(
@@ -1016,7 +1017,7 @@ async def audio_speech(
                     event_type="audio_speech_request_error")
         if isinstance(e, ProxyRouterServiceError):
             raise
-        raise ProxyRouterServiceError(f"Failed to send audio speech request: {str(e)}")
+        raise ProxyRouterServiceError(sanitize_error_message(f"Failed to send audio speech request: {str(e)}"))
 
 
 async def getAllModels() -> httpx.Response:

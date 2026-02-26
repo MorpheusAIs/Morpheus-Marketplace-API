@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from ....services import proxy_router_service
 from ....services import session_routing_service
 from ....db.database import get_db
+from ....utils.error_sanitizer import sanitize_error_message
 from .chat_exceptions import (
     RequestParseError,
     SessionExpiredError,
@@ -169,7 +170,7 @@ async def handle_non_streaming_request(
             session_id=session_id,
             event_type="proxy_router_error",
         )
-        return _make_error_response(e.get_http_status_code(), str(e), e.error_type)
+        return _make_error_response(e.get_http_status_code(), sanitize_error_message(str(e)), e.error_type)
 
     # Handle success
     if response.status_code == 200:
@@ -214,11 +215,15 @@ async def handle_non_streaming_request(
     # Return original error
     try:
         error_json = json.loads(error_content)
+        if "error" in error_json and isinstance(error_json["error"], dict) and "message" in error_json["error"]:
+            error_json["error"]["message"] = sanitize_error_message(error_json["error"]["message"])
+        elif "error" in error_json and isinstance(error_json["error"], str):
+            error_json["error"] = sanitize_error_message(error_json["error"])
         return JSONResponse(status_code=response.status_code, content=error_json)
     except json.JSONDecodeError:
         return _make_error_response(
             response.status_code,
-            f"Proxy router error: {error_content}",
+            f"Proxy router error: {sanitize_error_message(error_content)}",
             status=response.status_code,
         )
 
