@@ -15,6 +15,8 @@ from typing import Any, Optional
 from fastapi import status
 from fastapi.responses import JSONResponse
 
+from src.utils.error_sanitizer import sanitize_error_message
+
 
 @dataclass
 class ChatError(Exception):
@@ -32,7 +34,7 @@ class ChatError(Exception):
         """Convert exception to a JSONResponse."""
         content = {
             "error": {
-                "message": self.message,
+                "message": sanitize_error_message(self.message),
                 "type": self.error_type,
                 **self.details,
             }
