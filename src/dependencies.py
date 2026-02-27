@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 import boto3
 from jose import jwt, jwk
 from jose.utils import base64url_decode
-import requests
+import httpx
 
 from src.core.config import settings
 from src.core.security import verify_api_key
@@ -101,14 +101,16 @@ async def get_current_user(
             auth_logger.debug("Using cached JWKS", event_type="jwks_cache_hit")
             jwks = cached_jwks
         else:
-            # Cache miss - fetch from Cognito
+            # Cache miss - fetch from Cognito (async to avoid blocking the event loop)
             auth_logger.debug("Fetching JWKS from Cognito", jwks_url=jwks_url)
-            jwks_response = requests.get(jwks_url)
-            jwks_response.raise_for_status()
-            jwks = jwks_response.json()
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                jwks_response = await client.get(jwks_url)
+                jwks_response.raise_for_status()
+                jwks = jwks_response.json()
             
-            # Cache JWKS for 1 hour (keys rarely change)
-            await cache_service.set("jwks", "cognito", jwks, ttl_seconds=3600)
+            # Cache JWKS for 15 minutes — shorter than access token TTL to avoid
+            # the JWKS fetch coinciding with token expiry at the 60-minute boundary
+            await cache_service.set("jwks", "cognito", jwks, ttl_seconds=900)
             auth_logger.debug("Cached JWKS", event_type="jwks_cached")
         
         # Get the key ID from token header
@@ -299,7 +301,7 @@ async def get_current_user(
         
         return user
         
-    except requests.RequestException as e:
+    except httpx.HTTPError as e:
         auth_logger.error("Could not fetch Cognito JWKS",
                          error=str(e),
                          event_type="jwks_fetch_error")
