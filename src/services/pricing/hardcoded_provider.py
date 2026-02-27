@@ -20,33 +20,35 @@ from .provider import PricingProvider
 # Format: model_name -> (input_price, output_price)
 
 HARDCODED_PRICING: Dict[str, tuple[str, str]] = {
+    # GLM models
+    "glm-5": ("1.00", "3.20"),
+    "glm-4.7": ("0.50", "2.25"),
+    "glm-4.7-thinking": ("0.45", "2.00"),
+    "glm-4.7-flash": ("0.10", "0.50"),
+
     # Kimi models
     "kimi-k2.5": ("0.60", "3.00"),
     "kimi-k2-thinking": ("0.60", "3.00"),
-
-    # GLM models
-    "glm-4.7": ("0.50", "2.25"),
-    "glm-4.7-thinking": ("0.50", "2.25"),
-    "glm-4.7-flash": ("0.13", "0.50"),
 
     # Qwen models
     "qwen3-235b": ("0.40", "3.00"),
     "qwen-3-235b": ("0.40", "3.00"),  # Alternative format
     "qwen3-coder-480b-a35b-instruct": ("0.70", "2.80"),
     "qwen3-coder-480b-a35b": ("0.70", "2.80"),  # Without -instruct suffix
-    "qwen3-next-80b": ("0.25", "1.75"),
-    "qwen3-4b": ("0.05", "0.15"),
-    "qwen-3-4b": ("0.05", "0.15"),  # Alternative format
+    "qwen3-next-80b": ("0.15", "1.50"),
+
+    # MiniMax models
+    "minimax-m2.5": ("0.30", "1.20"),
 
     # GPT OSS models
     "gpt-oss-120b": ("0.07", "0.28"),
 
     # Hermes / Llama models
-    "hermes-3-llama-3.1-405b": ("1.00", "2.75"),
+    "hermes-3-llama-3.1-405b": ("1.00", "3.00"),
     "llama-3.3-70b": ("0.70", "2.50"),
     "llama-3-3-70b": ("0.70", "2.50"),  # Alternative format
-    "llama-3.2-3b": ("0.10", "0.35"),
-    "llama-3-2-3b": ("0.10", "0.35"),  # Alternative format
+    "llama-3.2-3b": ("0.10", "0.50"),
+    "llama-3-2-3b": ("0.10", "0.50"),  # Alternative format
 
     # Mistral models
     "mistral-31-24b": ("0.50", "2.00"),
