@@ -749,6 +749,47 @@ class BillingService:
     ) -> Tuple[CreditLedger, Decimal]:
         """Alias for adjust_credits (backward compatibility)."""
         return await self.adjust_credits(db, user_id, abs(amount), description)
+    
+    # === Automated Hold Reconciliation ===
+    
+    async def reconcile_stale_holds(
+        self,
+        db: AsyncSession,
+        max_age_seconds: int,
+    ) -> dict:
+        """
+        Void all usage_hold entries that have been pending longer than
+        *max_age_seconds* and reconcile balances for affected users.
+
+        Returns a summary dict with voided_count and affected_users.
+        """
+        voided_count, affected_user_ids = await credits_crud.void_stale_holds(
+            db, max_age_seconds
+        )
+
+        if voided_count == 0:
+            return {"voided_count": 0, "affected_users": 0}
+
+        for user_id in affected_user_ids:
+            try:
+                await credits_crud.reconcile_all_balances(db, user_id)
+            except Exception as e:
+                logger.error(
+                    "Failed to reconcile balance after stale hold cleanup",
+                    user_id=user_id,
+                    error=str(e),
+                )
+
+        logger.info(
+            "Stale hold reconciliation complete",
+            voided_count=voided_count,
+            affected_users=len(affected_user_ids),
+        )
+
+        return {
+            "voided_count": voided_count,
+            "affected_users": len(affected_user_ids),
+        }
 
 
 # Singleton instance

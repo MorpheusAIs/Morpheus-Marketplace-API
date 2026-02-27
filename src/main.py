@@ -253,6 +253,56 @@ async def daily_staking_sync():
             await asyncio.sleep(3600)
 
 
+async def hold_reconciliation_loop():
+    """
+    Background task that periodically voids stale pending usage holds.
+
+    Any usage_hold that has been in ``pending`` status longer than
+    HOLD_MAX_PENDING_SECONDS is auto-voided and the affected users'
+    balance caches are reconciled against the ledger.
+    """
+    from src.db.database import AsyncSessionLocal
+    from src.services.billing_service import billing_service
+    import traceback
+
+    recon_logger = get_core_logger().bind(component="hold_reconciliation")
+    interval = settings.HOLD_RECONCILIATION_INTERVAL_SECONDS
+    max_age = settings.HOLD_MAX_PENDING_SECONDS
+
+    recon_logger.info(
+        "Starting hold reconciliation loop",
+        interval_seconds=interval,
+        max_pending_seconds=max_age,
+        event_type="hold_reconciliation_start",
+    )
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with AsyncSessionLocal() as db:
+                summary = await billing_service.reconcile_stale_holds(db, max_age)
+
+            if summary["voided_count"] > 0:
+                recon_logger.warning(
+                    "Voided stale billing holds",
+                    voided_count=summary["voided_count"],
+                    affected_users=summary["affected_users"],
+                    event_type="hold_reconciliation_voided",
+                )
+            else:
+                recon_logger.debug(
+                    "No stale holds found",
+                    event_type="hold_reconciliation_clean",
+                )
+        except Exception as e:
+            recon_logger.error(
+                "Error in hold reconciliation loop",
+                error=str(e),
+                traceback=traceback.format_exc(),
+                event_type="hold_reconciliation_error",
+            )
+
+
 @app.on_event("startup")
 async def startup_event():
     """
@@ -345,6 +395,19 @@ async def startup_event():
                     error=str(e),
                     event_type="session_routing_automation_error")
         logger.warning("Continuing startup without session routing automation")
+    
+    # Start hold reconciliation loop (auto-void stale pending holds)
+    try:
+        asyncio.create_task(hold_reconciliation_loop())
+        logger.info("Started background task for hold reconciliation",
+                   interval_seconds=settings.HOLD_RECONCILIATION_INTERVAL_SECONDS,
+                   max_pending_seconds=settings.HOLD_MAX_PENDING_SECONDS,
+                   event_type="hold_reconciliation_task_start")
+    except Exception as e:
+        logger.error("Failed to start hold reconciliation task",
+                    error=str(e),
+                    event_type="hold_reconciliation_task_error")
+        logger.warning("Continuing startup without hold reconciliation")
     
     # Initialize rate limiting service
     if settings.RATE_LIMIT_ENABLED:

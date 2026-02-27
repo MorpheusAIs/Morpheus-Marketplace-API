@@ -251,6 +251,12 @@ class Settings(BaseSettings):
     # Default: false (opt-in for safety - requires explicit enablement)
     CACHE_ENABLED: bool = Field(default=os.getenv("CACHE_ENABLED", "false").lower() == "true")
     
+    # Hold Reconciliation Settings
+    # Interval between reconciliation sweeps (seconds). Default: 10 minutes.
+    HOLD_RECONCILIATION_INTERVAL_SECONDS: int = Field(default=int(os.getenv("HOLD_RECONCILIATION_INTERVAL_SECONDS", "600")))
+    # Maximum age of a pending hold before it is auto-voided (seconds).  Default: 3600s / 60 min
+    HOLD_MAX_PENDING_SECONDS: int = Field(default=int(os.getenv("HOLD_MAX_PENDING_SECONDS", "3600")))
+    
     # Rate Limiting Settings
     # Enable/disable rate limiting globally
     RATE_LIMIT_ENABLED: bool = Field(default=os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true")
