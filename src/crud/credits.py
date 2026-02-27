@@ -274,7 +274,7 @@ async def reconcile_pending_holds(db: AsyncSession, user_id: int) -> CreditAccou
     )
     actual_pending_holds = result.scalar() or Decimal("0")
     
-    balance = await get_or_create_balance(db, user_id)
+    balance = await get_or_create_balance(db, user_id, for_update=True)
     old_value = balance.paid_pending_holds or Decimal("0")
     
     if old_value != actual_pending_holds:
@@ -320,7 +320,7 @@ async def reconcile_all_balances(db: AsyncSession, user_id: int) -> CreditAccoun
     )
     actual_pending_holds_paid = paid_result.scalar() or Decimal("0")
     
-    balance = await get_or_create_balance(db, user_id)
+    balance = await get_or_create_balance(db, user_id, for_update=True)
     old_paid_holds = balance.paid_pending_holds or Decimal("0")
     
     changed = False
