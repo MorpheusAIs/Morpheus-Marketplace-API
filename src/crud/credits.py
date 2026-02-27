@@ -2,7 +2,7 @@
 CRUD operations for credits ledger and account balances.
 """
 from typing import Optional, List, Tuple
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal
 import uuid
 
@@ -348,6 +348,67 @@ async def reconcile_all_balances(db: AsyncSession, user_id: int) -> CreditAccoun
         logger.info("Balance reconciliation complete - no corrections needed", user_id=user_id)
     
     return balance
+
+
+# === Stale Hold Cleanup ===
+
+async def void_stale_holds(
+    db: AsyncSession,
+    max_age_seconds: int,
+) -> tuple[int, list[int]]:
+    """
+    Void all usage_hold entries that have been pending longer than *max_age_seconds*.
+
+    For each voided hold the amounts are zeroed out.  The caller must run
+    ``reconcile_all_balances`` for each affected user_id afterwards to fix the
+    balance cache.
+
+    Returns:
+        (voided_count, affected_user_ids)
+    """
+    cutoff = datetime.utcnow() - timedelta(seconds=max_age_seconds)
+
+    # Identify affected rows + user IDs
+    stale_query = (
+        select(CreditLedger.id, CreditLedger.user_id)
+        .where(
+            CreditLedger.entry_type == LedgerEntryType.usage_hold,
+            CreditLedger.status == LedgerStatus.pending,
+            CreditLedger.created_at < cutoff,
+        )
+    )
+    rows = (await db.execute(stale_query)).fetchall()
+
+    if not rows:
+        return 0, []
+
+    stale_ids = [r.id for r in rows]
+    affected_user_ids = list({r.user_id for r in rows})
+
+    # Bulk UPDATE
+    stmt = (
+        update(CreditLedger)
+        .where(CreditLedger.id.in_(stale_ids))
+        .values(
+            status=LedgerStatus.voided,
+            amount_paid=Decimal("0"),
+            amount_staking=Decimal("0"),
+            failure_code="hold_expired",
+            failure_reason=f"Auto-voided: pending longer than {max_age_seconds}s",
+            updated_at=datetime.utcnow(),
+        )
+    )
+    await db.execute(stmt)
+    await db.commit()
+
+    logger.info(
+        "Bulk-voided stale holds",
+        voided_count=len(stale_ids),
+        affected_users=len(affected_user_ids),
+        cutoff=cutoff.isoformat(),
+    )
+
+    return len(stale_ids), affected_user_ids
 
 
 # === Ledger Entry Operations ===

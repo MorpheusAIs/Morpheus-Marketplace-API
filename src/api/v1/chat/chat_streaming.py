@@ -193,6 +193,60 @@ async def _void_streaming_billing(
         )
 
 
+async def _stream_cleanup(
+    *,
+    session_id: str,
+    stream_completed_successfully: bool,
+    stream_error: Optional[str],
+    billing_enabled: bool,
+    ledger_entry_id: Optional[uuid.UUID],
+    billing_params: Optional[StreamingBillingParams],
+    accumulator: Optional[StreamingUsageAccumulator],
+    logger: "BoundLogger",
+) -> None:
+    """
+    Post-stream cleanup: release session and finalize/void billing.
+
+    This function is designed to be called via ``asyncio.shield()`` so that
+    it runs to completion even when the parent streaming task has been
+    cancelled (e.g. client disconnect).
+    """
+    try:
+        async with get_db() as db:
+            await session_routing_service.release_session(db, session_id)
+            logger.debug(
+                "Session released after streaming",
+                session_id=session_id,
+                event_type="session_released_after_stream",
+            )
+    except Exception as release_err:
+        logger.warning(
+            "Failed to release session after streaming",
+            session_id=session_id,
+            error=str(release_err),
+            event_type="session_release_error",
+        )
+
+    if billing_enabled and ledger_entry_id and billing_params:
+        if stream_completed_successfully and accumulator:
+            await _finalize_streaming_billing(
+                user_id=billing_params.user_id,
+                ledger_entry_id=ledger_entry_id,
+                accumulator=accumulator,
+                logger=logger,
+                rate_limit_user_id=billing_params.rate_limit_user_id,
+                request_id=billing_params.request_id,
+            )
+        else:
+            await _void_streaming_billing(
+                user_id=billing_params.user_id,
+                ledger_entry_id=ledger_entry_id,
+                failure_code="stream_error" if stream_error else "stream_incomplete",
+                failure_reason=stream_error or "Stream did not complete successfully",
+                logger=logger,
+            )
+
+
 def build_stream_generator(
     *,
     logger: "BoundLogger",
@@ -282,7 +336,15 @@ def build_stream_generator(
                                 yield retry_chunk
                 else:
                     yield chunk_data
-                    
+
+        except asyncio.CancelledError:
+            stream_error = "client_disconnected"
+            stream_logger.warning(
+                "Stream cancelled due to client disconnect",
+                chunk_count=chunk_count,
+                event_type="stream_client_disconnected",
+            )
+
         except Exception as e:
             stream_error = str(e)
             stream_logger.error(
@@ -295,41 +357,28 @@ def build_stream_generator(
             yield _format_sse_error("gateway_error", f"Error in API gateway streaming: {e}", session_id=session_id)
         
         finally:
-            # Release the session after streaming completes
+            # Shield cleanup from task cancellation so that billing
+            # void/finalize and session release always run to completion,
+            # even after a client disconnect triggers CancelledError.
             try:
-                async with get_db() as db:
-                    await session_routing_service.release_session(db, session_id)
-                    stream_logger.debug(
-                        "Session released after streaming",
+                await asyncio.shield(
+                    _stream_cleanup(
                         session_id=session_id,
-                        event_type="session_released_after_stream",
-                    )
-            except Exception as release_err:
-                stream_logger.warning(
-                    "Failed to release session after streaming",
-                    session_id=session_id,
-                    error=str(release_err),
-                    event_type="session_release_error",
-                )
-            
-            if billing_enabled and ledger_entry_id and billing_params:
-                if stream_completed_successfully and accumulator:
-                    await _finalize_streaming_billing(
-                        user_id=billing_params.user_id,
+                        stream_completed_successfully=stream_completed_successfully,
+                        stream_error=stream_error,
+                        billing_enabled=billing_enabled,
                         ledger_entry_id=ledger_entry_id,
+                        billing_params=billing_params,
                         accumulator=accumulator,
                         logger=stream_logger,
-                        rate_limit_user_id=billing_params.rate_limit_user_id,
-                        request_id=billing_params.request_id,
                     )
-                else:
-                    await _void_streaming_billing(
-                        user_id=billing_params.user_id,
-                        ledger_entry_id=ledger_entry_id,
-                        failure_code="stream_error" if stream_error else "stream_incomplete",
-                        failure_reason=stream_error or "Stream did not complete successfully",
-                        logger=stream_logger,
-                    )
+                )
+            except asyncio.CancelledError:
+                stream_logger.info(
+                    "Stream cleanup shielded from cancellation, "
+                    "billing void/finalize will complete in background",
+                    event_type="stream_cleanup_shielded",
+                )
 
     return stream_generator
 

@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from typing import Optional
+import asyncio
 import json
 import uuid
 
@@ -163,6 +164,22 @@ async def create_chat_completion(
             chat_logger=chat_logger,
             request_id=request_id,
         )
+    except asyncio.CancelledError:
+        chat_logger.warning(
+            "Request cancelled during session resolution (client disconnect)",
+            event_type="session_resolve_client_disconnected",
+        )
+        try:
+            await asyncio.shield(_void_billing_hold(
+                user_id=user.id,
+                ledger_entry_id=ledger_entry_id,
+                failure_code="client_disconnected",
+                failure_reason="Client disconnected during session resolution",
+                chat_logger=chat_logger,
+            ))
+        except asyncio.CancelledError:
+            pass
+        raise
     except Exception as e:
         await _void_billing_hold(
             user_id=user.id,
@@ -541,7 +558,25 @@ async def _handle_non_streaming_request(
         
         response.headers["X-Request-Id"] = request_id
         return response
-        
+
+    except asyncio.CancelledError:
+        chat_logger.warning(
+            "Non-streaming request cancelled (client disconnect)",
+            session_id=session_id,
+            event_type="non_streaming_client_disconnected",
+        )
+        try:
+            await asyncio.shield(_void_billing_hold(
+                user_id=user.id,
+                ledger_entry_id=ledger_entry_id,
+                failure_code="client_disconnected",
+                failure_reason="Client disconnected during non-streaming request",
+                chat_logger=chat_logger,
+            ))
+        except asyncio.CancelledError:
+            pass
+        raise
+
     except Exception as e:
         await _void_billing_hold(
             user_id=user.id,
@@ -553,22 +588,11 @@ async def _handle_non_streaming_request(
         raise GatewayError(message=f"Error in API gateway: {e}", session_id=session_id) from e
     
     finally:
-        # Release the session after non-streaming request completes
+        # Shield session release from task cancellation
         try:
-            async with get_db() as db:
-                await session_routing_service.release_session(db, session_id)
-                chat_logger.debug(
-                    "Session released after non-streaming request",
-                    session_id=session_id,
-                    event_type="session_released",
-                )
-        except Exception as release_err:
-            chat_logger.warning(
-                "Failed to release session",
-                session_id=session_id,
-                error=str(release_err),
-                event_type="session_release_error",
-            )
+            await asyncio.shield(_release_session(session_id, chat_logger))
+        except asyncio.CancelledError:
+            pass
 
 
 async def _finalize_billing(
@@ -647,6 +671,25 @@ async def _finalize_billing(
             exc_info=True,
         )
         return None
+
+
+async def _release_session(session_id: str, chat_logger) -> None:
+    """Release a session, safe to call via asyncio.shield()."""
+    try:
+        async with get_db() as db:
+            await session_routing_service.release_session(db, session_id)
+            chat_logger.debug(
+                "Session released",
+                session_id=session_id,
+                event_type="session_released",
+            )
+    except Exception as release_err:
+        chat_logger.warning(
+            "Failed to release session",
+            session_id=session_id,
+            error=str(release_err),
+            event_type="session_release_error",
+        )
 
 
 async def _void_billing_hold(
