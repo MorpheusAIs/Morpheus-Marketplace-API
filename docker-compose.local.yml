@@ -1,8 +1,22 @@
 # Self-Contained Local Testing Setup
-# Includes local PostgreSQL and bypasses Cognito for true local development
+# Includes local PostgreSQL, Redis, and bypasses Cognito for true local development
 # Usage: docker-compose -f docker-compose.local.yml up --build
 
 services:
+  # Redis for rate limiting and caching
+  redis-local:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_local_data:/data
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   # Local PostgreSQL Database (ephemeral)
   db-local:
     image: postgres:15-alpine
@@ -32,12 +46,30 @@ services:
     depends_on:
       db-local:
         condition: service_healthy
+      redis-local:
+        condition: service_healthy
     environment:
+      # Redis for rate limiting
+      REDIS_URL: redis://redis-local:6379/0
       # Local database
       DATABASE_URL: postgresql+asyncpg://morpheus_local:local_dev_password@db-local:5432/morpheus_local_db
       
       # Bypass Cognito for local testing (controlled by .env.local)
+      BILLING_ADMIN_SECRET: ${BILLING_ADMIN_SECRET}
       BYPASS_COGNITO_AUTH: ${BYPASS_COGNITO_AUTH:-false}
+
+      BUILDERS_API_URL: ${BUILDERS_API_URL:-https://dashboard.mor.org/api}
+      BUILDERS_SUBNET_ID: ${BUILDERS_SUBNET_ID:-0x20ba70f2bbdc384bbc0e016ec2e888c38e6d1a5454555eefdc91d546fccca932}
+      
+      # MOR Pricing (CoinCap API)
+      COINCAP_API_KEY: ${COINCAP_API_KEY:-}
+      
+      # Staking credits adjustment factor (X multiplier for tuning)
+      STAKING_CREDITS_ADJUSTMENT_FACTOR: ${STAKING_CREDITS_ADJUSTMENT_FACTOR:-1.0}
+
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+
       LOCAL_TESTING_MODE: ${LOCAL_TESTING_MODE:-false}
 
       # Cognito authentication (ensure these are passed from .env.local)
@@ -56,15 +88,38 @@ services:
       DEFAULT_FALLBACK_EMBEDDINGS_MODEL: ${DEFAULT_FALLBACK_EMBEDDINGS_MODEL:-text-embedding-bge-m3}
       DEFAULT_FALLBACK_TTS_MODEL: ${DEFAULT_FALLBACK_TTS_MODEL:-tts-kokoro}
       DEFAULT_FALLBACK_STT_MODEL: ${DEFAULT_FALLBACK_STT_MODEL:-whisper-1}
+
+      DEFAULT_BALANCE_AMOUNT: ${DEFAULT_BALANCE_AMOUNT:-10}
       
       # Proxy router (can use dev or mock)
       PROXY_ROUTER_URL: ${PROXY_ROUTER_URL:-http://router.dev.mor.org:8082}
       PROXY_ROUTER_USERNAME: admin
       PROXY_ROUTER_PASSWORD: admin
+      PROXY_ROUTER_CHAT_TIMEOUT: ${PROXY_ROUTER_CHAT_TIMEOUT:-300.0}
+      PROXY_ROUTER_STREAM_TIMEOUT: ${PROXY_ROUTER_STREAM_TIMEOUT:-300.0}
       
-      # JWT settings (local values)
-      JWT_SECRET_KEY: local-testing-secret-key-not-for-production
-      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      # Session routing settings
+      SESSION_AUTOMATION_INTERVAL_SECONDS: ${SESSION_AUTOMATION_INTERVAL_SECONDS:-30}
+      SESSION_IDLE_GRACE_SECONDS: ${SESSION_IDLE_GRACE_SECONDS:-300}
+      SESSION_DEFAULT_DURATION_SECONDS: ${SESSION_DEFAULT_DURATION_SECONDS:-1800}
+      SESSION_PREFERRED_MODELS: ${SESSION_PREFERRED_MODELS}
+      
+      # Hold reconciliation settings (auto-void stale pending billing holds)
+      HOLD_RECONCILIATION_INTERVAL_SECONDS: ${HOLD_RECONCILIATION_INTERVAL_SECONDS:-600}
+      HOLD_MAX_PENDING_SECONDS: ${HOLD_MAX_PENDING_SECONDS:-3600}
+      
+      # Rate limiting settings
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_DEFAULT_RPM: ${RATE_LIMIT_DEFAULT_RPM:-60}
+      RATE_LIMIT_DEFAULT_TPM: ${RATE_LIMIT_DEFAULT_TPM:-100000}
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+      RATE_LIMIT_MODEL_GROUPS: ${RATE_LIMIT_MODEL_GROUPS:-}
+      
+      # Web3/SIWE settings (ERC-4361 Sign-In with Ethereum)
+      WEB3_PROVIDER_URL: ${WEB3_PROVIDER_URL:-}  # Optional: enables EIP-1271 smart contract wallet verification
+      SIWE_DOMAIN: ${SIWE_DOMAIN:-app.mor.org}
+      SIWE_URI: ${SIWE_URI:-https://app.mor.org}
+      SIWE_CHAIN_ID: ${SIWE_CHAIN_ID:-8453}  # Base mainnet
       
       # AWS settings (not needed for local, but prevents errors)
       AWS_DEFAULT_REGION: us-east-1
@@ -89,3 +144,4 @@ services:
 
 volumes:
   postgres_local_data:
+  redis_local_data:

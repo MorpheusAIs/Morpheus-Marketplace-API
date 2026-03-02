@@ -13,15 +13,15 @@ from datetime import datetime, timezone
 
 
 from ....schemas import openai as openai_schemas
-from ....crud import session as session_crud
 from ....crud import api_key as api_key_crud
 from ....core.config import settings
-from ....services import session_service
+from ....services import session_routing_service, NoSessionAvailableError, SessionOpenError
 from ....services import proxy_router_service
 from ....db.database import get_db
 from ....dependencies import get_api_key_user, get_current_api_key
 from ....db.models import User, APIKey
 from ....core.logging_config import get_api_logger
+from ....utils.error_sanitizer import sanitize_error_message
 
 router = APIRouter(tags=["Audio"])
 
@@ -96,26 +96,50 @@ async def create_audio_transcription(
         if not session_id:
             try:
                 transcription_logger.info(
-                    "No session_id in request, attempting to retrieve or create one",
+                    "No session_id in request, routing to session via SessionRoutingService",
                     request_id=request_id,
                     api_key_id=db_api_key.id,
                     requested_model=requested_model,
-                    event_type="session_lookup_start"
+                    event_type="session_routing_start"
                 )
                 async with get_db() as db:
-                    session = await session_service.get_session_for_api_key(
-                        db, db_api_key.id, user.id, requested_model, model_type='STT'
+                    session_id = await session_routing_service.route_request(
+                        db=db,
+                        user_id=user.id,
+                        requested_model=requested_model,
+                        model_type='STT'
                     )
-                    if session:
-                        session_id = session.id
                 
                 if session_id:
                     transcription_logger.info(
-                        "Session retrieved successfully",
+                        "Session routed successfully",
                         request_id=request_id,
                         session_id=session_id,
-                        event_type="session_lookup_success"
+                        event_type="session_routing_success"
                     )
+            except NoSessionAvailableError as e:
+                transcription_logger.error(
+                    "No session available",
+                    request_id=request_id,
+                    error=str(e),
+                    event_type="no_session_available"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No session available for transcription request"
+                )
+            except SessionOpenError as e:
+                transcription_logger.error(
+                    "Failed to open session",
+                    request_id=request_id,
+                    error=str(e),
+                    event_type="session_open_error",
+                    exc_info=True
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error opening session: {e.message}"
+                )
             except Exception as e:
                 transcription_logger.error(
                     "Error in session handling",
@@ -126,7 +150,7 @@ async def create_audio_transcription(
                 )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Error handling session: {str(e)}"
+                    detail=f"Error handling session: {sanitize_error_message(str(e))}"
                 )
         
         # If we still don't have a session_id, return an error
@@ -206,7 +230,7 @@ async def create_audio_transcription(
                     status_code=response.status_code,
                     content={
                         "error": {
-                            "message": error_message,
+                            "message": sanitize_error_message(error_message),
                             "type": "proxy_error",
                         }
                     }
@@ -225,11 +249,26 @@ async def create_audio_transcription(
                 status_code=e.get_http_status_code(),
                 content={
                     "error": {
-                        "message": e.message,
+                        "message": sanitize_error_message(e.message),
                         "type": "proxy_error",
                     }
                 }
             )
+        
+        finally:
+            # Release the session after request completes
+            if session_id:
+                try:
+                    async with get_db() as db:
+                        await session_routing_service.release_session(db, session_id)
+                        transcription_logger.debug("Session released",
+                                                   session_id=session_id,
+                                                   event_type="session_released")
+                except Exception as release_err:
+                    transcription_logger.warning("Failed to release session",
+                                                 session_id=session_id,
+                                                 error=str(release_err),
+                                                 event_type="session_release_error")
     
     except HTTPException:
         raise
@@ -243,7 +282,7 @@ async def create_audio_transcription(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}"
+            detail=f"Internal server error: {sanitize_error_message(str(e))}"
         )
 
 
@@ -313,26 +352,50 @@ async def create_audio_speech(
         if not session_id:
             try:
                 speech_logger.info(
-                    "No session_id in request, attempting to retrieve or create one",
+                    "No session_id in request, routing to session via SessionRoutingService",
                     request_id=request_id,
                     api_key_id=db_api_key.id,
                     requested_model=requested_model,
-                    event_type="session_lookup_start"
+                    event_type="session_routing_start"
                 )
                 async with get_db() as db:
-                    session = await session_service.get_session_for_api_key(
-                        db, db_api_key.id, user.id, requested_model, model_type='TTS'
+                    session_id = await session_routing_service.route_request(
+                        db=db,
+                        user_id=user.id,
+                        requested_model=requested_model,
+                        model_type='TTS'
                     )
-                    if session:
-                        session_id = session.id
                 
                 if session_id:
                     speech_logger.info(
-                        "Session retrieved successfully",
+                        "Session routed successfully",
                         request_id=request_id,
                         session_id=session_id,
-                        event_type="session_lookup_success"
+                        event_type="session_routing_success"
                     )
+            except NoSessionAvailableError as e:
+                speech_logger.error(
+                    "No session available",
+                    request_id=request_id,
+                    error=str(e),
+                    event_type="no_session_available"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No session available for speech request"
+                )
+            except SessionOpenError as e:
+                speech_logger.error(
+                    "Failed to open session",
+                    request_id=request_id,
+                    error=str(e),
+                    event_type="session_open_error",
+                    exc_info=True
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error opening session: {e.message}"
+                )
             except Exception as e:
                 speech_logger.error(
                     "Error in session handling",
@@ -343,7 +406,7 @@ async def create_audio_speech(
                 )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Error handling session: {str(e)}"
+                    detail=f"Error handling session: {sanitize_error_message(str(e))}"
                 )
         
         # If we still don't have a session_id, return an error
@@ -433,7 +496,7 @@ async def create_audio_speech(
                     status_code=response.status_code,
                     content={
                         "error": {
-                            "message": error_message,
+                            "message": sanitize_error_message(error_message),
                             "type": "proxy_error",
                         }
                     }
@@ -452,11 +515,26 @@ async def create_audio_speech(
                 status_code=e.get_http_status_code(),
                 content={
                     "error": {
-                        "message": e.message,
+                        "message": sanitize_error_message(e.message),
                         "type": "proxy_error",
                     }
                 }
             )
+        
+        finally:
+            # Release the session after request completes
+            if session_id:
+                try:
+                    async with get_db() as db:
+                        await session_routing_service.release_session(db, session_id)
+                        speech_logger.debug("Session released",
+                                            session_id=session_id,
+                                            event_type="session_released")
+                except Exception as release_err:
+                    speech_logger.warning("Failed to release session",
+                                          session_id=session_id,
+                                          error=str(release_err),
+                                          event_type="session_release_error")
     
     except HTTPException:
         raise
@@ -470,6 +548,6 @@ async def create_audio_speech(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}"
+            detail=f"Internal server error: {sanitize_error_message(str(e))}"
         )
 

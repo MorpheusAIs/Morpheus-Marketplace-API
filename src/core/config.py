@@ -63,16 +63,19 @@ class Settings(BaseSettings):
             if environment in ["production", "prod", "prd"]:
                 origins = [
                     "https://openbeta.mor.org",
-                    "https://api.mor.org"
+                    "https://api.mor.org",
+                    "https://app.mor.org"
                 ]
             elif environment in ["development", "dev", "test", "staging"]:
                 origins = [
                     # Production origins (for cross-env testing)
                     "https://openbeta.mor.org",
                     "https://api.mor.org",
+                    "https://app.mor.org",
                     # Development origins
                     "https://openbeta.dev.mor.org",
                     "https://api.dev.mor.org",
+                    "https://app.dev.mor.org",
                     # Local development origins
                     "http://localhost:3000",
                     "http://localhost:8080",
@@ -83,7 +86,8 @@ class Settings(BaseSettings):
                 # Unknown environment - use safe defaults
                 origins = [
                     "https://openbeta.mor.org",
-                    "https://api.mor.org"
+                    "https://api.mor.org",
+                    "https://app.mor.org"
                 ]
         
         # Add development origins if CORS_DEV_ORIGINS is set
@@ -139,13 +143,9 @@ class Settings(BaseSettings):
     DB_POOL_TIMEOUT: int = Field(default=int(os.getenv("DB_POOL_TIMEOUT", "30")))
     DB_POOL_RECYCLE: int = Field(default=int(os.getenv("DB_POOL_RECYCLE", "3600")))
     DB_POOL_PRE_PING: bool = Field(default=os.getenv("DB_POOL_PRE_PING", "true").lower() == "true")
-
-    # JWT Settings
-    JWT_SECRET_KEY: str = Field(default=os.getenv("JWT_SECRET_KEY", "super_secret_key_change_me"))
-    JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
-    REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
     
+    DEFAULT_BALANCE_AMOUNT: int = Field(default=int(os.getenv("DEFAULT_BALANCE_AMOUNT", "10")))
+
     # API Key Encryption
     ENCRYPTION_SECRET_KEY: str = Field(default=os.getenv("ENCRYPTION_SECRET_KEY", "encryption_secret_change_me"))
 
@@ -153,15 +153,10 @@ class Settings(BaseSettings):
     PROXY_ROUTER_URL: str = Field(default=os.getenv("PROXY_ROUTER_URL", ""))
     PROXY_ROUTER_USERNAME: str = Field(default=os.getenv("PROXY_ROUTER_USERNAME", ""))
     PROXY_ROUTER_PASSWORD: str = Field(default=os.getenv("PROXY_ROUTER_PASSWORD", ""))
+    PROXY_ROUTER_CHAT_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_CHAT_TIMEOUT", "300.0")))
+    PROXY_ROUTER_STREAM_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_STREAM_TIMEOUT", "300.0")))
 
-    # Blockchain Private Key Fallback
-    FALLBACK_PRIVATE_KEY: str | None = Field(default=os.getenv("FALLBACK_PRIVATE_KEY"))
-
-    # KMS Settings (placeholders - specific config depends on KMS choice)
-    KMS_PROVIDER: str | None = Field(default=os.getenv("KMS_PROVIDER", "aws"))
-    KMS_MASTER_KEY_ID: str | None = Field(default=os.getenv("KMS_MASTER_KEY_ID"))
-    
-    # AWS KMS specific settings
+    # AWS settings
     AWS_REGION: str = os.getenv("AWS_REGION", "us-east-2")
     AWS_ACCESS_KEY_ID: str | None = Field(default=os.getenv("AWS_ACCESS_KEY_ID"))
     AWS_SECRET_ACCESS_KEY: str | None = Field(default=os.getenv("AWS_SECRET_ACCESS_KEY"))
@@ -174,14 +169,15 @@ class Settings(BaseSettings):
     COGNITO_DOMAIN: str = Field(default=os.getenv("COGNITO_DOMAIN", "auth.mor.org"))
     COGNITO_JWKS_URL: str = Field(default=f"https://cognito-idp.{os.getenv('COGNITO_REGION', 'us-east-2')}.amazonaws.com/{os.getenv('COGNITO_USER_POOL_ID', 'us-east-2_tqCTHoSST')}/.well-known/jwks.json")
     
-    # Local encryption key (for development)
-    MASTER_ENCRYPTION_KEY: str | None = Field(default=os.getenv("MASTER_ENCRYPTION_KEY"))
-    
-    # Automation feature flag
-    AUTOMATION_FEATURE_ENABLED: bool = Field(default=os.getenv("AUTOMATION_FEATURE_ENABLED", "False").lower() == "true")
-    
-    # Delegation
-    GATEWAY_DELEGATE_ADDRESS: str = "0xGatewayDelegateAccountAddressPlaceholder" # Placeholder
+    # Session Routing Service Configuration
+    # Interval in seconds for automated activity loop (session scaling)
+    SESSION_AUTOMATION_INTERVAL_SECONDS: int = Field(default=int(os.getenv("SESSION_AUTOMATION_INTERVAL_SECONDS", "30")))
+    # Grace period before closing idle sessions (prevents thrashing)
+    SESSION_IDLE_GRACE_SECONDS: int = Field(default=int(os.getenv("SESSION_IDLE_GRACE_SECONDS", "300")))
+    # Default session duration when creating new sessions (in seconds)
+    SESSION_DEFAULT_DURATION_SECONDS: int = Field(default=int(os.getenv("SESSION_DEFAULT_DURATION_SECONDS", "1800")))
+    # Comma-separated list of preferred models (keep at least one idle session)
+    SESSION_PREFERRED_MODELS: str = Field(default=os.getenv("SESSION_PREFERRED_MODELS", ""))
     
     # Direct Model Fetching Settings (replaces model sync)
     ACTIVE_MODELS_URL: str = Field(default=os.getenv("ACTIVE_MODELS_URL", "https://active.dev.mor.org/active_models.json"))
@@ -190,10 +186,93 @@ class Settings(BaseSettings):
     DEFAULT_FALLBACK_TTS_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_TTS_MODEL", "tts-kokoro"))
     DEFAULT_FALLBACK_STT_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_STT_MODEL", "whisper-1"))
     
+    # Billing Admin Settings
+    # Secret key required for admin billing operations (staking settings, manual topups)
+    # If not set, admin endpoints will be disabled
+    BILLING_ADMIN_SECRET: str | None = Field(default=os.getenv("BILLING_ADMIN_SECRET"))
+    
+    # Builders API Settings (for MOR staking data)
+    # Used to fetch staker information for credit allocation
+    BUILDERS_API_URL: str = Field(
+        default=os.getenv("BUILDERS_API_URL", "https://dashboard.mor.org/api")
+    )
+    BUILDERS_SUBNET_ID: str = Field(
+        default=os.getenv("BUILDERS_SUBNET_ID", "")
+    )
+    
+    # CoinCap API Settings (for MOR price data)
+    # Optional API key for higher rate limits: https://pro.coincap.io/api-docs
+    COINCAP_API_KEY: str | None = Field(default=os.getenv("COINCAP_API_KEY"))
+    
+    # Staking Credits Adjustment Factor
+    # Multiplier applied to final daily credits calculation for manual tuning
+    # Formula: daily_credits = stake_share * today_emission * mor_price * ADJUSTMENT_FACTOR
+    # Default: 1.0 (no adjustment)
+    STAKING_CREDITS_ADJUSTMENT_FACTOR: str = Field(
+        default=os.getenv("STAKING_CREDITS_ADJUSTMENT_FACTOR", "1.0")
+    )
+    
+    # Stripe Settings
+    # Required for processing Stripe payments and webhooks
+    STRIPE_SECRET_KEY: str | None = Field(default=os.getenv("STRIPE_SECRET_KEY"))
+    STRIPE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("STRIPE_WEBHOOK_SECRET"))
+    
+    # Coinbase Commerce Settings (Legacy - kept for backward compatibility)
+    # Required for processing legacy Coinbase Commerce charge webhooks
+    COINBASE_COMMERCE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("COINBASE_COMMERCE_WEBHOOK_SECRET"))
+    
+    # Coinbase Payment Link Settings (New)
+    # Secret from metadata.secret returned when creating a webhook subscription
+    # See: https://docs.cdp.coinbase.com/coinbase-business/payment-link-apis/webhooks
+    COINBASE_PAYMENT_LINK_WEBHOOK_SECRET: str | None = Field(default=os.getenv("COINBASE_PAYMENT_LINK_WEBHOOK_SECRET"))
+    
+    # Web3 Provider Settings (optional - enables EIP-1271 smart contract wallet verification)
+    # If not set, only EOA wallets will be supported
+    WEB3_PROVIDER_URL: str | None = Field(default=os.getenv("WEB3_PROVIDER_URL"))
+    # SIWE (Sign-In with Ethereum) settings
+    SIWE_DOMAIN: str = Field(default=os.getenv("SIWE_DOMAIN", "app.mor.org"))
+    SIWE_URI: str = Field(default=os.getenv("SIWE_URI", "https://app.mor.org"))
+    SIWE_CHAIN_ID: int = Field(default=int(os.getenv("SIWE_CHAIN_ID", "8453")))  # Default: Base
+    
     # Legacy Model Sync Settings (deprecated - kept for compatibility)
     MODEL_SYNC_ON_STARTUP: bool = Field(default=False)  # Disabled by default
     MODEL_SYNC_INTERVAL_HOURS: int = Field(default=int(os.getenv("MODEL_SYNC_INTERVAL_HOURS", "1")))
     MODEL_SYNC_ENABLED: bool = Field(default=False)  # Disabled by default
+    
+    # Redis Settings (for rate limiting and caching)
+    REDIS_URL: str = Field(default=os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+    REDIS_MAX_CONNECTIONS: int = Field(default=int(os.getenv("REDIS_MAX_CONNECTIONS", "20")))
+    REDIS_SOCKET_TIMEOUT: float = Field(default=float(os.getenv("REDIS_SOCKET_TIMEOUT", "5.0")))
+    REDIS_SOCKET_CONNECT_TIMEOUT: float = Field(default=float(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT", "5.0")))
+    
+    # Cache Settings
+    # Enable Redis caching for API keys, users, sessions, and JWKS
+    # When disabled, all requests will hit the database directly
+    # Default: false (opt-in for safety - requires explicit enablement)
+    CACHE_ENABLED: bool = Field(default=os.getenv("CACHE_ENABLED", "false").lower() == "true")
+    
+    # Hold Reconciliation Settings
+    # Interval between reconciliation sweeps (seconds). Default: 10 minutes.
+    HOLD_RECONCILIATION_INTERVAL_SECONDS: int = Field(default=int(os.getenv("HOLD_RECONCILIATION_INTERVAL_SECONDS", "600")))
+    # Maximum age of a pending hold before it is auto-voided (seconds).  Default: 3600s / 60 min
+    HOLD_MAX_PENDING_SECONDS: int = Field(default=int(os.getenv("HOLD_MAX_PENDING_SECONDS", "3600")))
+    
+    # Rate Limiting Settings
+    # Enable/disable rate limiting globally
+    RATE_LIMIT_ENABLED: bool = Field(default=os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true")
+    
+    # Default rate limits (applied if no model-specific limits match)
+    # Requests per minute (RPM)
+    RATE_LIMIT_DEFAULT_RPM: int = Field(default=int(os.getenv("RATE_LIMIT_DEFAULT_RPM", "60")))
+    # Tokens per minute (TPM) - input + output combined
+    RATE_LIMIT_DEFAULT_TPM: int = Field(default=int(os.getenv("RATE_LIMIT_DEFAULT_TPM", "100000")))
+    
+    # Rate limit window in seconds (default: 60 for per-minute limits)
+    RATE_LIMIT_WINDOW_SECONDS: int = Field(default=int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60")))
+    
+    # Model group rate limits (JSON format)
+    # Format: {"group_name": {"rpm": 30, "tpm": 50000, "models": ["model1", "model2"]}}
+    RATE_LIMIT_MODEL_GROUPS: str = Field(default=os.getenv("RATE_LIMIT_MODEL_GROUPS", ""))
     
 
 

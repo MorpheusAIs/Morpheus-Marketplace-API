@@ -15,13 +15,17 @@ import uuid
 import socket
 import platform
 
-from src.api.v1 import models, chat, session, auth, automation, chat_history, embeddings, audio
+from src.api.v1 import models, chat, auth, chat_history, embeddings, audio, billing, webhooks, wallet
+from src.api.v1.chat.chat_exceptions import ChatError
+from src.services import session_routing_service
+from src.utils.error_sanitizer import sanitize_error_message
+from src.services.staking_service import staking_service
+from src.services.rate_limiting import rate_limit_service
 
 from src.core.config import settings
 from src.core.version import get_version, get_version_info
 from src.core.cors_middleware import CredentialSafeCORSMiddleware
-from src.db.models import Session as DbSession
-from src.services import session_service
+from src.services.cache_service import cache_service
 from src.db.database import engine, get_db
 from src.core.direct_model_service import direct_model_service
 from src.core.logging_config import configure_logging, get_core_logger, get_auth_logger
@@ -166,6 +170,13 @@ async def enforce_https(request: Request, call_next):
     
     return await call_next(request)
 
+# Error handler for custom ChatError exceptions
+@app.exception_handler(ChatError)
+async def chat_error_handler(request: Request, exc: ChatError):
+    """Handle ChatError exceptions with structured responses."""
+    return exc.to_response()
+
+
 # Error handler for OpenAI-compatible error responses
 @app.exception_handler(Exception)
 async def openai_exception_handler(request: Request, exc: Exception):
@@ -178,7 +189,7 @@ async def openai_exception_handler(request: Request, exc: Exception):
         status_code=status_code,
         content={
             "error": {
-                "message": str(exc),
+                "message": sanitize_error_message(str(exc)),
                 "type": exc.__class__.__name__,
                 "param": None,
                 "code": None
@@ -186,113 +197,111 @@ async def openai_exception_handler(request: Request, exc: Exception):
         }
     )
 
-# Background task to clean up expired sessions
-async def cleanup_expired_sessions():
+# Background task to run daily staking sync at 0:05 UTC
+async def daily_staking_sync():
     """
-    Background task to clean up expired sessions and synchronize session states.
-    
-    Flow:
-    1. FIRST: Synchronize all active sessions with proxy-router to mark any 
-       already-closed sessions as inactive in the database
-    2. THEN: Close any remaining expired sessions that are still active
-    
-    This prevents unnecessary close requests to the proxy-router for sessions
-    that are already closed on the blockchain.
+    Background task to sync staking data and update user balances daily.
+    Runs at 0:05 UTC every day.
     """
-    from src.db.models import Session as DbSession
-    from sqlalchemy import select
-    from src.services import session_service
-    from src.db.database import AsyncSessionLocal, engine
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from src.db.database import AsyncSessionLocal
+    from datetime import datetime, timezone, timedelta
     import traceback
     
-    cleanup_logger = get_core_logger().bind(component="session_cleanup")
-    cleanup_logger.info("Starting expired session cleanup task")
+    staking_sync_logger = get_core_logger().bind(component="staking_sync")
+    staking_sync_logger.info("Starting daily staking sync task")
     
     while True:
         try:
-            # Log connection attempt for debugging
-            cleanup_logger.info("Attempting to connect to database for session cleanup")
+            # Calculate time until next 0:05 UTC
+            now = datetime.now(timezone.utc)
+            target_time = now.replace(hour=0, minute=5, second=0, microsecond=0)
             
+            # If we've already passed 0:05 today, schedule for tomorrow
+            if now >= target_time:
+                target_time = target_time + timedelta(days=1)
+            
+            wait_seconds = (target_time - now).total_seconds()
+            
+            staking_sync_logger.info(
+                "Waiting for next staking sync",
+                next_run=target_time.isoformat(),
+                wait_seconds=int(wait_seconds)
+            )
+            
+            # Wait until 0:05 UTC
+            await asyncio.sleep(wait_seconds)
+            
+            staking_sync_logger.info("Starting daily staking sync", event_type="staking_sync_start")
+            
+            # Run the sync
             async with AsyncSessionLocal() as db:
-                # STEP 1: Synchronize session states with proxy-router FIRST
-                # This marks any already-closed sessions as inactive in the database,
-                # preventing unnecessary close requests later
-                try:
-                    cleanup_logger.info("Starting session state synchronization (pre-cleanup)", 
-                                       event_type="sync_start")
-                    sync_result = await session_service.synchronize_sessions(db)
-                    
-                    # Commit the sync changes to persist them
-                    await db.commit()
-                    
-                    cleanup_logger.info("Session state synchronization completed and committed", 
-                                       synced_count=len(sync_result.get("synced", [])),
-                                       active_count=len(sync_result.get("active", [])),
-                                       error_count=len(sync_result.get("errors", [])),
-                                       event_type="sync_complete")
-                except Exception as sync_error:
-                    cleanup_logger.error("Error during session synchronization",
-                                        error=str(sync_error),
-                                        event_type="sync_error",
-                                        exc_info=True)
-                    await db.rollback()
-                    # Continue with cleanup even if sync fails
-                
-                # STEP 2: Find and close expired sessions that are STILL active
-                # (after synchronization, some expired sessions may already be marked inactive)
-                now_with_tz = datetime.now(timezone.utc)
-                # Convert to naive datetime for DB compatibility
-                now = now_with_tz.replace(tzinfo=None)
-                result = await db.execute(
-                    select(DbSession)
-                    .where(DbSession.is_active == True, DbSession.expires_at < now)
+                summary = await staking_service.run_daily_sync(db)
+                staking_sync_logger.info(
+                    "Daily staking sync completed",
+                    **summary,
+                    event_type="staking_sync_complete"
                 )
-                expired_sessions = result.scalars().all()
                 
-                if expired_sessions:
-                    cleanup_logger.info("Found expired sessions to clean up (after sync)", 
-                                       expired_session_count=len(expired_sessions))
-                    
-                    # Process each expired session
-                    closed_count = 0
-                    failed_count = 0
-                    for session in expired_sessions:
-                        try:
-                            cleanup_logger.info("Cleaning up expired session", 
-                                              session_id=session.id,
-                                              expires_at=session.expires_at.isoformat() if session.expires_at else None,
-                                              event_type="session_cleanup")
-                            success = await session_service.close_session(db, session.id)
-                            if success:
-                                closed_count += 1
-                            else:
-                                failed_count += 1
-                        except Exception as close_error:
-                            cleanup_logger.error("Error closing expired session",
-                                               session_id=session.id,
-                                               error=str(close_error),
-                                               event_type="session_close_error")
-                            failed_count += 1
-                    
-                    # Commit the cleanup changes
-                    await db.commit()
-                    
-                    cleanup_logger.info("Expired session cleanup completed and committed",
-                                       closed_count=closed_count,
-                                       failed_count=failed_count,
-                                       event_type="cleanup_complete")
-                else:
-                    cleanup_logger.info("No expired sessions found to clean up (after sync)")
-        
         except Exception as e:
-            cleanup_logger.error("Error in session cleanup task",
-                                error=str(e),
-                                event_type="cleanup_error",
-                                exc_info=True)
-        
-        # Run every 15 minutes
-        await asyncio.sleep(1 * 60)
+            staking_sync_logger.error(
+                "Error in daily staking sync task",
+                error=str(e),
+                traceback=traceback.format_exc(),
+                event_type="staking_sync_error"
+            )
+            # Wait 1 hour before retrying on error
+            await asyncio.sleep(3600)
+
+
+async def hold_reconciliation_loop():
+    """
+    Background task that periodically voids stale pending usage holds.
+
+    Any usage_hold that has been in ``pending`` status longer than
+    HOLD_MAX_PENDING_SECONDS is auto-voided and the affected users'
+    balance caches are reconciled against the ledger.
+    """
+    from src.db.database import AsyncSessionLocal
+    from src.services.billing_service import billing_service
+    import traceback
+
+    recon_logger = get_core_logger().bind(component="hold_reconciliation")
+    interval = settings.HOLD_RECONCILIATION_INTERVAL_SECONDS
+    max_age = settings.HOLD_MAX_PENDING_SECONDS
+
+    recon_logger.info(
+        "Starting hold reconciliation loop",
+        interval_seconds=interval,
+        max_pending_seconds=max_age,
+        event_type="hold_reconciliation_start",
+    )
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with AsyncSessionLocal() as db:
+                summary = await billing_service.reconcile_stale_holds(db, max_age)
+
+            if summary["voided_count"] > 0:
+                recon_logger.warning(
+                    "Voided stale billing holds",
+                    voided_count=summary["voided_count"],
+                    affected_users=summary["affected_users"],
+                    event_type="hold_reconciliation_voided",
+                )
+            else:
+                recon_logger.debug(
+                    "No stale holds found",
+                    event_type="hold_reconciliation_clean",
+                )
+        except Exception as e:
+            recon_logger.error(
+                "Error in hold reconciliation loop",
+                error=str(e),
+                traceback=traceback.format_exc(),
+                event_type="hold_reconciliation_error",
+            )
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -364,15 +373,58 @@ async def startup_event():
     
 
     # Start the background tasks
+    # Start the daily staking sync task
     try:
-        asyncio.create_task(cleanup_expired_sessions())
-        logger.info("Started background task for expired session cleanup",
-                   event_type="background_task_start")
+        asyncio.create_task(daily_staking_sync())
+        logger.info("Started background task for daily staking sync",
+                   event_type="staking_sync_task_start")
     except Exception as e:
-        logger.error("Failed to start background cleanup task",
+        logger.error("Failed to start staking sync task",
                     error=str(e),
-                    event_type="background_task_error")
-        logger.warning("Continuing startup without background session cleanup")
+                    event_type="staking_sync_task_error")
+        logger.warning("Continuing startup without staking sync")
+    
+    # Start session routing automation loop
+    try:
+        await session_routing_service.start_automation_loop()
+        logger.info("Started session routing automation loop",
+                   interval_seconds=settings.SESSION_AUTOMATION_INTERVAL_SECONDS,
+                   event_type="session_routing_automation_started")
+    except Exception as e:
+        logger.error("Failed to start session routing automation",
+                    error=str(e),
+                    event_type="session_routing_automation_error")
+        logger.warning("Continuing startup without session routing automation")
+    
+    # Start hold reconciliation loop (auto-void stale pending holds)
+    try:
+        asyncio.create_task(hold_reconciliation_loop())
+        logger.info("Started background task for hold reconciliation",
+                   interval_seconds=settings.HOLD_RECONCILIATION_INTERVAL_SECONDS,
+                   max_pending_seconds=settings.HOLD_MAX_PENDING_SECONDS,
+                   event_type="hold_reconciliation_task_start")
+    except Exception as e:
+        logger.error("Failed to start hold reconciliation task",
+                    error=str(e),
+                    event_type="hold_reconciliation_task_error")
+        logger.warning("Continuing startup without hold reconciliation")
+    
+    # Initialize rate limiting service
+    if settings.RATE_LIMIT_ENABLED:
+        try:
+            await rate_limit_service.initialize()
+            logger.info("Rate limiting service initialized",
+                       enabled=True,
+                       default_rpm=settings.RATE_LIMIT_DEFAULT_RPM,
+                       default_tpm=settings.RATE_LIMIT_DEFAULT_TPM,
+                       event_type="rate_limit_init_success")
+        except Exception as e:
+            logger.error("Failed to initialize rate limiting service",
+                        error=str(e),
+                        event_type="rate_limit_init_error")
+            logger.warning("Continuing startup without rate limiting")
+    else:
+        logger.info("Rate limiting is disabled", event_type="rate_limit_disabled")
     
     logger.info("Application startup complete", event_type="startup_complete")
 
@@ -384,6 +436,27 @@ async def shutdown_event():
     logger.info("Application shutdown initiated", event_type="shutdown_start")
     logger.info("Direct model service requires no cleanup (stateless)")
     
+    # Stop session routing automation loop
+    try:
+        await session_routing_service.stop_automation_loop()
+        logger.info("Session routing automation loop stopped", event_type="session_routing_automation_stopped")
+    except Exception as e:
+        logger.warning("Error stopping session routing automation", error=str(e), event_type="session_routing_automation_stop_error")
+    
+    # Close rate limiting service
+    try:
+        await rate_limit_service.close()
+        logger.info("Rate limiting service closed", event_type="rate_limit_shutdown")
+    except Exception as e:
+        logger.warning("Error closing rate limiting service", error=str(e), event_type="rate_limit_shutdown_error")
+    
+    # Close Redis cache service
+    try:
+        await cache_service.close()
+        logger.info("Redis cache service closed successfully", event_type="cache_service_shutdown")
+    except Exception as e:
+        logger.warning("Error closing Redis cache service", error=str(e), event_type="cache_service_shutdown_error")
+    
     # Close proxy router HTTP client
     try:
         from src.services import proxy_router_service
@@ -391,6 +464,13 @@ async def shutdown_event():
         logger.info("Proxy router HTTP client closed successfully", event_type="http_client_shutdown")
     except Exception as e:
         logger.warning("Error closing proxy router HTTP client", error=str(e), event_type="http_client_shutdown_error")
+    
+    # Close staking service HTTP client
+    try:
+        await staking_service.close()
+        logger.info("Staking service HTTP client closed successfully", event_type="staking_service_shutdown")
+    except Exception as e:
+        logger.warning("Error closing staking service HTTP client", error=str(e), event_type="staking_service_shutdown_error")
     
     logger.info("Application shutdown complete", event_type="shutdown_complete")
 
@@ -474,11 +554,12 @@ async def check_database_version():
 app.include_router(auth, prefix=f"{settings.API_V1_STR}/auth")
 app.include_router(models, prefix=f"{settings.API_V1_STR}")  # Mount at /api/v1 and let models handle /models
 app.include_router(chat, prefix=f"{settings.API_V1_STR}/chat")
-app.include_router(session, prefix=f"{settings.API_V1_STR}/session")
-app.include_router(automation, prefix=f"{settings.API_V1_STR}/automation")
 app.include_router(chat_history, prefix=f"{settings.API_V1_STR}/chat-history")
 app.include_router(embeddings, prefix=f"{settings.API_V1_STR}")
 app.include_router(audio, prefix=f"{settings.API_V1_STR}")
+app.include_router(billing, prefix=f"{settings.API_V1_STR}/billing")
+app.include_router(webhooks, prefix=f"{settings.API_V1_STR}/webhooks")
+app.include_router(wallet, prefix=f"{settings.API_V1_STR}/auth/wallet")
 
 # Default routes - using standard APIRoute for these endpoints to avoid dependency resolution issues
 # Reset the route_class temporarily for these specific routes
@@ -532,6 +613,16 @@ async def health_check():
     except Exception as e:
         model_service_status = f"unhealthy: {str(e)}"
     
+    # Check Redis cache health
+    cache_health = await cache_service.health_check()
+    
+    # Check rate limiting service health
+    rate_limit_health = {}
+    try:
+        rate_limit_health = await rate_limit_service.health_check()
+    except Exception as e:
+        rate_limit_health = {"status": "error", "error": str(e)}
+    
     # Calculate uptime
     uptime_seconds = None
     uptime_human = None
@@ -569,6 +660,7 @@ async def health_check():
         "timestamp": current_time.isoformat(),
         "version": APP_VERSION,
         "database": db_status,
+        "redis_cache": cache_health,
         "model_service": {
             "status": model_service_status,
             "model_count": model_count,
@@ -588,7 +680,8 @@ async def health_check():
             "seconds": uptime_seconds,
             "human_readable": uptime_human,
             "started_at": APP_START_TIME.isoformat() if APP_START_TIME else None
-        }
+        },
+        "rate_limiting": rate_limit_health
     }
     
     return response
@@ -1450,7 +1543,7 @@ def custom_openapi():
     # FastAPI auto-detects security from dependencies, but we need to ensure correct mapping
     for path_key, path_item in openapi_schema["paths"].items():
         # Skip certain endpoints that should remain unauthenticated
-        if path_key in ["/", "/health", "/docs", "/api-docs", "/cors-check"] or path_key.startswith("/docs/") or path_key.startswith("/exchange-token"):
+        if path_key in ["/", "/health", "/docs", "/api-docs", "/cors-check"] or path_key.startswith("/docs/") or path_key.startswith("/exchange-token") or path_key.startswith(f"{settings.API_V1_STR}/webhooks"):
             continue
         
         # Determine security based on path patterns (matching actual implementation)
@@ -1461,8 +1554,13 @@ def custom_openapi():
                     # Remove any security that FastAPI might have added
                     if "security" in operation:
                         del operation["security"]
+                # Wallet check endpoint: No authentication (public)
+                elif path_key.startswith("/api/v1/auth/wallet/check/"):
+                    # Remove any security for public wallet availability check
+                    if "security" in operation:
+                        del operation["security"]
                 # Auth and Automation endpoints: OAuth2/BearerAuth only (JWT tokens from Cognito)
-                elif path_key.startswith("/api/v1/auth/") or path_key.startswith("/api/v1/automation/"):
+                elif path_key.startswith("/api/v1/auth/") or path_key.startswith("/api/v1/automation/") or path_key.startswith("/api/v1/billing/"):
                     operation["security"] = [
                         {"OAuth2": ["openid", "email", "profile"]},
                         {"BearerAuth": []}

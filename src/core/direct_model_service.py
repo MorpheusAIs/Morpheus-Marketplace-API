@@ -34,6 +34,7 @@ class DirectModelService:
         """
         self.cache_duration = cache_duration_seconds
         self._model_mapping: Dict[str, str] = {}  # name -> blockchain_id
+        self._id_to_name: Dict[str, str] = {}  # blockchain_id -> name
         self._model_mapping_type: Dict[str, str] = {}  # name -> type
         self._blockchain_ids: set = set()
         self._cache_expiry: Optional[datetime] = None
@@ -103,6 +104,20 @@ class DirectModelService:
         
         # Check if it's a model name
         return self._model_mapping.get(model_identifier)
+    
+    async def get_model_name_from_id(self, blockchain_id: str) -> Optional[str]:
+        """
+        Reverse-lookup: get the model name for a given blockchain ID.
+        O(1) via pre-built reverse mapping.
+        
+        Args:
+            blockchain_id: The blockchain ID to look up
+            
+        Returns:
+            Model name if found, None otherwise
+        """
+        await self._ensure_fresh_cache()
+        return self._id_to_name.get(blockchain_id)
     
     async def _ensure_fresh_cache(self):
         """Ensure the cache is fresh, refresh if needed."""
@@ -185,8 +200,8 @@ class DirectModelService:
     
     def _update_cache(self, models: List[Dict], content_hash: str, etag: Optional[str]):
         """Update the internal cache with new model data."""
-        # Build mappings
         new_mapping = {}
+        new_id_to_name = {}
         new_mapping_type = {}
         new_blockchain_ids = set()
         
@@ -200,11 +215,12 @@ class DirectModelService:
             
             if model_name and blockchain_id:
                 new_mapping[model_name] = blockchain_id
+                new_id_to_name[blockchain_id] = model_name
                 new_mapping_type[model_name] = model_type
                 new_blockchain_ids.add(blockchain_id)
         
-        # Update cache
         self._model_mapping = new_mapping
+        self._id_to_name = new_id_to_name
         self._model_mapping_type = new_mapping_type
         self._blockchain_ids = new_blockchain_ids
         self._raw_models_data = models

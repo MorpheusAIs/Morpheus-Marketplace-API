@@ -32,6 +32,7 @@ class ModelRouter:
         Returns:
             str: The blockchain ID to use
         """
+        # return "0xe086adc275c99e32bb10b0aff5e8bfc391aad18cbb184727a75b2569149425c6"
         logger.info("Getting target model for requested model",
                    requested_model=requested_model,
                    event_type="model_resolution_start",
@@ -139,6 +140,25 @@ class ModelRouter:
                         error=str(e),
                         event_type="default_model_fetch_error")
             raise ValueError(f"Error getting default model: {e}")
+    
+    async def get_model_name_from_id(self, blockchain_id: str) -> Optional[str]:
+        """
+        Get the human-readable model name for a blockchain ID.
+        
+        Args:
+            blockchain_id: The blockchain ID to look up
+            
+        Returns:
+            str: The model name, or None if not found
+        """
+        try:
+            return await direct_model_service.get_model_name_from_id(blockchain_id)
+        except Exception as e:
+            logger.error("Error resolving model name from ID",
+                        blockchain_id=blockchain_id,
+                        error=str(e),
+                        event_type="model_name_resolution_error")
+            return None
     
     async def is_valid_model(self, model: str) -> bool:
         """
