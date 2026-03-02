@@ -215,7 +215,7 @@ async def set_staking_daily_amount(db: AsyncSession, user_id: int, amount: Decim
     """
     Set the staking daily amount for an account.
     """
-    balance = await get_or_create_balance(db, user_id)
+    balance = await get_or_create_balance(db, user_id, for_update=True)
     balance.staking_daily_amount = amount
     balance.updated_at = datetime.utcnow()
     
@@ -237,7 +237,7 @@ async def set_allow_overage(db: AsyncSession, user_id: int, allow: bool) -> Cred
     When enabled, the system automatically deducts from the paid Credit Balance
     after the Daily Staking Allowance is exhausted.
     """
-    balance = await get_or_create_balance(db, user_id)
+    balance = await get_or_create_balance(db, user_id, for_update=True)
     balance.allow_overage = allow
     balance.updated_at = datetime.utcnow()
     
