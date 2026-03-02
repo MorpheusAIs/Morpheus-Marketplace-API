@@ -4,7 +4,7 @@ from uuid import UUID
 import asyncio
 from datetime import datetime
 
-from fastapi import Depends, HTTPException, status, Security
+from fastapi import Depends, HTTPException, Request, status, Security
 from fastapi.security import HTTPBearer, APIKeyHeader, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 from botocore.exceptions import ClientError
@@ -23,6 +23,7 @@ from src.core.config import settings
 from src.core.security import verify_api_key
 from src.crud import user as user_crud
 from src.crud import api_key as api_key_crud
+from src.crud import credits as credits_crud
 from src.db.database import get_db, get_db_session
 from src.db.models import User, APIKey
 from src.schemas.token import TokenPayload
@@ -54,6 +55,7 @@ api_key_header = APIKeyHeader(
 cognito_client = boto3.client('cognito-idp', region_name=settings.AWS_REGION)
 
 async def get_current_user(
+    request: Request,
     db: AsyncSession = Depends(get_db_session),
     token: Optional[HTTPAuthorizationCredentials] = Depends(oauth2_scheme_optional)
 ) -> User:
@@ -208,7 +210,23 @@ async def get_current_user(
                            user_email=user_data['email'] or 'not_provided',
                            cognito_user_id=cognito_user_id,
                            event_type="user_creation")
-            
+
+            # Grant one-time signup bonus as an explicit, auditable ledger entry.
+            # Failures are non-fatal — the user still gets their account.
+            try:
+                forwarded_for = request.headers.get("X-Forwarded-For", "")
+                client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else (
+                    request.client.host if request.client else "unknown"
+                )
+                await credits_crud.grant_signup_bonus(db, user_id=user.id, client_ip=client_ip)
+            except Exception as bonus_err:
+                auth_logger.warning(
+                    "Signup bonus grant failed (non-fatal)",
+                    user_id=user.id,
+                    error=str(bonus_err),
+                    event_type="signup_bonus_error",
+                )
+
             # Cache newly created user
             user_cache_data = {
                 'id': user.id,

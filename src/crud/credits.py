@@ -579,6 +579,101 @@ async def create_ledger_entry(
     return entry
 
 
+async def grant_signup_bonus(
+    db: AsyncSession,
+    user_id: int,
+    client_ip: str,
+) -> Optional[CreditLedger]:
+    """
+    Issue the one-time signup bonus as an explicit, auditable ledger entry.
+
+    Two independent guards prevent duplicate grants:
+
+    1. Per-user idempotency key ("signup_bonus:{user_id}") — enforced by the DB
+       unique constraint on credits_ledger.idempotency_key. A given user can
+       never receive more than one signup bonus regardless of how many times this
+       function is called.
+
+    2. Per-IP window (SIGNUP_BONUS_IP_WINDOW_HOURS) — one bonus per source IP
+       within the configured window. Set SIGNUP_BONUS_IP_WINDOW_HOURS=0 to
+       disable the IP check entirely (useful for dev/test).
+
+    If SIGNUP_BONUS_AMOUNT=0 the function is a no-op and returns None.
+    If the bonus is skipped for either guard, the user's account still exists
+    and functions normally — they just don't receive the bonus credit.
+
+    The balance delta is applied with SQL-level atomic arithmetic (UPDATE col = col + delta)
+    to match the rest of the billing system and avoid lost-update races.
+    """
+    bonus_amount = settings.SIGNUP_BONUS_AMOUNT
+    if bonus_amount <= 0:
+        return None
+
+    idempotency_key = f"signup_bonus:{user_id}"
+
+    # Guard 1: has this user already received the bonus?
+    existing = await get_ledger_entry_by_idempotency_key(db, idempotency_key)
+    if existing:
+        logger.debug(
+            "Signup bonus skipped — already granted for this user",
+            user_id=user_id,
+            event_type="signup_bonus_already_granted",
+        )
+        return None
+
+    # Guard 2: has this IP received a bonus within the configured window?
+    ip_window_hours = settings.SIGNUP_BONUS_IP_WINDOW_HOURS
+    if ip_window_hours > 0 and client_ip and client_ip not in ("unknown", ""):
+        cutoff = datetime.utcnow() - timedelta(hours=ip_window_hours)
+        ip_count_result = await db.execute(
+            select(func.count()).where(
+                and_(
+                    CreditLedger.payment_source == "signup_bonus",
+                    CreditLedger.payment_metadata["source_ip"].astext == client_ip,
+                    CreditLedger.created_at >= cutoff,
+                )
+            )
+        )
+        if ip_count_result.scalar() > 0:
+            logger.info(
+                "Signup bonus skipped — IP already received bonus within window",
+                user_id=user_id,
+                client_ip=client_ip,
+                window_hours=ip_window_hours,
+                event_type="signup_bonus_ip_blocked",
+            )
+            return None
+
+    # Both guards passed — create the ledger entry (auto_commit=False so we can
+    # update the balance in the same transaction before committing).
+    entry = await create_ledger_entry(
+        db,
+        user_id=user_id,
+        entry_type=LedgerEntryType.purchase,
+        status=LedgerStatus.posted,
+        amount_paid=bonus_amount,
+        idempotency_key=idempotency_key,
+        payment_source="signup_bonus",
+        description=f"Welcome bonus — ${bonus_amount} free credits",
+        payment_metadata={"source_ip": client_ip},
+        auto_commit=False,
+    )
+
+    # Atomically add the bonus to the balance using SQL-level arithmetic.
+    await update_balance(db, user_id=user_id, paid_posted_delta=bonus_amount, auto_commit=False)
+
+    await db.commit()
+
+    logger.info(
+        "Signup bonus granted",
+        user_id=user_id,
+        amount=str(bonus_amount),
+        client_ip=client_ip,
+        event_type="signup_bonus_granted",
+    )
+    return entry
+
+
 async def update_ledger_entry(
     db: AsyncSession,
     entry: CreditLedger,
