@@ -46,11 +46,11 @@ class BillingService:
     
     # === Balance Operations ===
     
-    async def get_balance(self, db: AsyncSession, user_id: int) -> BalanceResponse:
+    async def get_balance(self, db: AsyncSession, user_id: int, client_ip: Optional[str] = None) -> BalanceResponse:
         """
         Get the current balance for an account.
         """
-        balance = await credits_crud.get_or_create_balance(db, user_id)
+        balance = await credits_crud.get_or_create_balance(db, user_id, client_ip=client_ip)
         
         paid_info = PaidBalanceInfo(
             posted_balance=balance.paid_posted_balance or Decimal("0"),

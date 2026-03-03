@@ -1,22 +1,16 @@
 from typing import Annotated, Optional
 from dataclasses import dataclass
-from uuid import UUID
 import asyncio
 from datetime import datetime
 
 from fastapi import Depends, HTTPException, status, Security
 from fastapi.security import HTTPBearer, APIKeyHeader, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
-from botocore.exceptions import ClientError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.orm import joinedload
 from sqlalchemy import select
-from sqlalchemy.future import select as future_select
-import time
-from datetime import datetime, timedelta
 import boto3
 from jose import jwt, jwk
-from jose.utils import base64url_decode
 import httpx
 
 from src.core.config import settings
@@ -208,7 +202,7 @@ async def get_current_user(
                            user_email=user_data['email'] or 'not_provided',
                            cognito_user_id=cognito_user_id,
                            event_type="user_creation")
-            
+
             # Cache newly created user
             user_cache_data = {
                 'id': user.id,
