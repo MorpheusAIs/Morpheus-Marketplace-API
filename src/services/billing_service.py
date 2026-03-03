@@ -302,6 +302,7 @@ class BillingService:
         if available < estimated_cost:
             logger.warning(
                 "Insufficient balance for usage hold",
+                event_type="insufficient_balance",
                 user_id=user_id,
                 request_id=request.request_id,
                 ledger_entry_id=str(request.ledger_entry_id),
@@ -358,6 +359,7 @@ class BillingService:
         
         logger.info(
             "Created usage hold",
+            event_type="billing_hold_created",
             user_id=user_id,
             request_id=request.request_id,
             hold_amount=str(hold_amount),
