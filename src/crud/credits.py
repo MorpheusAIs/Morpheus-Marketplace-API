@@ -31,7 +31,8 @@ def _normalize_datetime(dt: Optional[datetime]) -> Optional[datetime]:
 # === Account Balance Operations ===
 
 async def get_or_create_balance(
-    db: AsyncSession, user_id: int, for_update: bool = False
+    db: AsyncSession, user_id: int, for_update: bool = False,
+    client_ip: Optional[str] = None,
 ) -> CreditAccountBalance:
     """
     Get account balance record, creating one if it doesn't exist.
@@ -100,7 +101,17 @@ async def get_or_create_balance(
         await db.commit()
         await db.refresh(balance)
         logger.info("Created new account balance record", user_id=user_id)
-        
+
+        try:
+            await grant_signup_bonus(db, user_id=user_id, client_ip=client_ip or "unknown")
+        except Exception as bonus_err:
+            logger.warning(
+                "Signup bonus grant failed (non-fatal)",
+                user_id=user_id,
+                error=str(bonus_err),
+                event_type="signup_bonus_error",
+            )
+
         # If caller requested a lock, re-acquire with FOR UPDATE
         if for_update:
             result = await db.execute(

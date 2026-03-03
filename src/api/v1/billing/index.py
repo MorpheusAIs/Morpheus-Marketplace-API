@@ -2,7 +2,7 @@
 Billing API endpoints for credits management.
 Provides REST API for viewing balance, transactions, spending metrics, and staking settings.
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Header
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Query, Header
 from fastapi.security import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
@@ -92,6 +92,7 @@ async def verify_billing_admin_secret(
 
 @router.get("/balance", response_model=BalanceResponse)
 async def get_balance(
+    request: Request,
     db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -104,7 +105,11 @@ async def get_balance(
     - total_available: Sum of all available credits
     """
     try:
-        balance = await billing_service.get_balance(db, current_user.id)
+        forwarded_for = request.headers.get("X-Forwarded-For", "")
+        client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else (
+            request.client.host if request.client else "unknown"
+        )
+        balance = await billing_service.get_balance(db, current_user.id, client_ip=client_ip)
         return balance
     except Exception as e:
         logger.error(
