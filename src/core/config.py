@@ -1,4 +1,5 @@
 import os
+from decimal import Decimal
 from typing import List, Union, Optional, Any
 from pydantic_settings import BaseSettings
 from pydantic import PostgresDsn, Field, AnyHttpUrl, field_validator
@@ -144,7 +145,14 @@ class Settings(BaseSettings):
     DB_POOL_RECYCLE: int = Field(default=int(os.getenv("DB_POOL_RECYCLE", "3600")))
     DB_POOL_PRE_PING: bool = Field(default=os.getenv("DB_POOL_PRE_PING", "true").lower() == "true")
     
-    DEFAULT_BALANCE_AMOUNT: int = Field(default=int(os.getenv("DEFAULT_BALANCE_AMOUNT", "10")))
+    DEFAULT_BALANCE_AMOUNT: int = Field(default=int(os.getenv("DEFAULT_BALANCE_AMOUNT", "9")))
+
+    # One-time signup bonus credited as an explicit ledger entry on first login.
+    # Independent of DEFAULT_BALANCE_AMOUNT — both can be tuned separately.
+    # Set SIGNUP_BONUS_AMOUNT=0 to disable the bonus entirely.
+    # Set SIGNUP_BONUS_IP_WINDOW_HOURS=0 to disable IP-based rate limiting.
+    SIGNUP_BONUS_AMOUNT: Decimal = Field(default=Decimal(os.getenv("SIGNUP_BONUS_AMOUNT", "1")))
+    SIGNUP_BONUS_IP_WINDOW_HOURS: int = Field(default=int(os.getenv("SIGNUP_BONUS_IP_WINDOW_HOURS", "24")))
 
     # API Key Encryption
     ENCRYPTION_SECRET_KEY: str = Field(default=os.getenv("ENCRYPTION_SECRET_KEY", "encryption_secret_change_me"))
