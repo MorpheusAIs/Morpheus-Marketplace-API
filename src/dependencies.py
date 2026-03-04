@@ -171,6 +171,8 @@ async def get_current_user(
                 cached_user["created_at"] = datetime.fromisoformat(cached_user["created_at"])
             if cached_user.get("updated_at"):
                 cached_user["updated_at"] = datetime.fromisoformat(cached_user["updated_at"])
+            if cached_user.get("age_verified_at"):
+                cached_user["age_verified_at"] = datetime.fromisoformat(cached_user["age_verified_at"])
             user = User(**cached_user)
         else:
             # Cache miss - get from database
@@ -183,6 +185,8 @@ async def get_current_user(
                     'email': user.email,
                     'name': user.name,
                     'is_active': user.is_active,
+                    'age_verified': user.age_verified,
+                    'age_verified_at': user.age_verified_at.isoformat() if user.age_verified_at else None,
                     'cognito_user_id': user.cognito_user_id,
                     'created_at': user.created_at.isoformat() if user.created_at else None,
                     'updated_at': user.updated_at.isoformat() if user.updated_at else None,
@@ -209,6 +213,8 @@ async def get_current_user(
                 'email': user.email,
                 'name': user.name,
                 'is_active': user.is_active,
+                'age_verified': user.age_verified,
+                'age_verified_at': user.age_verified_at.isoformat() if user.age_verified_at else None,
                 'cognito_user_id': user.cognito_user_id,
                 'created_at': user.created_at.isoformat() if user.created_at else None,
                 'updated_at': user.updated_at.isoformat() if user.updated_at else None,

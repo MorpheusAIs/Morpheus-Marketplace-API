@@ -19,9 +19,24 @@ class UserUpdate(UserBase):
 # Properties to return to client
 class UserResponse(UserBase):
     id: int
+    age_verified: bool = False
+    age_verified_at: Optional[datetime] = None
     
     # Configure Pydantic to work with SQLAlchemy
     model_config = ConfigDict(from_attributes=True)
+
+# Age verification consent request
+class AgeVerificationRequest(BaseModel):
+    """Schema for age verification consent submission."""
+    age_verified: bool = Field(..., description="User confirms they are 18 years or older")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "age_verified": True
+            }
+        }
+    )
 
 # Properties for authentication
 class UserLogin(BaseModel):
