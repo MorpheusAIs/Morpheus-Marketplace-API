@@ -13,6 +13,7 @@ from ....schemas.api_key import APIKeyCreate, APIKeyResponse, APIKeyDB
 from ....dependencies import CurrentUser, get_current_user
 from ....db.models import User
 from ....services.cognito_service import cognito_service
+from ....core.config import settings
 from ....core.logging_config import get_auth_logger
 
 logger = get_auth_logger()
@@ -148,13 +149,12 @@ async def delete_user_account(
 ):
     """
     Delete the current user's account and all associated data.
-    
-    This action is irreversible and will:
-    1. Delete all API keys
-    2. Delete wallet links (via cascade)
-    3. Delete the user account
-    4. Delete/deactivate the Cognito identity
-    
+
+    Always: deletes API keys, user record (cascades: wallet_links, chats, etc.).
+    Cognito: only in production (ENVIRONMENT in production|prod|prd) do we delete
+    the Cognito user. In dev/test/non-prod we leave the Cognito identity intact so
+    "Delete account" in TEST cannot accidentally nuke the user's real identity.
+
     Requires JWT Bearer authentication.
     """
     user_id = current_user.id
@@ -187,25 +187,41 @@ async def delete_user_account(
         
         delete_user_logger.info("User record deleted successfully",
                                event_type="user_record_deleted")
-        
-        # 3. Delete the user from Cognito User Pool
-        delete_user_logger.info("Deleting user from Cognito",
-                               cognito_user_id=cognito_user_id,
-                               event_type="cognito_deletion_start")
-        cognito_deletion_result = await cognito_service.delete_user(cognito_user_id)
-        
+
+        # 3. Delete Cognito user only in production; in dev/test leave identity intact
+        env_lower = (settings.ENVIRONMENT or "").strip().lower()
+        is_production = env_lower in ("production", "prod", "prd")
+        if is_production:
+            delete_user_logger.info("Deleting user from Cognito (production)",
+                                   cognito_user_id=cognito_user_id,
+                                   event_type="cognito_deletion_start")
+            cognito_deletion_result = await cognito_service.delete_user(cognito_user_id)
+        else:
+            delete_user_logger.info("Skipping Cognito delete (non-production); identity preserved",
+                                   environment=settings.ENVIRONMENT,
+                                   event_type="cognito_deletion_skipped")
+            cognito_deletion_result = {
+                "success": True,
+                "skipped": True,
+                "reason": "non_production",
+            }
+
         # Prepare response data
         deleted_data = {
             "api_keys": api_keys_deleted,
             "wallet_links": True  # Will be deleted via cascade if any exist
         }
-        
+
         # Use timezone-aware datetime and convert to naive for consistency
         deleted_at_with_tz = datetime.now(timezone.utc)
         deleted_at = deleted_at_with_tz.replace(tzinfo=None)
-        
+
         # Determine overall success message
-        if cognito_deletion_result["success"]:
+        if cognito_deletion_result.get("skipped"):
+            message = "User account deleted from database. Cognito identity preserved (non-production)."
+            delete_user_logger.info("User account deletion completed (Cognito skipped)",
+                                   event_type="user_deletion_complete")
+        elif cognito_deletion_result["success"]:
             message = "User account successfully deleted from both database and Cognito"
             delete_user_logger.info("User account deletion completed successfully",
                                    cognito_deletion_success=True,
