@@ -17,6 +17,8 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)  # From Cognito token
     name = Column(String, nullable=True)  # From Cognito token (given_name/family_name)
     is_active = Column(Boolean, default=True)
+    age_verified = Column(Boolean, default=False, nullable=False)
+    age_verified_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

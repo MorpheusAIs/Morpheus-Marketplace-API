@@ -1,4 +1,5 @@
 from typing import Optional, List, Union
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -241,4 +242,47 @@ async def update_user_from_cognito(
                     cognito_user_id=db_user.cognito_user_id,
                     error=str(e),
                     event_type="cognito_user_update_error")
-        return db_user 
+        return db_user
+
+
+async def set_age_verification(db: AsyncSession, user_id: int, verified: bool) -> Optional[User]:
+    """
+    Record the user's 18+ age verification consent.
+
+    Args:
+        db: Database session
+        user_id: User ID
+        verified: Whether the user confirmed they are 18+
+
+    Returns:
+        Updated user object, or None if user not found
+    """
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        logger.warning("User not found for age verification",
+                      user_id=user_id,
+                      event_type="age_verification_user_not_found")
+        return None
+
+    if user.age_verified and user.age_verified_at:
+        logger.info("Age already verified, preserving original consent timestamp",
+                    user_id=user.id,
+                    age_verified_at=user.age_verified_at.isoformat(),
+                    event_type="age_verification_already_done")
+        return user
+
+    user.age_verified = verified
+    user.age_verified_at = datetime.utcnow()
+
+    await db.commit()
+    await db.refresh(user)
+
+    logger.info("Age verification recorded",
+               user_id=user.id,
+               age_verified=verified,
+               age_verified_at=user.age_verified_at.isoformat(),
+               event_type="age_verification_updated")
+
+    await cache_service.delete("user", user.cognito_user_id)
+
+    return user
