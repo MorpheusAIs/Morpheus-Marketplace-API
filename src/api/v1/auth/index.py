@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ....crud import user as user_crud
 from ....crud import api_key as api_key_crud
 from ....db.database import get_db, get_db_session
-from ....schemas.user import UserDeletionResponse
+from ....schemas.user import UserDeletionResponse, AgeVerificationRequest
 from ....schemas.api_key import APIKeyCreate, APIKeyResponse, APIKeyDB
 from ....dependencies import CurrentUser, get_current_user
 from ....db.models import User
@@ -46,6 +46,8 @@ async def get_current_user_info(
         "email": user.email,
         "name": user.name,
         "is_active": user.is_active,
+        "age_verified": user.age_verified,
+        "age_verified_at": user.age_verified_at,
         "created_at": user.created_at,
         "updated_at": user.updated_at,
         "data_source": data_source
@@ -54,6 +56,47 @@ async def get_current_user_info(
     # Email should now be automatically updated during authentication
     
     return response_data
+
+@router.post("/verify-age", response_model=dict)
+async def verify_age(
+    body: AgeVerificationRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Submit age verification consent (18+).
+
+    The user must send `{"age_verified": true}` to confirm they are 18 or older.
+    The confirmation and the timestamp are stored as evidence of consent.
+
+    Requires JWT Bearer authentication with Cognito token.
+    """
+    verify_logger = logger.bind(endpoint="verify_age", user_id=current_user.id)
+
+    if not body.age_verified:
+        verify_logger.warning("Age verification rejected (false)",
+                             event_type="age_verification_rejected")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Age verification must be confirmed as true"
+        )
+
+    updated_user = await user_crud.set_age_verification(db, current_user.id, True)
+
+    if not updated_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    verify_logger.info("Age verification confirmed",
+                      age_verified_at=updated_user.age_verified_at.isoformat(),
+                      event_type="age_verification_confirmed")
+
+    return {
+        "age_verified": updated_user.age_verified,
+        "age_verified_at": updated_user.age_verified_at
+    }
 
 @router.post("/keys", response_model=APIKeyResponse)
 async def create_api_key(
