@@ -356,37 +356,35 @@ jobs:
         run: |
           BUILDTAG=${{ needs.Generate-Tag.outputs.tag_name }}
           
-          # Determine environment and database
-          # Note: Using Aurora Serverless v2 endpoints (cypher.*.mor.org)
-          # Aurora has replaced the old RDS instances (db.*.mor.org)
+          # Determine environment from branch
           if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
-            DB_HOST="cypher.dev.mor.org"
           elif [ "${{ github.ref_name }}" == "stg" ]; then
             ENV="stg"
-            DB_HOST="cypher.stg.mor.org"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
-            DB_HOST="cypher.mor.org"
           else
             echo "❌ Unsupported branch for deployment: ${{ github.ref_name }}"
             exit 1
           fi
           
-          echo "🗄️ Running database migrations for environment: $ENV"
-          echo "📍 Database host: $DB_HOST"
-          
-          # Get database credentials from AWS Secrets Manager
+          # Get database connection details from the dedicated DB-creds secret
+          # (contains only POSTGRES_USER/PASSWORD/DB/HOST/PORT — no app secrets)
           SECRET_VALUE=$(aws secretsmanager get-secret-value \
-            --secret-id "${ENV}-morpheus-api" \
+            --secret-id "${ENV}-morpheus-api-rds-proxy-credentials" \
             --query SecretString --output text)
           
           DB_USER=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_USER')
           DB_PASSWORD=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_PASSWORD')
           DB_NAME=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_DB')
+          DB_HOST=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_HOST')
+          DB_PORT=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_PORT')
+          
+          echo "🗄️ Running database migrations for environment: $ENV"
+          echo "📍 Database host: $DB_HOST"
           
           # Set database URL for migrations
-          export DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}"
+          export DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
           export ENVIRONMENT="$ENV"
           
           # Create backup point (get current revision before migration)
@@ -793,36 +791,33 @@ jobs:
             exit 0
           fi
           
-          # Determine environment and database
-          # Note: Using Aurora Serverless v2 endpoints (cypher.*.mor.org)
-          # Aurora has replaced the old RDS instances (db.*.mor.org)
+          # Determine environment from branch
           if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
-            DB_HOST="cypher.dev.mor.org"
           elif [ "${{ github.ref_name }}" == "stg" ]; then
             ENV="stg"
-            DB_HOST="cypher.stg.mor.org"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
-            DB_HOST="cypher.mor.org"
           else
             echo "❌ Unknown environment for rollback"
             exit 1
           fi
           
-          echo "📍 Rolling back database in environment: $ENV"
-          echo "🔄 Target rollback revision: ${{ env.PRE_MIGRATION_REVISION }}"
-          
-          # Get database credentials from AWS Secrets Manager
+          # Get database connection details from the dedicated DB-creds secret
           SECRET_VALUE=$(aws secretsmanager get-secret-value \
-            --secret-id "${ENV}-morpheus-api" \
+            --secret-id "${ENV}-morpheus-api-rds-proxy-credentials" \
             --query SecretString --output text)
           
           DB_USER=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_USER')
           DB_PASSWORD=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_PASSWORD')
           DB_NAME=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_DB')
+          DB_HOST=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_HOST')
+          DB_PORT=$(echo "$SECRET_VALUE" | jq -r '.POSTGRES_PORT')
           
-          export DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}"
+          echo "📍 Rolling back database in environment: $ENV"
+          echo "🔄 Target rollback revision: ${{ env.PRE_MIGRATION_REVISION }}"
+          
+          export DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
           
           # Check current revision before rollback
           CURRENT_REV=$(poetry run alembic current --verbose 2>/dev/null | grep "Current revision" | awk '{print $NF}' || echo "none")
