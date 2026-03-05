@@ -5,109 +5,45 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import User
-from src.schemas.user import UserCreate, UserUpdate
 from src.services.cache_service import cache_service
 from src.core.logging_config import get_auth_logger
 
 logger = get_auth_logger()
 
 async def get_user_by_id(db: AsyncSession, user_id: int) -> Optional[User]:
-    """
-    Get a user by ID.
-    
-    Args:
-        db: Database session
-        user_id: User ID
-        
-    Returns:
-        User object if found, None otherwise
-    """
     result = await db.execute(select(User).where(User.id == user_id))
     return result.scalars().first()
 
 async def get_user_by_cognito_id(db: AsyncSession, cognito_user_id: str) -> Optional[User]:
-    """
-    Get a user by Cognito user ID.
-    
-    Args:
-        db: Database session
-        cognito_user_id: Cognito user ID (sub claim)
-        
-    Returns:
-        User object if found, None otherwise
-    """
     result = await db.execute(select(User).where(User.cognito_user_id == cognito_user_id))
     return result.scalars().first()
 
-async def get_user_by_email(db: AsyncSession, email: str) -> Optional[User]:
-    """
-    Get a user by email.
-    
-    Args:
-        db: Database session
-        email: User email
-        
-    Returns:
-        User object if found, None otherwise
-    """
-    result = await db.execute(select(User).where(User.email == email))
-    return result.scalars().first()
-
-async def create_user_from_cognito(db: AsyncSession, user_data: dict) -> User:
-    """
-    Create a new user from Cognito authentication data.
-    
-    Args:
-        db: Database session
-        user_data: User data from Cognito token
-        
-    Returns:
-        Created user object
-    """
-    # Create user object
+async def create_user_from_cognito(db: AsyncSession, cognito_user_id: str) -> User:
+    """Create a new user row keyed by cognito_user_id (no PII stored)."""
     db_user = User(
-        cognito_user_id=user_data['cognito_user_id'],
-        email=user_data['email'],
-        name=user_data.get('name'),
-        is_active=user_data.get('is_active', True)
+        cognito_user_id=cognito_user_id,
+        is_active=True,
     )
-    
-    # Add to database
     db.add(db_user)
     await db.commit()
     await db.refresh(db_user)
     
     logger.info("User created from Cognito authentication",
                user_id=db_user.id,
-               cognito_user_id=user_data['cognito_user_id'],
-               email=user_data['email'],
+               cognito_user_id=cognito_user_id,
                event_type="user_created_from_cognito")
     
     return db_user
 
 async def update_user(
-    db: AsyncSession, *, db_user: User, user_in: Union[UserUpdate, dict]
+    db: AsyncSession, *, db_user: User, user_in: dict
 ) -> User:
-    """
-    Update a user.
-    
-    Args:
-        db: Database session
-        db_user: User object to update
-        user_in: User update data
-        
-    Returns:
-        Updated user object
-    """
-    # Convert to dict if not already
     update_data = user_in if isinstance(user_in, dict) else user_in.model_dump(exclude_unset=True)
     
-    # Update user fields (exclude cognito_user_id and id which shouldn't be updated)
     for field, value in update_data.items():
         if hasattr(db_user, field) and field not in ["id", "cognito_user_id"]:
             setattr(db_user, field, value)
     
-    # Commit changes
     await db.commit()
     await db.refresh(db_user)
     
@@ -116,7 +52,6 @@ async def update_user(
                updated_fields=list(update_data.keys()),
                event_type="user_updated")
     
-    # Invalidate user cache
     await cache_service.delete("user", db_user.cognito_user_id)
     
     return db_user
@@ -160,7 +95,6 @@ async def delete_user(db: AsyncSession, user_id: int) -> Optional[User]:
     logger.info("Deleting user",
                user_id=user_id,
                cognito_user_id=user.cognito_user_id,
-               email=user.email,
                event_type="user_deletion")
     
     # Invalidate user cache

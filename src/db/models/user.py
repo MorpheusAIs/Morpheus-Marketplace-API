@@ -1,5 +1,8 @@
 """
 User model for authentication and account management.
+
+PII (email, name) lives exclusively in Cognito.  The database only stores
+cognito_user_id as the identity key and application-level fields.
 """
 from sqlalchemy import Column, Integer, String, Boolean, DateTime
 from sqlalchemy.orm import relationship
@@ -14,8 +17,6 @@ class User(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     cognito_user_id = Column(String, unique=True, index=True, nullable=False)  # Cognito 'sub' claim
-    email = Column(String, unique=True, index=True, nullable=False)  # From Cognito token
-    name = Column(String, nullable=True)  # From Cognito token (given_name/family_name)
     is_active = Column(Boolean, default=True)
     age_verified = Column(Boolean, default=False, nullable=False)
     age_verified_at = Column(DateTime, nullable=True)
