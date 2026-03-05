@@ -357,7 +357,6 @@ async def get_decrypted_api_key(db: AsyncSession, api_key_id: int, user_id: int)
                 api_key_id=api_key_id,
                 user_id=user_id,
                 cognito_user_id=api_key.user.cognito_user_id[:8] + "...",
-                user_email=api_key.user.email,
                 encrypted_key_length=len(api_key.encrypted_key),
                 event_type="api_key_found")
     

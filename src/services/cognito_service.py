@@ -2,10 +2,12 @@
 Cognito User Management Service
 
 Handles interactions with AWS Cognito User Pools for user lifecycle management.
+Uses the ECS task role for admin operations (AdminDeleteUser) and the user's
+own access token for user-level operations (GetUser).
 """
 
 import boto3
-from typing import Optional, Dict, Any
+from typing import Dict, Any, Optional
 from botocore.exceptions import ClientError, NoCredentialsError
 
 from src.core.config import settings
@@ -14,20 +16,15 @@ from src.core.logging_config import get_auth_logger
 logger = get_auth_logger()
 
 class CognitoUserService:
-    """Service for managing Cognito users"""
+    """Service for managing Cognito users."""
     
     def __init__(self):
-        """Initialize Cognito client"""
         try:
-            # Create Cognito Identity Provider client
             self.cognito_client = boto3.client(
                 'cognito-idp',
                 region_name=settings.COGNITO_REGION,
-                aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-                aws_session_token=settings.AWS_SESSION_TOKEN
             )
-            logger.info("Cognito client initialized successfully",
+            logger.info("Cognito client initialized (using task role credentials)",
                        cognito_region=settings.COGNITO_REGION,
                        user_pool_id=settings.COGNITO_USER_POOL_ID,
                        event_type="cognito_client_init_success")
@@ -42,32 +39,51 @@ class CognitoUserService:
                         cognito_region=settings.COGNITO_REGION,
                         event_type="cognito_client_init_error")
             raise
-    
+
+    async def get_user_by_token(self, access_token: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch user attributes from Cognito using the user's own access token.
+        This mirrors what the frontend does with GetUserCommand — no admin
+        permissions needed, just the authenticated user's token.
+
+        Returns dict with 'email' and 'name' keys, or None on failure.
+        """
+        try:
+            response = self.cognito_client.get_user(AccessToken=access_token)
+            attrs = {a['Name']: a['Value'] for a in response.get('UserAttributes', [])}
+            return {
+                'email': attrs.get('email'),
+                'name': attrs.get('name') or attrs.get('given_name'),
+                'cognito_user_id': attrs.get('sub'),
+            }
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            logger.warning("Cognito GetUser failed",
+                          error_code=error_code,
+                          event_type="cognito_get_user_error")
+            return None
+        except Exception as e:
+            logger.warning("Unexpected error fetching Cognito user",
+                          error=str(e),
+                          event_type="cognito_get_user_unexpected_error")
+            return None
+
     async def delete_user(self, cognito_user_id: str) -> Dict[str, Any]:
         """
-        Delete a user from Cognito User Pool
-        
-        Args:
-            cognito_user_id: The Cognito user's sub (UUID)
-            
-        Returns:
-            Dict with deletion status and details
+        Delete a user from Cognito User Pool (admin operation using task role).
         """
         try:
             delete_logger = logger.bind(cognito_user_id=cognito_user_id)
             delete_logger.info("Attempting to delete Cognito user",
-                              cognito_user_id=cognito_user_id,
                               user_pool_id=settings.COGNITO_USER_POOL_ID,
                               event_type="cognito_user_deletion_start")
             
-            # Delete the user from Cognito User Pool
             response = self.cognito_client.admin_delete_user(
                 UserPoolId=settings.COGNITO_USER_POOL_ID,
                 Username=cognito_user_id
             )
             
             delete_logger.info("Successfully deleted Cognito user",
-                              cognito_user_id=cognito_user_id,
                               event_type="cognito_user_deleted")
             
             return {
@@ -83,11 +99,10 @@ class CognitoUserService:
             
             if error_code == 'UserNotFoundException':
                 delete_logger.warning("Cognito user not found for deletion",
-                                     cognito_user_id=cognito_user_id,
                                      error_code=error_code,
                                      event_type="cognito_user_not_found")
                 return {
-                    "success": True,  # Consider this successful since user doesn't exist
+                    "success": True,
                     "cognito_user_id": cognito_user_id,
                     "message": "User not found in Cognito (may have been already deleted)",
                     "warning": True
@@ -95,7 +110,6 @@ class CognitoUserService:
             
             elif error_code == 'InvalidParameterException':
                 delete_logger.error("Invalid parameter for Cognito deletion",
-                                   cognito_user_id=cognito_user_id,
                                    error_code=error_code,
                                    error_message=error_message,
                                    event_type="cognito_invalid_parameter")
@@ -108,7 +122,6 @@ class CognitoUserService:
                 
             else:
                 delete_logger.error("Cognito deletion failed",
-                                   cognito_user_id=cognito_user_id,
                                    error_code=error_code,
                                    error_message=error_message,
                                    event_type="cognito_deletion_failed")
@@ -121,7 +134,6 @@ class CognitoUserService:
                 
         except Exception as e:
             delete_logger.error("Unexpected error during Cognito deletion",
-                               cognito_user_id=cognito_user_id,
                                error=str(e),
                                event_type="cognito_deletion_unexpected_error")
             return {
@@ -130,71 +142,5 @@ class CognitoUserService:
                 "error": f"Unexpected error: {str(e)}",
                 "error_code": "UnknownError"
             }
-    
-    async def get_user_info(self, cognito_user_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get user information from Cognito
-        
-        Args:
-            cognito_user_id: The Cognito user's sub (UUID)
-            
-        Returns:
-            User information dict or None if not found
-        """
-        try:
-            info_logger = logger.bind(cognito_user_id=cognito_user_id)
-            info_logger.debug("Fetching user info from Cognito",
-                             cognito_user_id=cognito_user_id,
-                             user_pool_id=settings.COGNITO_USER_POOL_ID,
-                             event_type="cognito_user_info_fetch_start")
-            
-            response = self.cognito_client.admin_get_user(
-                UserPoolId=settings.COGNITO_USER_POOL_ID,
-                Username=cognito_user_id
-            )
-            
-            # Parse user attributes
-            user_attributes = {}
-            for attr in response.get('UserAttributes', []):
-                user_attributes[attr['Name']] = attr['Value']
-            
-            info_logger.info("Successfully retrieved Cognito user info",
-                            cognito_user_id=cognito_user_id,
-                            user_status=response.get('UserStatus'),
-                            attribute_count=len(user_attributes),
-                            has_email=bool(user_attributes.get('email')),
-                            event_type="cognito_user_info_retrieved")
-            
-            return {
-                "cognito_user_id": cognito_user_id,
-                "username": response.get('Username'),
-                "user_status": response.get('UserStatus'),
-                "enabled": response.get('Enabled'),
-                "user_create_date": response.get('UserCreateDate'),
-                "user_last_modified_date": response.get('UserLastModifiedDate'),
-                "attributes": user_attributes
-            }
-            
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'UserNotFoundException':
-                info_logger.info("Cognito user not found",
-                                cognito_user_id=cognito_user_id,
-                                error_code=error_code,
-                                event_type="cognito_user_not_found_info")
-                return None
-            info_logger.error("Error fetching Cognito user info",
-                             cognito_user_id=cognito_user_id,
-                             error=str(e),
-                             error_code=error_code,
-                             event_type="cognito_user_info_error")
-            return None
-        except Exception as e:
-            info_logger.error("Unexpected error fetching Cognito user info",
-                             cognito_user_id=cognito_user_id,
-                             error=str(e),
-                             event_type="cognito_user_info_unexpected_error")
-            return None
 
-# Global service instance
-cognito_service = CognitoUserService() 
+cognito_service = CognitoUserService()

@@ -33,16 +33,9 @@ async def get_or_create_test_user(db: AsyncSession) -> User:
     test_user = await user_crud.get_user_by_cognito_id(db, "local-test-user")
     
     if not test_user:
-        # Create test user
-        user_data = {
-            'cognito_user_id': 'local-test-user',
-            'email': 'test@local.dev',
-            'name': 'Local Test User'
-        }
-        test_user = await user_crud.create_user_from_cognito(db, user_data)
+        test_user = await user_crud.create_user_from_cognito(db, 'local-test-user')
         logger.info("Created test user for local development",
                    test_user_id=test_user.id,
-                   test_email=user_data['email'],
                    event_type="test_user_created")
     
     return test_user
@@ -52,7 +45,7 @@ def log_local_testing_status():
     if is_local_testing_mode():
         logger.warning("LOCAL TESTING MODE ACTIVE",
                       bypass_cognito=True,
-                      test_user_email="test@local.dev",
+                      test_cognito_id="local-test-user",
                       production_safe=False,
                       event_type="local_testing_active")
         logger.warning("Cognito authentication BYPASSED - NOT FOR PRODUCTION USE",

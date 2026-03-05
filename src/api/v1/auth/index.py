@@ -3,6 +3,7 @@ from typing import List, Any, Optional
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, status, Depends, Body, Request, Response, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ....crud import user as user_crud
@@ -20,43 +21,40 @@ logger = get_auth_logger()
 
 router = APIRouter(tags=["Auth"])
 
-# Note: Authentication is now handled by Cognito
-# Users authenticate via Cognito OAuth2 flow and receive JWT tokens
-# The frontend should redirect to Cognito for login/registration
-
-# OAuth2 callback is handled by the /docs/oauth2-redirect endpoint
+_bearer = HTTPBearer(auto_error=False)
 
 @router.get("/me", response_model=dict)
 async def get_current_user_info(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session)
+    token: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ):
     """
     Get current user information.
-    
-    Requires JWT Bearer authentication with Cognito token.
-    User data is automatically kept up-to-date during authentication.
+
+    Email and name are fetched live from Cognito (not stored in DB).
+    Uses the caller's own access token — same pattern as the frontend.
     """
-    user = current_user
-    data_source = "database_auto_updated"
-    
-    # Return user data focusing on email and cognito_id
-    response_data = {
-        "id": user.id,
-        "cognito_user_id": user.cognito_user_id,
-        "email": user.email,
-        "name": user.name,
-        "is_active": user.is_active,
-        "age_verified": user.age_verified,
-        "age_verified_at": user.age_verified_at,
-        "created_at": user.created_at,
-        "updated_at": user.updated_at,
-        "data_source": data_source
+    email = None
+    name = None
+
+    if token:
+        cognito_info = await cognito_service.get_user_by_token(token.credentials)
+        if cognito_info:
+            email = cognito_info.get('email')
+            name = cognito_info.get('name')
+
+    return {
+        "id": current_user.id,
+        "cognito_user_id": current_user.cognito_user_id,
+        "email": email,
+        "name": name,
+        "is_active": current_user.is_active,
+        "age_verified": current_user.age_verified,
+        "age_verified_at": current_user.age_verified_at,
+        "created_at": current_user.created_at,
+        "updated_at": current_user.updated_at,
+        "data_source": "cognito_live",
     }
-    
-    # Email should now be automatically updated during authentication
-    
-    return response_data
 
 @router.post("/verify-age", response_model=dict)
 async def verify_age(
@@ -383,7 +381,7 @@ async def get_default_api_key_decrypted(
                 "name": api_key_obj.name,
                 "created_at": api_key_obj.created_at
             },
-            "suggestion": "Try refreshing your user data with GET /api/v1/auth/me?refresh_from_cognito=true, or create a new API key"
+            "suggestion": "Try creating a new API key using POST /api/v1/auth/keys"
         }
     
     # Success case

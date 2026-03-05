@@ -5,109 +5,45 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import User
-from src.schemas.user import UserCreate, UserUpdate
 from src.services.cache_service import cache_service
 from src.core.logging_config import get_auth_logger
 
 logger = get_auth_logger()
 
 async def get_user_by_id(db: AsyncSession, user_id: int) -> Optional[User]:
-    """
-    Get a user by ID.
-    
-    Args:
-        db: Database session
-        user_id: User ID
-        
-    Returns:
-        User object if found, None otherwise
-    """
     result = await db.execute(select(User).where(User.id == user_id))
     return result.scalars().first()
 
 async def get_user_by_cognito_id(db: AsyncSession, cognito_user_id: str) -> Optional[User]:
-    """
-    Get a user by Cognito user ID.
-    
-    Args:
-        db: Database session
-        cognito_user_id: Cognito user ID (sub claim)
-        
-    Returns:
-        User object if found, None otherwise
-    """
     result = await db.execute(select(User).where(User.cognito_user_id == cognito_user_id))
     return result.scalars().first()
 
-async def get_user_by_email(db: AsyncSession, email: str) -> Optional[User]:
-    """
-    Get a user by email.
-    
-    Args:
-        db: Database session
-        email: User email
-        
-    Returns:
-        User object if found, None otherwise
-    """
-    result = await db.execute(select(User).where(User.email == email))
-    return result.scalars().first()
-
-async def create_user_from_cognito(db: AsyncSession, user_data: dict) -> User:
-    """
-    Create a new user from Cognito authentication data.
-    
-    Args:
-        db: Database session
-        user_data: User data from Cognito token
-        
-    Returns:
-        Created user object
-    """
-    # Create user object
+async def create_user_from_cognito(db: AsyncSession, cognito_user_id: str) -> User:
+    """Create a new user row keyed by cognito_user_id (no PII stored)."""
     db_user = User(
-        cognito_user_id=user_data['cognito_user_id'],
-        email=user_data['email'],
-        name=user_data.get('name'),
-        is_active=user_data.get('is_active', True)
+        cognito_user_id=cognito_user_id,
+        is_active=True,
     )
-    
-    # Add to database
     db.add(db_user)
     await db.commit()
     await db.refresh(db_user)
     
     logger.info("User created from Cognito authentication",
                user_id=db_user.id,
-               cognito_user_id=user_data['cognito_user_id'],
-               email=user_data['email'],
+               cognito_user_id=cognito_user_id,
                event_type="user_created_from_cognito")
     
     return db_user
 
 async def update_user(
-    db: AsyncSession, *, db_user: User, user_in: Union[UserUpdate, dict]
+    db: AsyncSession, *, db_user: User, user_in: dict
 ) -> User:
-    """
-    Update a user.
-    
-    Args:
-        db: Database session
-        db_user: User object to update
-        user_in: User update data
-        
-    Returns:
-        Updated user object
-    """
-    # Convert to dict if not already
     update_data = user_in if isinstance(user_in, dict) else user_in.model_dump(exclude_unset=True)
     
-    # Update user fields (exclude cognito_user_id and id which shouldn't be updated)
     for field, value in update_data.items():
         if hasattr(db_user, field) and field not in ["id", "cognito_user_id"]:
             setattr(db_user, field, value)
     
-    # Commit changes
     await db.commit()
     await db.refresh(db_user)
     
@@ -116,7 +52,6 @@ async def update_user(
                updated_fields=list(update_data.keys()),
                event_type="user_updated")
     
-    # Invalidate user cache
     await cache_service.delete("user", db_user.cognito_user_id)
     
     return db_user
@@ -160,7 +95,6 @@ async def delete_user(db: AsyncSession, user_id: int) -> Optional[User]:
     logger.info("Deleting user",
                user_id=user_id,
                cognito_user_id=user.cognito_user_id,
-               email=user.email,
                event_type="user_deletion")
     
     # Invalidate user cache
@@ -175,75 +109,6 @@ async def delete_user(db: AsyncSession, user_id: int) -> Optional[User]:
                event_type="user_deleted")
     
     return user
-
-async def update_user_from_cognito(
-    db: AsyncSession, *, db_user: User, cognito_service
-) -> Optional[User]:
-    """
-    Update user data by fetching fresh information from Cognito.
-    
-    Args:
-        db: Database session
-        db_user: User object to update
-        cognito_service: Cognito service instance
-        
-    Returns:
-        Updated user object or None if Cognito fetch fails
-    """
-    try:
-        logger.debug("Fetching user info from Cognito",
-                    user_id=db_user.id,
-                    cognito_user_id=db_user.cognito_user_id,
-                    event_type="cognito_user_info_fetch_start")
-        
-        # Fetch user info from Cognito
-        cognito_info = await cognito_service.get_user_info(db_user.cognito_user_id)
-        
-        if not cognito_info:
-            logger.warning("No user info received from Cognito",
-                          user_id=db_user.id,
-                          cognito_user_id=db_user.cognito_user_id,
-                          event_type="cognito_user_info_not_found")
-            return None
-        
-        # Extract attributes from Cognito response
-        attributes = cognito_info.get('attributes', {})
-        email = attributes.get('email')
-        
-        # Prepare update data
-        update_data = {}
-        
-        # Update email if we have a real email from Cognito and it's different
-        if email and email != db_user.email:
-            update_data['email'] = email
-            # Only update name if it's currently empty
-            if not db_user.name:
-                update_data['name'] = email  # Use email as name since no name fields are collected
-        
-        # Apply updates if we have any
-        if update_data:
-            logger.info("Updating user with Cognito data",
-                       user_id=db_user.id,
-                       update_fields=list(update_data.keys()),
-                       new_email=email or 'not_provided',
-                       event_type="cognito_user_data_update")
-            return await update_user(db, db_user=db_user, user_in=update_data)
-        
-        logger.debug("No updates needed from Cognito",
-                    user_id=db_user.id,
-                    has_email=bool(email),
-                    event_type="cognito_no_updates_needed")
-        return db_user
-        
-    except Exception as e:
-        # Log error but don't fail - return the original user
-        logger.error("Failed to update user from Cognito",
-                    user_id=db_user.id,
-                    cognito_user_id=db_user.cognito_user_id,
-                    error=str(e),
-                    event_type="cognito_user_update_error")
-        return db_user
-
 
 async def set_age_verification(db: AsyncSession, user_id: int, verified: bool) -> Optional[User]:
     """

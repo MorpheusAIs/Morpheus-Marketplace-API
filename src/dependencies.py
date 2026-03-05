@@ -9,7 +9,6 @@ from jose import jwt, JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 from sqlalchemy import select
-import boto3
 from jose import jwt, jwk
 import httpx
 
@@ -19,33 +18,26 @@ from src.crud import user as user_crud
 from src.crud import api_key as api_key_crud
 from src.db.database import get_db, get_db_session
 from src.db.models import User, APIKey
-from src.schemas.token import TokenPayload
-from src.services.cognito_service import cognito_service
 from src.services.cache_service import cache_service
 from src.core.logging_config import get_auth_logger
 
 auth_logger = get_auth_logger()
 
-# Define bearer token scheme for JWT authentication
 oauth2_scheme = HTTPBearer(
     auto_error=True,
     description="JWT Bearer token authentication"
 )
 
-# Define optional bearer token scheme for local testing
 oauth2_scheme_optional = HTTPBearer(
     auto_error=False,
     description="JWT Bearer token authentication (optional for local testing)"
 )
 
-# Define API key scheme for API key authentication  
 api_key_header = APIKeyHeader(
     name="Authorization", 
     auto_error=False,
     description="Provide the API key as 'Bearer sk-xxxxxx'"
 )
-
-cognito_client = boto3.client('cognito-idp', region_name=settings.AWS_REGION)
 
 async def get_current_user(
     db: AsyncSession = Depends(get_db_session),
@@ -153,9 +145,7 @@ async def get_current_user(
                         email=payload.get('email'),
                         event_type="jwt_validation_success")
         
-        # Extract user information from token
         cognito_user_id = payload.get('sub')
-        token_email = payload.get('email')
         
         if not cognito_user_id:
             auth_logger.error("Missing cognito_user_id (sub) in token payload",
@@ -182,8 +172,6 @@ async def get_current_user(
             if user:
                 user_cache_data = {
                     'id': user.id,
-                    'email': user.email,
-                    'name': user.name,
                     'is_active': user.is_active,
                     'age_verified': user.age_verified,
                     'age_verified_at': user.age_verified_at.isoformat() if user.age_verified_at else None,
@@ -194,24 +182,13 @@ async def get_current_user(
                 await cache_service.set("user", cognito_user_id, user_cache_data, ttl_seconds=600)
         
         if not user:
-            # Create new user with email and cognito_user_id
-            user_data = {
-                'cognito_user_id': cognito_user_id,
-                'email': token_email,  # May be None for some auth methods (social, magic link, phone)
-                'name': token_email,   # Use email as name if available, otherwise None
-                'is_active': True
-            }
-            user = await user_crud.create_user_from_cognito(db, user_data)
+            user = await user_crud.create_user_from_cognito(db, cognito_user_id)
             auth_logger.info("Created new user from Cognito token",
-                           user_email=user_data['email'] or 'not_provided',
                            cognito_user_id=cognito_user_id,
                            event_type="user_creation")
 
-            # Cache newly created user
             user_cache_data = {
                 'id': user.id,
-                'email': user.email,
-                'name': user.name,
                 'is_active': user.is_active,
                 'age_verified': user.age_verified,
                 'age_verified_at': user.age_verified_at.isoformat() if user.age_verified_at else None,
@@ -220,84 +197,6 @@ async def get_current_user(
                 'updated_at': user.updated_at.isoformat() if user.updated_at else None,
             }
             await cache_service.set("user", cognito_user_id, user_cache_data, ttl_seconds=600)
-            
-            # If email is missing, try to refresh from Cognito
-            if not token_email:
-                auth_logger.info("Email missing from JWT, refreshing from Cognito",
-                               user_id=user.id,
-                               cognito_user_id=cognito_user_id,
-                               event_type="auto_refresh_new_user")
-                try:
-                    updated_user = await user_crud.update_user_from_cognito(db, db_user=user, cognito_service=cognito_service)
-                    if updated_user and updated_user.email:
-                        user = updated_user
-                        auth_logger.info("Successfully refreshed new user from Cognito",
-                                       user_id=user.id,
-                                       user_email=user.email,
-                                       event_type="auto_refresh_success")
-                    else:
-                        auth_logger.info("User created without email (auth method doesn't provide it)",
-                                       user_id=user.id,
-                                       event_type="user_no_email")
-                except Exception as e:
-                    auth_logger.warning("Failed to refresh new user from Cognito",
-                                      user_id=user.id,
-                                      error=str(e),
-                                      event_type="auto_refresh_failed")
-            
-        else:
-            # Always check if user data needs updating
-            needs_update = False
-            update_data = {}
-            
-            # Check if JWT has email and it's different from stored email
-            if token_email and token_email != user.email:
-                update_data['email'] = token_email
-                update_data['name'] = token_email  # Also update name to match email
-                needs_update = True
-                auth_logger.info("Updating user email from JWT token",
-                               old_email=user.email or 'not_set',
-                               new_email=token_email,
-                               user_id=user.id,
-                               event_type="user_email_update_from_jwt")
-            
-            # If email is missing and JWT doesn't have email, try refreshing from Cognito
-            elif not user.email and not token_email:
-                auth_logger.info("Email needs refresh from Cognito",
-                               user_id=user.id,
-                               cognito_user_id=cognito_user_id,
-                               current_email=user.email or 'not_set',
-                               has_jwt_email=bool(token_email),
-                               event_type="auto_refresh_existing_user")
-                try:
-                    refreshed_user = await user_crud.update_user_from_cognito(db, db_user=user, cognito_service=cognito_service)
-                    if refreshed_user and refreshed_user.email != user.email:
-                        user = refreshed_user
-                        auth_logger.info("Successfully refreshed existing user from Cognito",
-                                       user_id=user.id,
-                                       old_email=user.email or 'not_set',
-                                       new_email=refreshed_user.email or 'still_not_available',
-                                       event_type="auto_refresh_success")
-                    else:
-                        auth_logger.debug("Cognito refresh returned same/no email",
-                                        user_id=user.id,
-                                        email=user.email or 'not_available',
-                                        event_type="auto_refresh_no_change")
-                except Exception as e:
-                    auth_logger.warning("Failed to refresh existing user from Cognito",
-                                      user_id=user.id,
-                                      error=str(e),
-                                      event_type="auto_refresh_failed")
-            
-            # If we have JWT-based updates, apply them
-            if needs_update:
-                user = await user_crud.update_user(db, db_user=user, user_in=update_data)
-                auth_logger.info("Updated user with email from JWT token",
-                               user_id=user.id,
-                               event_type="user_update_complete")
-                
-                # Invalidate user cache on update
-                await cache_service.delete("user", cognito_user_id)
         
         return user
         
@@ -382,8 +281,6 @@ async def get_api_key_auth(
             test_user = await get_or_create_test_user(db)
             user_dict = {
                 'id': test_user.id,
-                'email': test_user.email,
-                'name': test_user.name,
                 'is_active': test_user.is_active,
                 'cognito_user_id': test_user.cognito_user_id,
                 'created_at': test_user.created_at,
@@ -476,8 +373,6 @@ async def _build_auth_from_cache(
     ud = cached_data["user"]
     user = User(
         id=ud["id"],
-        email=ud.get("email"),
-        name=ud.get("name"),
         is_active=ud.get("is_active", True),
         cognito_user_id=ud.get("cognito_user_id"),
         created_at=datetime.fromisoformat(ud["created_at"]) if ud.get("created_at") else None,
@@ -560,8 +455,6 @@ async def _build_auth_from_db(
         # ── Build return objects ────────────────────────────────────────
         user_dict = {
             'id': db_user.id,
-            'email': db_user.email,
-            'name': db_user.name,
             'is_active': db_user.is_active,
             'cognito_user_id': db_user.cognito_user_id,
             'created_at': db_user.created_at,
