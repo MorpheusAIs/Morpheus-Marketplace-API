@@ -3,57 +3,99 @@ from typing import List, Any, Optional
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, status, Depends, Body, Request, Response, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ....crud import user as user_crud
 from ....crud import api_key as api_key_crud
 from ....db.database import get_db, get_db_session
-from ....schemas.user import UserDeletionResponse
+from ....schemas.user import UserDeletionResponse, AgeVerificationRequest
 from ....schemas.api_key import APIKeyCreate, APIKeyResponse, APIKeyDB
 from ....dependencies import CurrentUser, get_current_user
 from ....db.models import User
 from ....services.cognito_service import cognito_service
+from ....core.config import settings
 from ....core.logging_config import get_auth_logger
 
 logger = get_auth_logger()
 
 router = APIRouter(tags=["Auth"])
 
-# Note: Authentication is now handled by Cognito
-# Users authenticate via Cognito OAuth2 flow and receive JWT tokens
-# The frontend should redirect to Cognito for login/registration
-
-# OAuth2 callback is handled by the /docs/oauth2-redirect endpoint
+_bearer = HTTPBearer(auto_error=False)
 
 @router.get("/me", response_model=dict)
 async def get_current_user_info(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session)
+    token: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ):
     """
     Get current user information.
-    
-    Requires JWT Bearer authentication with Cognito token.
-    User data is automatically kept up-to-date during authentication.
+
+    Email and name are fetched live from Cognito (not stored in DB).
+    Uses the caller's own access token — same pattern as the frontend.
     """
-    user = current_user
-    data_source = "database_auto_updated"
-    
-    # Return user data focusing on email and cognito_id
-    response_data = {
-        "id": user.id,
-        "cognito_user_id": user.cognito_user_id,
-        "email": user.email,
-        "name": user.name,
-        "is_active": user.is_active,
-        "created_at": user.created_at,
-        "updated_at": user.updated_at,
-        "data_source": data_source
+    email = None
+    name = None
+
+    if token:
+        cognito_info = await cognito_service.get_user_by_token(token.credentials)
+        if cognito_info:
+            email = cognito_info.get('email')
+            name = cognito_info.get('name')
+
+    return {
+        "id": current_user.id,
+        "cognito_user_id": current_user.cognito_user_id,
+        "email": email,
+        "name": name,
+        "is_active": current_user.is_active,
+        "age_verified": current_user.age_verified,
+        "age_verified_at": current_user.age_verified_at,
+        "created_at": current_user.created_at,
+        "updated_at": current_user.updated_at,
+        "data_source": "cognito_live",
     }
-    
-    # Email should now be automatically updated during authentication
-    
-    return response_data
+
+@router.post("/verify-age", response_model=dict)
+async def verify_age(
+    body: AgeVerificationRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Submit age verification consent (18+).
+
+    The user must send `{"age_verified": true}` to confirm they are 18 or older.
+    The confirmation and the timestamp are stored as evidence of consent.
+
+    Requires JWT Bearer authentication with Cognito token.
+    """
+    verify_logger = logger.bind(endpoint="verify_age", user_id=current_user.id)
+
+    if not body.age_verified:
+        verify_logger.warning("Age verification rejected (false)",
+                             event_type="age_verification_rejected")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Age verification must be confirmed as true"
+        )
+
+    updated_user = await user_crud.set_age_verification(db, current_user.id, True)
+
+    if not updated_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    verify_logger.info("Age verification confirmed",
+                      age_verified_at=updated_user.age_verified_at.isoformat(),
+                      event_type="age_verification_confirmed")
+
+    return {
+        "age_verified": updated_user.age_verified,
+        "age_verified_at": updated_user.age_verified_at
+    }
 
 @router.post("/keys", response_model=APIKeyResponse)
 async def create_api_key(
@@ -148,13 +190,12 @@ async def delete_user_account(
 ):
     """
     Delete the current user's account and all associated data.
-    
-    This action is irreversible and will:
-    1. Delete all API keys
-    2. Delete wallet links (via cascade)
-    3. Delete the user account
-    4. Delete/deactivate the Cognito identity
-    
+
+    Always: deletes API keys, user record (cascades: wallet_links, chats, etc.).
+    Cognito: only in production (ENVIRONMENT in production|prod|prd) do we delete
+    the Cognito user. In dev/test/non-prod we leave the Cognito identity intact so
+    "Delete account" in TEST cannot accidentally nuke the user's real identity.
+
     Requires JWT Bearer authentication.
     """
     user_id = current_user.id
@@ -187,25 +228,41 @@ async def delete_user_account(
         
         delete_user_logger.info("User record deleted successfully",
                                event_type="user_record_deleted")
-        
-        # 3. Delete the user from Cognito User Pool
-        delete_user_logger.info("Deleting user from Cognito",
-                               cognito_user_id=cognito_user_id,
-                               event_type="cognito_deletion_start")
-        cognito_deletion_result = await cognito_service.delete_user(cognito_user_id)
-        
+
+        # 3. Delete Cognito user only in production; in dev/test leave identity intact
+        env_lower = (settings.ENVIRONMENT or "").strip().lower()
+        is_production = env_lower in ("production", "prod", "prd")
+        if is_production:
+            delete_user_logger.info("Deleting user from Cognito (production)",
+                                   cognito_user_id=cognito_user_id,
+                                   event_type="cognito_deletion_start")
+            cognito_deletion_result = await cognito_service.delete_user(cognito_user_id)
+        else:
+            delete_user_logger.info("Skipping Cognito delete (non-production); identity preserved",
+                                   environment=settings.ENVIRONMENT,
+                                   event_type="cognito_deletion_skipped")
+            cognito_deletion_result = {
+                "success": True,
+                "skipped": True,
+                "reason": "non_production",
+            }
+
         # Prepare response data
         deleted_data = {
             "api_keys": api_keys_deleted,
             "wallet_links": True  # Will be deleted via cascade if any exist
         }
-        
+
         # Use timezone-aware datetime and convert to naive for consistency
         deleted_at_with_tz = datetime.now(timezone.utc)
         deleted_at = deleted_at_with_tz.replace(tzinfo=None)
-        
+
         # Determine overall success message
-        if cognito_deletion_result["success"]:
+        if cognito_deletion_result.get("skipped"):
+            message = "User account deleted from database. Cognito identity preserved (non-production)."
+            delete_user_logger.info("User account deletion completed (Cognito skipped)",
+                                   event_type="user_deletion_complete")
+        elif cognito_deletion_result["success"]:
             message = "User account successfully deleted from both database and Cognito"
             delete_user_logger.info("User account deletion completed successfully",
                                    cognito_deletion_success=True,
@@ -324,7 +381,7 @@ async def get_default_api_key_decrypted(
                 "name": api_key_obj.name,
                 "created_at": api_key_obj.created_at
             },
-            "suggestion": "Try refreshing your user data with GET /api/v1/auth/me?refresh_from_cognito=true, or create a new API key"
+            "suggestion": "Try creating a new API key using POST /api/v1/auth/keys"
         }
     
     # Success case

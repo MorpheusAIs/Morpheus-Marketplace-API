@@ -53,6 +53,8 @@ services:
       REDIS_URL: redis://redis-local:6379/0
       # Local database
       DATABASE_URL: postgresql+asyncpg://morpheus_local:local_dev_password@db-local:5432/morpheus_local_db
+
+      ENVIRONMENT: ${ENVIRONMENT:-test}
       
       # Bypass Cognito for local testing (controlled by .env.local)
       BILLING_ADMIN_SECRET: ${BILLING_ADMIN_SECRET}
@@ -110,12 +112,8 @@ services:
       HOLD_RECONCILIATION_INTERVAL_SECONDS: ${HOLD_RECONCILIATION_INTERVAL_SECONDS:-600}
       HOLD_MAX_PENDING_SECONDS: ${HOLD_MAX_PENDING_SECONDS:-3600}
       
-      # Rate limiting settings
+      # Rate limiting (on/off toggle; limits configured in models/{env}_rate_limit.json)
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
-      RATE_LIMIT_DEFAULT_RPM: ${RATE_LIMIT_DEFAULT_RPM:-60}
-      RATE_LIMIT_DEFAULT_TPM: ${RATE_LIMIT_DEFAULT_TPM:-100000}
-      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
-      RATE_LIMIT_MODEL_GROUPS: ${RATE_LIMIT_MODEL_GROUPS:-}
       
       # Web3/SIWE settings (ERC-4361 Sign-In with Ethereum)
       WEB3_PROVIDER_URL: ${WEB3_PROVIDER_URL:-}  # Optional: enables EIP-1271 smart contract wallet verification
@@ -133,6 +131,7 @@ services:
       - ./alembic.ini:/app/alembic.ini
       - ./tests:/app/tests
       - ./scripts:/app/scripts
+      - ./models:/app/models
     
     # Use startup script that handles migrations and verification
     command: ./scripts/start_local_dev.sh

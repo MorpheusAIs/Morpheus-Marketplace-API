@@ -413,10 +413,11 @@ async def startup_event():
     if settings.RATE_LIMIT_ENABLED:
         try:
             await rate_limit_service.initialize()
+            rules_info = rate_limit_service.get_rules_info()
             logger.info("Rate limiting service initialized",
                        enabled=True,
-                       default_rpm=settings.RATE_LIMIT_DEFAULT_RPM,
-                       default_tpm=settings.RATE_LIMIT_DEFAULT_TPM,
+                       default_rpm=rules_info.get("default", {}).get("rpm"),
+                       default_tpm=rules_info.get("default", {}).get("tpm"),
                        event_type="rate_limit_init_success")
         except Exception as e:
             logger.error("Failed to initialize rate limiting service",
@@ -1106,7 +1107,7 @@ def custom_swagger_ui_html():
                 realm: 'oauth2',
                 appName: 'Morpheus API Gateway',
                 scopeSeparator: ' ',
-                scopes: 'openid email profile',
+                scopes: 'aws.cognito.signin.user.admin openid email profile',
                 usePkceWithAuthorizationCodeGrant: false,
                 useBasicAuthenticationWithAccessCodeGrant: false,
                 additionalQueryStringParams: {{
@@ -1517,6 +1518,7 @@ def custom_openapi():
                     "authorizationUrl": f"https://{settings.COGNITO_DOMAIN}/oauth2/authorize",
                     "tokenUrl": f"https://{settings.COGNITO_DOMAIN}/oauth2/token",
                     "scopes": {
+                        "aws.cognito.signin.user.admin": "Read own user attributes (GetUser)",
                         "openid": "OpenID Connect authentication",
                         "email": "Access to email address", 
                         "profile": "Access to profile information"
@@ -1562,7 +1564,7 @@ def custom_openapi():
                 # Auth and Automation endpoints: OAuth2/BearerAuth only (JWT tokens from Cognito)
                 elif path_key.startswith("/api/v1/auth/") or path_key.startswith("/api/v1/automation/") or path_key.startswith("/api/v1/billing/"):
                     operation["security"] = [
-                        {"OAuth2": ["openid", "email", "profile"]},
+                        {"OAuth2": ["aws.cognito.signin.user.admin", "openid", "email", "profile"]},
                         {"BearerAuth": []}
                     ]
                 # Default: All other endpoints use APIKeyAuth only

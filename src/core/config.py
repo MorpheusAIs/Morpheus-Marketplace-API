@@ -164,11 +164,8 @@ class Settings(BaseSettings):
     PROXY_ROUTER_CHAT_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_CHAT_TIMEOUT", "300.0")))
     PROXY_ROUTER_STREAM_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_STREAM_TIMEOUT", "300.0")))
 
-    # AWS settings
+    # AWS settings (credentials come from ECS task role; no explicit keys needed)
     AWS_REGION: str = os.getenv("AWS_REGION", "us-east-2")
-    AWS_ACCESS_KEY_ID: str | None = Field(default=os.getenv("AWS_ACCESS_KEY_ID"))
-    AWS_SECRET_ACCESS_KEY: str | None = Field(default=os.getenv("AWS_SECRET_ACCESS_KEY"))
-    AWS_SESSION_TOKEN: str | None = Field(default=os.getenv("AWS_SESSION_TOKEN"))
     
     # AWS Cognito Settings
     COGNITO_USER_POOL_ID: str = Field(default=os.getenv("COGNITO_USER_POOL_ID", "us-east-2_tqCTHoSST"))
@@ -268,19 +265,8 @@ class Settings(BaseSettings):
     # Rate Limiting Settings
     # Enable/disable rate limiting globally
     RATE_LIMIT_ENABLED: bool = Field(default=os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true")
-    
-    # Default rate limits (applied if no model-specific limits match)
-    # Requests per minute (RPM)
-    RATE_LIMIT_DEFAULT_RPM: int = Field(default=int(os.getenv("RATE_LIMIT_DEFAULT_RPM", "60")))
-    # Tokens per minute (TPM) - input + output combined
-    RATE_LIMIT_DEFAULT_TPM: int = Field(default=int(os.getenv("RATE_LIMIT_DEFAULT_TPM", "100000")))
-    
-    # Rate limit window in seconds (default: 60 for per-minute limits)
-    RATE_LIMIT_WINDOW_SECONDS: int = Field(default=int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60")))
-    
-    # Model group rate limits (JSON format)
-    # Format: {"group_name": {"rpm": 30, "tpm": 50000, "models": ["model1", "model2"]}}
-    RATE_LIMIT_MODEL_GROUPS: str = Field(default=os.getenv("RATE_LIMIT_MODEL_GROUPS", ""))
+    # Rate limit defaults and model groups are loaded from models/{env}_rate_limit.json
+    # Model pricing is loaded from models/{env}_model_price.json
     
 
 

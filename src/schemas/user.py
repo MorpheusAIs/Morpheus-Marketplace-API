@@ -1,39 +1,31 @@
 from typing import Optional
-from pydantic import BaseModel, EmailStr, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
 
-# Shared properties
+# Shared properties (DB-backed fields only; email lives in Cognito)
 class UserBase(BaseModel):
-    email: Optional[EmailStr] = None  # Optional: may not be provided by some auth methods (social, magic link, phone)
-    name: Optional[str] = None
     is_active: Optional[bool] = True
 
-# Properties to receive on user creation
-class UserCreate(UserBase):
-    password: str = Field(..., min_length=8)
-
-# Properties to receive on user update
-class UserUpdate(UserBase):
-    password: Optional[str] = Field(None, min_length=8)
-
-# Properties to return to client
+# Properties to return to client (email resolved from Cognito at request time)
 class UserResponse(UserBase):
     id: int
+    cognito_user_id: str
+    email: Optional[str] = None
+    name: Optional[str] = None
+    age_verified: bool = False
+    age_verified_at: Optional[datetime] = None
     
-    # Configure Pydantic to work with SQLAlchemy
     model_config = ConfigDict(from_attributes=True)
 
-# Properties for authentication
-class UserLogin(BaseModel):
-    """Schema for user login credentials"""
-    email: EmailStr = Field(..., description="Email address for login")
-    password: str = Field(..., description="User password", min_length=8)
-    
+# Age verification consent request
+class AgeVerificationRequest(BaseModel):
+    """Schema for age verification consent submission."""
+    age_verified: bool = Field(..., description="User confirms they are 18 years or older")
+
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "email": "user@example.com",
-                "password": "securepassword"
+                "age_verified": True
             }
         }
     )
