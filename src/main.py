@@ -413,10 +413,11 @@ async def startup_event():
     if settings.RATE_LIMIT_ENABLED:
         try:
             await rate_limit_service.initialize()
+            rules_info = rate_limit_service.get_rules_info()
             logger.info("Rate limiting service initialized",
                        enabled=True,
-                       default_rpm=settings.RATE_LIMIT_DEFAULT_RPM,
-                       default_tpm=settings.RATE_LIMIT_DEFAULT_TPM,
+                       default_rpm=rules_info.get("default", {}).get("rpm"),
+                       default_tpm=rules_info.get("default", {}).get("tpm"),
                        event_type="rate_limit_init_success")
         except Exception as e:
             logger.error("Failed to initialize rate limiting service",
