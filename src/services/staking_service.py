@@ -414,8 +414,10 @@ class StakingService:
                         adjustment_factor=str(adj_factor)
                     )
                     
-                    # Get current balance to check if already refreshed today
-                    balance = await credits_crud.get_or_create_balance(db, user_id)
+                    # Get current balance with row lock to ensure we modify a
+                    # session-tracked object (bypasses Redis cache) and prevent
+                    # concurrent updates from racing with us.
+                    balance = await credits_crud.get_or_create_balance(db, user_id, for_update=True)
                     
                     # Check if already refreshed today - skip balance update but still update wallet stakes
                     if balance.staking_refresh_date == today:
@@ -431,7 +433,9 @@ class StakingService:
                     
                     idempotency_key = f"staking_sync:{user_id}:{today.isoformat()}"
                     
-                    # Create ledger entry for staking refresh (transaction record)
+                    # Create ledger entry for staking refresh (transaction record).
+                    # Use auto_commit=False so the ledger row and the balance
+                    # update below are committed in a single atomic transaction.
                     if daily_amount > 0:
                         await credits_crud.create_ledger_entry(
                             db=db,
@@ -442,6 +446,7 @@ class StakingService:
                             amount_paid=Decimal("0"),
                             amount_staking=daily_amount,  # Positive for credit (in USD)
                             description=f"Daily staking rewards: {stake_in_mor:.4f} MOR staked ({stake_share*100:.4f}% share), earned {mor_earned:.6f} MOR @ ${mor_price:.2f}",
+                            auto_commit=False,
                         )
                     
                     # Update user's staking balance
@@ -452,7 +457,7 @@ class StakingService:
                     balance.is_staker = daily_amount > 0
                     balance.updated_at = datetime.utcnow()
                     
-                    # Commit all changes for this user atomically
+                    # Commit ledger entry + balance update atomically
                     await db.commit()
                     
                     users_processed += 1
