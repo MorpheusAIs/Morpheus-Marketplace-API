@@ -1,0 +1,76 @@
+{
+  "default_rpm": 60,
+  "default_tpm": 100000,
+  "window_seconds": 60,
+  "model_groups": [
+    {
+      "name": "embedding",
+      "rpm": 500,
+      "tpm": 0,
+      "models": ["text-embedding-bge-m3"],
+      "priority": 10,
+      "description": "Embedding models with high throughput (no token limit)"
+    },
+    {
+      "name": "S",
+      "rpm": 500,
+      "tpm": 1000000,
+      "models": [
+        "llama-3.2-3b",
+        "llama-3.2-3b:web",
+        "qwen3-4b",
+        "qwen3-4b:web"
+      ],
+      "priority": 25,
+      "description": "Small models with high throughput limits"
+    },
+    {
+      "name": "M",
+      "rpm": 50,
+      "tpm": 750000,
+      "models": [
+        "llama-3.3-70b",
+        "llama-3.3-70b:web",
+        "mistral-31-24b",
+        "mistral-31-24b:web",
+        "qwen3-next-80b",
+        "qwen3-next-80b:web",
+        "venice-uncensored",
+        "venice-uncensored:web"
+      ],
+      "priority": 50,
+      "description": "Medium models with moderate limits"
+    },
+    {
+      "name": "L",
+      "rpm": 20,
+      "tpm": 500000,
+      "models": [
+        "glm-5",
+        "glm-5:web",
+        "glm-4.7",
+        "glm-4.7:web",
+        "glm-4.7-thinking",
+        "glm-4.7-thinking:web",
+        "glm-4.7-flash",
+        "glm-4.7-flash:web",
+        "kimi-k2.5",
+        "kimi-k2.5:web",
+        "kimi-k2-thinking",
+        "kimi-k2-thinking:web",
+        "qwen3-235b",
+        "qwen3-235b:web",
+        "qwen3-coder-480b-a35b-instruct",
+        "qwen3-coder-480b-a35b-instruct:web",
+        "minimax-m2.5",
+        "minimax-m2.5:web",
+        "gpt-oss-120b",
+        "gpt-oss-120b:web",
+        "hermes-3-llama-3.1-405b",
+        "hermes-3-llama-3.1-405b:web"
+      ],
+      "priority": 100,
+      "description": "Large models with conservative limits"
+    }
+  ]
+}
