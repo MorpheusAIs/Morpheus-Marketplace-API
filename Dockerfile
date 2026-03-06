@@ -58,6 +58,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy application code
 COPY ./src ./src
 COPY ./alembic ./alembic
+COPY ./models ./models
 COPY alembic.ini .
 
 # Create logs directory and initial models.json before changing ownership

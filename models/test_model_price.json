@@ -1,0 +1,36 @@
+{
+  "default_input_price_per_million": "0.50",
+  "default_output_price_per_million": "2.00",
+  "models": {
+    "glm-5": { "input": "1.00", "output": "3.20" },
+    "glm-4.7": { "input": "0.50", "output": "2.25" },
+    "glm-4.7-thinking": { "input": "0.45", "output": "2.00" },
+    "glm-4.7-flash": { "input": "0.10", "output": "0.50" },
+
+    "kimi-k2.5": { "input": "0.60", "output": "3.00" },
+    "kimi-k2-thinking": { "input": "0.60", "output": "3.00" },
+
+    "qwen3-235b": { "input": "0.40", "output": "3.00" },
+    "qwen-3-235b": { "input": "0.40", "output": "3.00" },
+    "qwen3-coder-480b-a35b-instruct": { "input": "0.70", "output": "2.80" },
+    "qwen3-coder-480b-a35b": { "input": "0.70", "output": "2.80" },
+    "qwen3-next-80b": { "input": "0.15", "output": "1.50" },
+
+    "minimax-m2.5": { "input": "0.30", "output": "1.20" },
+
+    "gpt-oss-120b": { "input": "0.07", "output": "0.28" },
+
+    "hermes-3-llama-3.1-405b": { "input": "1.00", "output": "3.00" },
+    "llama-3.3-70b": { "input": "0.70", "output": "2.50" },
+    "llama-3-3-70b": { "input": "0.70", "output": "2.50" },
+    "llama-3.2-3b": { "input": "0.10", "output": "0.50" },
+    "llama-3-2-3b": { "input": "0.10", "output": "0.50" },
+
+    "mistral-31-24b": { "input": "0.50", "output": "2.00" },
+    "mistral-small-24b": { "input": "0.50", "output": "2.00" },
+
+    "venice-uncensored": { "input": "0.20", "output": "0.90" },
+
+    "text-embedding-bge-m3": { "input": "0.10", "output": "0.50" }
+  }
+}
