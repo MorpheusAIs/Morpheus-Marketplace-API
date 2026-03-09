@@ -42,6 +42,7 @@ from ....core.config import settings
 logger = get_api_logger()
 
 router = APIRouter(tags=["Billing"])
+admin_router = APIRouter(tags=["Billing Admin"])
 
 
 # === Admin Authentication ===
@@ -502,7 +503,7 @@ async def list_usage_for_month(
 
 # === Staking Settings Endpoints (Admin Protected) ===
 
-@router.post("/staking/settings", response_model=StakingSettingsResponse)
+@admin_router.post("/staking/settings", response_model=StakingSettingsResponse)
 async def set_staking_settings(
     staking_request: StakingSettingsRequest,
     db: AsyncSession = Depends(get_db_session),
@@ -549,7 +550,7 @@ async def set_staking_settings(
         )
 
 
-@router.post("/staking/refresh", response_model=StakingRefreshResponse)
+@admin_router.post("/staking/refresh", response_model=StakingRefreshResponse)
 async def trigger_staking_refresh(
     db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
@@ -605,7 +606,7 @@ async def trigger_staking_refresh(
 
 # === Manual Credit Top-up (Admin/Dev endpoint) ===
 
-@router.post("/credits/adjust", response_model=ManualTopupResponse)
+@admin_router.post("/credits/adjust", response_model=ManualTopupResponse)
 async def adjust_credits(
     request: ManualTopupRequest,
     db: AsyncSession = Depends(get_db_session),
@@ -686,7 +687,7 @@ async def adjust_credits(
 
 # === Balance Reconciliation (Admin endpoint) ===
 
-@router.post("/balance/reconcile", response_model=BalanceResponse)
+@admin_router.post("/balance/reconcile", response_model=BalanceResponse)
 async def reconcile_balance(
     user_id: Optional[int] = Query(default=None, description="Target user ID (defaults to current user)"),
     db: AsyncSession = Depends(get_db_session),
@@ -732,6 +733,7 @@ async def reconcile_balance(
         )
 
 
-# Export router
+# Export routers
 billing_router = router
+billing_admin_router = admin_router
 
