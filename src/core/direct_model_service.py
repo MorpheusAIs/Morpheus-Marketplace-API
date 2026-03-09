@@ -33,9 +33,9 @@ class DirectModelService:
             cache_duration_seconds: Cache TTL in seconds (default: 300 = 5 minutes)
         """
         self.cache_duration = cache_duration_seconds
-        self._model_mapping: Dict[str, str] = {}  # name -> blockchain_id
+        self._model_mapping: Dict[str, str] = {}  # lowercase name -> blockchain_id
         self._id_to_name: Dict[str, str] = {}  # blockchain_id -> name
-        self._model_mapping_type: Dict[str, str] = {}  # name -> type
+        self._model_mapping_type: Dict[str, str] = {}  # lowercase name -> type
         self._blockchain_ids: set = set()
         self._cache_expiry: Optional[datetime] = None
         self._last_etag: Optional[str] = None
@@ -102,8 +102,7 @@ class DirectModelService:
         if model_identifier in self._blockchain_ids:
             return model_identifier
         
-        # Check if it's a model name
-        return self._model_mapping.get(model_identifier)
+        return self._model_mapping.get(model_identifier.lower())
     
     async def get_model_name_from_id(self, blockchain_id: str) -> Optional[str]:
         """
@@ -214,9 +213,9 @@ class DirectModelService:
             model_type = model.get("ModelType")
             
             if model_name and blockchain_id:
-                new_mapping[model_name] = blockchain_id
+                new_mapping[model_name.lower()] = blockchain_id
                 new_id_to_name[blockchain_id] = model_name
-                new_mapping_type[model_name] = model_type
+                new_mapping_type[model_name.lower()] = model_type
                 new_blockchain_ids.add(blockchain_id)
         
         self._model_mapping = new_mapping

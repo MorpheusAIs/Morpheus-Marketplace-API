@@ -110,7 +110,7 @@ class ModelRouter:
             if default_model in model_mapping:
                 logger.info("Using configured default model",
                            default_model=default_model,
-                           blockchain_id=model_mapping[default_model],
+                           blockchain_id=model_mapping[default_model.lower()],
                            event_type="default_model_resolved")
                 return model_mapping[default_model]
                 
