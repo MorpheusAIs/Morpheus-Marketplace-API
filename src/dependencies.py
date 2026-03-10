@@ -178,6 +178,7 @@ async def get_current_user(
                     'cognito_user_id': user.cognito_user_id,
                     'created_at': user.created_at.isoformat() if user.created_at else None,
                     'updated_at': user.updated_at.isoformat() if user.updated_at else None,
+                    'rate_limit_multiplier': user.rate_limit_multiplier,
                 }
                 await cache_service.set("user", cognito_user_id, user_cache_data, ttl_seconds=600)
         
@@ -195,6 +196,7 @@ async def get_current_user(
                 'cognito_user_id': user.cognito_user_id,
                 'created_at': user.created_at.isoformat() if user.created_at else None,
                 'updated_at': user.updated_at.isoformat() if user.updated_at else None,
+                'rate_limit_multiplier': user.rate_limit_multiplier,
             }
             await cache_service.set("user", cognito_user_id, user_cache_data, ttl_seconds=600)
         
@@ -285,6 +287,7 @@ async def get_api_key_auth(
                 'cognito_user_id': test_user.cognito_user_id,
                 'created_at': test_user.created_at,
                 'updated_at': test_user.updated_at,
+                'rate_limit_multiplier': test_user.rate_limit_multiplier,
             }
             # Fetch the test user's first active API key (if any)
             result = await db.execute(
@@ -377,6 +380,7 @@ async def _build_auth_from_cache(
         cognito_user_id=ud.get("cognito_user_id"),
         created_at=datetime.fromisoformat(ud["created_at"]) if ud.get("created_at") else None,
         updated_at=datetime.fromisoformat(ud["updated_at"]) if ud.get("updated_at") else None,
+        rate_limit_multiplier=ud.get("rate_limit_multiplier", 1.0),
     )
 
     # ── Deserialize APIKey ──────────────────────────────────────────────
@@ -459,6 +463,7 @@ async def _build_auth_from_db(
             'cognito_user_id': db_user.cognito_user_id,
             'created_at': db_user.created_at,
             'updated_at': db_user.updated_at,
+            'rate_limit_multiplier': db_user.rate_limit_multiplier,
         }
         api_key_dict = {
             'id': db_api_key.id,

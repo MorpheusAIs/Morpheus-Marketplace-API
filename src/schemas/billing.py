@@ -343,3 +343,24 @@ class RefundResponse(BaseModel):
     amount_refunded: DecimalStr
     success: bool
     error: Optional[str] = None
+
+
+# === Rate Limit Multiplier (Admin) ===
+
+class RateLimitMultiplierRequest(BaseModel):
+    """Request for POST /billing/rate-limit/multiplier."""
+    cognito_user_id: str = Field(..., description="Target user's Cognito ID (UUID)")
+    multiplier: float = Field(
+        ...,
+        gt=0,
+        le=100,
+        description="Rate limit multiplier (1.0 = default, 2.0 = double limits, 0.5 = half limits)",
+    )
+
+
+class RateLimitMultiplierResponse(BaseModel):
+    """Response for rate limit multiplier operations."""
+    cognito_user_id: str
+    user_id: int
+    multiplier: float
+    message: str

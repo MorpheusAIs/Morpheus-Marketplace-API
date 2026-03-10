@@ -13,9 +13,10 @@ import asyncio
 import os
 import uuid
 import socket
+import copy
 import platform
 
-from src.api.v1 import models, chat, auth, chat_history, embeddings, audio, billing, webhooks, wallet
+from src.api.v1 import models, chat, auth, chat_history, embeddings, audio, billing, billing_admin, webhooks, wallet
 from src.api.v1.chat.chat_exceptions import ChatError
 from src.services import session_routing_service
 from src.utils.error_sanitizer import sanitize_error_message
@@ -559,6 +560,7 @@ app.include_router(chat_history, prefix=f"{settings.API_V1_STR}/chat-history")
 app.include_router(embeddings, prefix=f"{settings.API_V1_STR}")
 app.include_router(audio, prefix=f"{settings.API_V1_STR}")
 app.include_router(billing, prefix=f"{settings.API_V1_STR}/billing")
+app.include_router(billing_admin, prefix=f"{settings.API_V1_STR}/billing")
 app.include_router(webhooks, prefix=f"{settings.API_V1_STR}/webhooks")
 app.include_router(wallet, prefix=f"{settings.API_V1_STR}/auth/wallet")
 
@@ -1075,17 +1077,14 @@ async def swagger_ui_oauth2_redirect(request: Request):
 # Note: Custom OAuth2 login endpoint removed - now using standard Swagger UI OAuth2 flow
 
 
-# Simple working docs endpoint (before route class restoration)  
-@app.get("/docs", include_in_schema=False)
-def custom_swagger_ui_html():
-    """
-    Custom Swagger UI docs 
-    """
-    return HTMLResponse(content=f"""
+def _build_swagger_html(*, title: str, openapi_url: str, app_name: str, oauth_state: str) -> str:
+    """Build Swagger UI HTML page with full OAuth2 popup flow."""
+    client_id = settings.COGNITO_CLIENT_ID
+    return f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Morpheus API Gateway - API Documentation</title>
+        <title>{title}</title>
         <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@4/swagger-ui.css">
     </head>
     <body>
@@ -1093,132 +1092,101 @@ def custom_swagger_ui_html():
         <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@4/swagger-ui-bundle.js"></script>
         <script>
             const ui = SwaggerUIBundle({{
-                url: '/api/v1/openapi.json',
+                url: '{openapi_url}',
                 dom_id: '#swagger-ui',
                 layout: 'BaseLayout',
                 oauth2RedirectUrl: window.location.origin + '/docs/oauth2-redirect'
             }});
-            
-            // Make UI available globally for token application
+
             window.ui = ui;
-            
+
             ui.initOAuth({{
-                clientId: '{settings.COGNITO_CLIENT_ID}',
+                clientId: '{client_id}',
                 realm: 'oauth2',
-                appName: 'Morpheus API Gateway',
+                appName: '{app_name}',
                 scopeSeparator: ' ',
                 scopes: 'aws.cognito.signin.user.admin openid email profile',
                 usePkceWithAuthorizationCodeGrant: false,
                 useBasicAuthenticationWithAccessCodeGrant: false,
                 additionalQueryStringParams: {{
                     'response_type': 'code',
-                    'state': 'swagger-ui-oauth2'
+                    'state': '{oauth_state}'
                 }}
             }});
-            
-            // Debug: Log OAuth2 configuration
-            console.log('🔍 OAuth2 redirect configured');
-            
+
             // Override OAuth2 authorization to use popup instead of new tab
             setTimeout(() => {{
-                console.log('🔍 Setting up OAuth2 popup override...');
-                
-                // Override the window.open function specifically for OAuth2 URLs
                 const originalWindowOpen = window.open;
                 window.open = function(url, target, features) {{
                     if (url && url.includes('/oauth2/authorize')) {{
-                        console.log('🔍 OAuth2 authorization detected, opening popup instead of tab');
-                        
-                        // Set up Swagger UI OAuth2 redirect callback for popup detection
                         window.swaggerUIRedirectOauth2 = {{
                             auth: 'OAuth2',
                             redirectUrl: window.location.origin + '/docs/oauth2-redirect',
                             callback: function(data) {{
-                                console.log('✅ OAuth2 popup callback received:', data);
                                 if (data.token && data.token.access_token) {{
-                                    console.log('✅ Applying token from popup callback...');
                                     try {{
                                         window.ui.preauthorizeApiKey('BearerAuth', data.token.access_token);
-                                        console.log('✅ Bearer token applied successfully from popup!');
                                     }} catch (e) {{
-                                        console.log('⚠️ Error applying token from popup:', e);
+                                        console.log('Error applying token from popup:', e);
                                     }}
                                 }}
                             }}
                         }};
-                        
-                        // Open popup with specific features
+
                         const popup = originalWindowOpen.call(
-                            this, 
-                            url, 
+                            this,
+                            url,
                             'oauth2_auth_popup',
-                            'width=600,height=700,scrollbars=yes,resizable=yes,status=yes,location=yes,toolbar=no,menubar=no,left=' + 
+                            'width=600,height=700,scrollbars=yes,resizable=yes,status=yes,location=yes,toolbar=no,menubar=no,left=' +
                             Math.round((screen.width - 600) / 2) + ',top=' + Math.round((screen.height - 700) / 2)
                         );
-                        
-                        // Store popup reference globally for direct access
+
                         window.oauth2Popup = popup;
-                        
-                        // Monitor popup closure and token retrieval
+
                         const checkPopup = setInterval(() => {{
                             try {{
                                 if (popup.closed) {{
                                     clearInterval(checkPopup);
-                                    console.log('🔍 OAuth2 popup closed, checking for tokens...');
-                                    
-                                    // Check for token in localStorage with extended monitoring for new user flows
+
                                     setTimeout(() => {{
                                         const token = localStorage.getItem('swagger_oauth_token');
                                         if (token) {{
-                                            console.log('✅ Token found from popup, applying to Bearer Auth...');
                                             try {{
                                                 window.ui.preauthorizeApiKey('BearerAuth', token);
-                                                console.log('✅ Bearer token applied successfully!');
                                             }} catch (e) {{
-                                                console.log('⚠️ Error applying token:', e);
+                                                console.log('Error applying token:', e);
                                             }}
                                             localStorage.removeItem('swagger_oauth_token');
                                             localStorage.removeItem('swagger_oauth_token_timestamp');
                                         }} else {{
-                                            // Extended monitoring for new user registration flows
-                                            console.log('🔍 No token found immediately - starting extended monitoring for new user flows...');
                                             let extendedChecks = 0;
-                                            const maxExtendedChecks = 10; // Check for 10 more seconds
-                                            
+                                            const maxExtendedChecks = 10;
+
                                             const extendedMonitor = setInterval(() => {{
                                                 extendedChecks++;
                                                 const delayedToken = localStorage.getItem('swagger_oauth_token');
-                                                
+
                                                 if (delayedToken) {{
-                                                    console.log('✅ Token found during extended monitoring!');
                                                     clearInterval(extendedMonitor);
-                                                    
-                                                    // Use the same multi-method approach as page load
+
                                                     try {{
-                                                        console.log('🔍 Attempting to authorize with delayed token...');
-                                                        
                                                         if (window.ui) {{
-                                                            // Method 1: Use preauthorizeApiKey for BearerAuth
                                                             try {{
                                                                 window.ui.preauthorizeApiKey('BearerAuth', delayedToken);
-                                                                console.log('✅ BearerAuth preauthorized from extended monitoring!');
                                                             }} catch (e) {{
-                                                                console.log('⚠️ preauthorizeApiKey failed:', e);
+                                                                console.log('preauthorizeApiKey failed:', e);
                                                             }}
-                                                            
-                                                            // Method 2: Try the direct authActions approach
+
                                                             if (window.ui.authActions) {{
                                                                 try {{
                                                                     window.ui.authActions.authorize({{
                                                                         'BearerAuth': delayedToken
                                                                     }});
-                                                                    console.log('✅ BearerAuth via authActions from extended monitoring!');
                                                                 }} catch (e) {{
-                                                                    console.log('⚠️ authActions.authorize failed:', e);
+                                                                    console.log('authActions.authorize failed:', e);
                                                                 }}
                                                             }}
-                                                            
-                                                            // Method 3: Safari-specific handling
+
                                                             if (navigator.userAgent.includes('Safari') && !navigator.userAgent.includes('Chrome')) {{
                                                                 setTimeout(() => {{
                                                                     try {{
@@ -1227,21 +1195,17 @@ def custom_swagger_ui_html():
                                                                                 value: delayedToken
                                                                             }}
                                                                         }});
-                                                                        console.log('✅ Safari-specific auth from extended monitoring!');
-                                                                    }} catch (e) {{
-                                                                        console.log('⚠️ Safari auth failed:', e);
-                                                                    }}
+                                                                    }} catch (e) {{ }}
                                                                 }}, 500);
                                                             }}
                                                         }}
                                                     }} catch (error) {{
-                                                        console.error('❌ Error applying delayed token:', error);
+                                                        console.error('Error applying delayed token:', error);
                                                     }}
-                                                    
+
                                                     localStorage.removeItem('swagger_oauth_token');
                                                     localStorage.removeItem('swagger_oauth_token_timestamp');
                                                 }} else if (extendedChecks >= maxExtendedChecks) {{
-                                                    console.log('⚠️ Extended monitoring timeout - no token found');
                                                     clearInterval(extendedMonitor);
                                                 }}
                                             }}, 1000);
@@ -1249,52 +1213,38 @@ def custom_swagger_ui_html():
                                     }}, 500);
                                     return;
                                 }}
-                                
-                                // Check for successful token every second
+
                                 const token = localStorage.getItem('swagger_oauth_token');
                                 if (token) {{
-                                    console.log('✅ Token detected! Closing popup and applying token...');
                                     clearInterval(checkPopup);
-                                    
-                                    // Store token for Safari handling before cleanup
+
                                     const tokenForSafari = token;
-                                    
-                                    // Apply token immediately
+
                                     try {{
                                         window.ui.preauthorizeApiKey('BearerAuth', token);
-                                        console.log('✅ Bearer token applied successfully!');
                                     }} catch (e) {{
-                                        console.log('⚠️ Error applying token:', e);
+                                        console.log('Error applying token:', e);
                                     }}
-                                    
-                                    // Close popup explicitly
+
                                     if (!popup.closed) {{
                                         popup.close();
-                                        console.log('✅ Popup closed successfully');
                                     }}
-                                    
-                                    // Clean up
+
                                     localStorage.removeItem('swagger_oauth_token');
                                     localStorage.removeItem('swagger_oauth_token_timestamp');
                                     delete window.oauth2Popup;
-                                    
-                                    // Safari-specific: Force a UI refresh to ensure token visibility
+
                                     if (navigator.userAgent.includes('Safari') && !navigator.userAgent.includes('Chrome')) {{
-                                        console.log('🍎 Safari detected - forcing UI refresh...');
                                         setTimeout(() => {{
                                             try {{
-                                                // Try multiple Safari-friendly approaches
                                                 if (window.ui && window.ui.authActions) {{
                                                     window.ui.authActions.authorize({{
                                                         'BearerAuth': {{
                                                             value: tokenForSafari
                                                         }}
                                                     }});
-                                                    console.log('✅ Safari UI refresh attempted');
                                                 }}
-                                            }} catch (e) {{
-                                                console.log('⚠️ Safari refresh attempt failed:', e);
-                                            }}
+                                            }} catch (e) {{ }}
                                         }}, 500);
                                     }}
                                 }}
@@ -1302,59 +1252,42 @@ def custom_swagger_ui_html():
                                 // Cross-origin error - popup still open, continue monitoring
                             }}
                         }}, 1000);
-                        
+
                         return popup;
                     }}
-                    
-                    // For all other URLs, use original window.open
+
                     return originalWindowOpen.call(this, url, target, features);
                 }};
-                
-                console.log('✅ OAuth2 popup override installed');
-            }}, 2000); // Wait for Swagger UI to fully initialize
-            
+            }}, 2000);
+
             // Check for OAuth token in localStorage (from new tab flow)
             setTimeout(() => {{
-                console.log('🔍 Checking for stored OAuth token...');
                 const storedToken = localStorage.getItem('swagger_oauth_token');
                 const tokenTimestamp = localStorage.getItem('swagger_oauth_token_timestamp');
-                
-                // Check token availability (reduced logging for production)
-                console.log('🔍 Checking OAuth token status...');
-                
+
                 if (storedToken && tokenTimestamp) {{
                     const tokenAge = Date.now() - parseInt(tokenTimestamp);
-                    const maxAge = 5 * 60 * 1000; // 5 minutes
-                    
+                    const maxAge = 5 * 60 * 1000;
+
                     if (tokenAge < maxAge) {{
-                        console.log('✅ Found stored OAuth token, applying automatically...');
-                        
-                        // Apply OAuth2 token to Swagger UI
                         try {{
-                            console.log('🔍 Attempting to authorize with stored token...');
-                            
                             if (window.ui) {{
-                                // Method 1: Use preauthorizeApiKey for BearerAuth (this usually works)
                                 try {{
                                     window.ui.preauthorizeApiKey('BearerAuth', storedToken);
-                                    console.log('✅ BearerAuth preauthorized!');
                                 }} catch (e) {{
-                                    console.log('⚠️ preauthorizeApiKey failed:', e);
+                                    console.log('preauthorizeApiKey failed:', e);
                                 }}
-                                
-                                // Method 2: Try the direct authActions approach
+
                                 if (window.ui.authActions) {{
                                     try {{
                                         window.ui.authActions.authorize({{
                                             'BearerAuth': storedToken
                                         }});
-                                        console.log('✅ BearerAuth via authActions!');
                                     }} catch (e) {{
-                                        console.log('⚠️ authActions.authorize failed:', e);
+                                        console.log('authActions.authorize failed:', e);
                                     }}
                                 }}
-                                
-                                // Method 3: Try to set OAuth2 authorization
+
                                 if (window.ui.authActions) {{
                                     try {{
                                         window.ui.authActions.authorize({{
@@ -1365,53 +1298,61 @@ def custom_swagger_ui_html():
                                                 }}
                                             }}
                                         }});
-                                        console.log('✅ OAuth2 via authActions!');
                                     }} catch (e) {{
-                                        console.log('⚠️ OAuth2 authActions failed:', e);
+                                        console.log('OAuth2 authActions failed:', e);
                                     }}
                                 }}
-                                
-                                // Method 4: Direct state manipulation (last resort)
+
                                 setTimeout(() => {{
                                     try {{
-                                        const state = window.ui.getState();
-                                        console.log('🔍 Current auth state:', state.getIn(['auth', 'authorized']));
-                                        
-                                        // Force update the auth state
                                         window.ui.authActions.authorizeWithPersistOption({{
                                             'BearerAuth': {{
                                                 value: storedToken
                                             }}
                                         }});
-                                        console.log('✅ State manipulation attempted!');
                                     }} catch (e) {{
-                                        console.log('⚠️ State manipulation failed:', e);
+                                        console.log('State manipulation failed:', e);
                                     }}
                                 }}, 1000);
-                                
-                            }} else {{
-                                console.error('❌ Swagger UI not available');
-                                alert('Authentication successful! Token: ' + storedToken.substring(0, 50) + '... Please manually paste in Bearer Auth field.');
                             }}
                         }} catch (error) {{
-                            console.error('❌ Error applying token:', error);
-                            alert('Authentication successful! Token: ' + storedToken.substring(0, 50) + '... Please manually paste in Bearer Auth field.');
+                            console.error('Error applying token:', error);
                         }}
-                        
-                        // Clean up localStorage
+
                         localStorage.removeItem('swagger_oauth_token');
                         localStorage.removeItem('swagger_oauth_token_timestamp');
                     }} else {{
-                        console.log('⚠️ Stored token expired, removing...');
                         localStorage.removeItem('swagger_oauth_token');
                         localStorage.removeItem('swagger_oauth_token_timestamp');
                     }}
                 }}
-            }}, 1000); // Wait for Swagger UI to fully initialize
+            }}, 1000);
         </script>
     </body>
     </html>
-    """)
+    """
+
+
+# Simple working docs endpoint (before route class restoration)
+@app.get("/docs", include_in_schema=False)
+def custom_swagger_ui_html():
+    """Custom Swagger UI docs"""
+    return HTMLResponse(content=_build_swagger_html(
+        title="Morpheus API Gateway - API Documentation",
+        openapi_url="/api/v1/openapi.json",
+        app_name="Morpheus API Gateway",
+        oauth_state="swagger-ui-oauth2",
+    ))
+
+@app.get("/admin/docs", include_in_schema=False)
+def admin_swagger_ui_html():
+    """Swagger UI for admin-only endpoints (requires X-Admin-Secret header)."""
+    return HTMLResponse(content=_build_swagger_html(
+        title="Morpheus API Gateway - Admin Documentation",
+        openapi_url="/admin/api/v1/openapi.json",
+        app_name="Morpheus API Gateway - Admin",
+        oauth_state="swagger-ui-admin-oauth2",
+    ))
 
 @app.get("/exchange-token", include_in_schema=False)
 async def exchange_oauth_token(request: Request, code: str, state: str = None):
@@ -1486,9 +1427,15 @@ async def check_db_connection(engine: AsyncEngine):
         return result.scalar() == 1
 
 # Custom OpenAPI schema generator
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
+_full_openapi_cache = None
+_admin_openapi_cache = None
+ADMIN_TAGS = {"Billing Admin"}
+
+def _build_full_openapi():
+    """Build the complete OpenAPI schema with all routes (cached)."""
+    global _full_openapi_cache
+    if _full_openapi_cache is not None:
+        return _full_openapi_cache
 
     openapi_schema = get_openapi(
         title=app.title,
@@ -1573,19 +1520,116 @@ def custom_openapi():
                         {"APIKeyAuth": []}
                     ]
 
-    app.openapi_schema = openapi_schema
+    _full_openapi_cache = openapi_schema
+    return _full_openapi_cache
+
+
+def custom_openapi():
+    """Public OpenAPI schema — admin-tagged routes excluded."""
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    schema = copy.deepcopy(_build_full_openapi())
+
+    paths_to_remove = []
+    for path_key, path_item in schema.get("paths", {}).items():
+        for method, operation in path_item.items():
+            if method in ("get", "post", "put", "delete", "patch"):
+                if set(operation.get("tags", [])) & ADMIN_TAGS:
+                    paths_to_remove.append(path_key)
+                    break
+    for path_key in paths_to_remove:
+        del schema["paths"][path_key]
+
+    app.openapi_schema = schema
     return app.openapi_schema
 
 # Set custom OpenAPI schema generator
 app.openapi = custom_openapi
 
-# Create custom OpenAPI endpoint to ensure our OAuth2 schema is used
 @app.get(f"{settings.API_V1_STR}/openapi.json", include_in_schema=False)
 async def get_custom_openapi():
-    """
-    Custom OpenAPI endpoint that ensures our OAuth2 security scheme is included
-    """
-    return custom_openapi() 
+    """Custom OpenAPI endpoint that ensures our OAuth2 security scheme is included."""
+    return custom_openapi()
+
+
+def admin_openapi():
+    """Admin-only OpenAPI schema — only admin-tagged routes (cached)."""
+    global _admin_openapi_cache
+    if _admin_openapi_cache is not None:
+        return _admin_openapi_cache
+
+    schema = copy.deepcopy(_build_full_openapi())
+
+    schema["info"]["title"] = f"{schema['info']['title']} - Admin"
+    schema["info"]["description"] = "Admin-only endpoints requiring X-Admin-Secret header."
+
+    # Keep only admin-tagged paths
+    filtered_paths = {}
+    for path_key, path_item in schema.get("paths", {}).items():
+        for method, operation in list(path_item.items()):
+            if method not in ("get", "post", "put", "delete", "patch"):
+                continue
+            if set(operation.get("tags", [])) & ADMIN_TAGS:
+                filtered_paths[path_key] = path_item
+                break
+
+    schema["paths"] = filtered_paths
+
+    # Admin endpoints require user identity (OAuth2 or Bearer) + X-Admin-Secret
+    schema["components"]["securitySchemes"] = {
+        "OAuth2": {
+            "type": "oauth2",
+            "flows": {
+                "authorizationCode": {
+                    "authorizationUrl": f"https://{settings.COGNITO_DOMAIN}/oauth2/authorize",
+                    "tokenUrl": f"https://{settings.COGNITO_DOMAIN}/oauth2/token",
+                    "scopes": {
+                        "openid": "OpenID Connect authentication",
+                        "email": "Access to email address",
+                        "profile": "Access to profile information",
+                    },
+                },
+            },
+            "description": "OAuth2 authentication via secure identity provider",
+        },
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+            "description": "JWT Bearer token (user identity required for admin endpoints)",
+        },
+        "AdminSecret": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-Admin-Secret",
+            "description": "Admin secret for protected billing endpoints",
+        },
+    }
+
+    for path_item in schema["paths"].values():
+        for method, operation in path_item.items():
+            if method in ("get", "post", "put", "delete", "patch"):
+                # Either OAuth2 or Bearer can satisfy user identity, both require AdminSecret
+                operation["security"] = [
+                    {"OAuth2": ["openid", "email", "profile"], "AdminSecret": []},
+                    {"BearerAuth": [], "AdminSecret": []},
+                ]
+                # Remove the x_admin_secret parameter auto-generated by FastAPI
+                # from the Header() dependency — it's already covered by the
+                # AdminSecret security scheme above.
+                if "parameters" in operation:
+                    operation["parameters"] = [
+                        p for p in operation["parameters"]
+                        if p.get("name", "").lower() != "x-admin-secret"
+                    ]
+
+    _admin_openapi_cache = schema
+    return _admin_openapi_cache
+
+@app.get("/admin/api/v1/openapi.json", include_in_schema=False)
+async def get_admin_openapi():
+    return admin_openapi()
 
 # API Documentation landing page
 @app.get("/api-docs", include_in_schema=False)
@@ -1617,6 +1661,7 @@ async def api_docs_landing(request: Request):
             
             <a href="/docs" class="api-link">📋 Interactive API Docs (Swagger UI)</a>
             <a href="/redoc" class="api-link">📖 API Documentation (ReDoc)</a>
+            <a href="/admin/docs" class="api-link" style="background: #dc3545;">🔒 Admin API Docs</a>
             
             <div class="description">
                 <h3>🔐 Authentication Methods</h3>
