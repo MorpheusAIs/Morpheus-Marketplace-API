@@ -14,6 +14,7 @@ from src.core.config import settings
 from src.core.logging_config import get_core_logger
 
 from .types import (
+    RateLimitConfig,
     RateLimitResult,
     RateLimitStatus,
     RateLimitHeaders,
@@ -85,6 +86,7 @@ class RateLimitService:
         model: Optional[str] = None,
         estimated_tokens: int = 0,
         request_id: Optional[str] = None,
+        multiplier: float = 1.0,
     ) -> RateLimitResult:
         """
         Check if a request is within rate limits and increment RPM only.
@@ -98,6 +100,7 @@ class RateLimitService:
             model: The model being requested
             estimated_tokens: Estimated input tokens for TPM check (not incremented)
             request_id: Unique identifier for this request
+            multiplier: Per-user scaling factor for RPM/TPM limits (default 1.0)
             
         Returns:
             RateLimitResult with the check result
@@ -112,7 +115,17 @@ class RateLimitService:
             await self.initialize()
         
         # Get rate limit config for this model
-        config, model_group = self._rules.get_config_for_model(model)
+        base_config, model_group = self._rules.get_config_for_model(model)
+        
+        # Apply per-user multiplier to scale limits
+        if multiplier != 1.0:
+            config = RateLimitConfig(
+                rpm=max(1, int(base_config.rpm * multiplier)),
+                tpm=max(1, int(base_config.tpm * multiplier)) if base_config.tpm > 0 else 0,
+                window_seconds=base_config.window_seconds,
+            )
+        else:
+            config = base_config
         
         # Calculate window boundary and reset time
         # Window is aligned to fixed intervals (e.g., each minute boundary)
@@ -147,6 +160,7 @@ class RateLimitService:
                     rpm_limit=rpm_limit,
                     retry_after=retry_after,
                     reset_at=reset_at,
+                    multiplier=multiplier,
                     event_type="rate_limit_exceeded_rpm",
                 )
                 
@@ -181,6 +195,7 @@ class RateLimitService:
                         estimated_tokens=estimated_tokens,
                         retry_after=retry_after,
                         reset_at=reset_at,
+                        multiplier=multiplier,
                         event_type="rate_limit_exceeded_tpm",
                     )
                     

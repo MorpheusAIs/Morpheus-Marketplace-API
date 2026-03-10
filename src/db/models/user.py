@@ -4,7 +4,7 @@ User model for authentication and account management.
 PII (email, name) lives exclusively in Cognito.  The database only stores
 cognito_user_id as the identity key and application-level fields.
 """
-from sqlalchemy import Column, Integer, String, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -20,6 +20,7 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     age_verified = Column(Boolean, default=False, nullable=False)
     age_verified_at = Column(DateTime, nullable=True)
+    rate_limit_multiplier = Column(Float, nullable=False, default=1.0, server_default="1.0")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
