@@ -76,6 +76,7 @@ async def create_embeddings(
             db_api_key=db_api_key,
             requested_model=requested_model,
             request_data=request_data,
+            user=user,
         )
         
         # Create billing hold
@@ -259,6 +260,7 @@ async def _check_rate_limits(
     db_api_key: APIKey,
     requested_model: Optional[str],
     request_data: EmbeddingRequest,
+    user=None,
 ) -> RateLimitResult:
     """
     Check rate limits (RPM and TPM) before processing the request.
@@ -296,6 +298,7 @@ async def _check_rate_limits(
         model=requested_model,
         estimated_tokens=estimated_tokens,
         request_id=request_id,
+        multiplier=getattr(user, "rate_limit_multiplier", 1.0) or 1.0,
     )
     
     if not result.allowed:

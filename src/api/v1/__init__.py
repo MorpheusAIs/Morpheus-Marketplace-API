@@ -8,7 +8,7 @@ from .chat_history.index import router as chat_history_router
 from .embeddings.index import router as embeddings_router
 from .audio.index import router as audio_router
 from .billing.index import router as billing_router
-from .billing.index import admin_router as billing_admin_router
+from .billing.admin import admin_router as billing_admin_router
 from .webhooks.stripe import stripe_webhook_router
 from .webhooks.coinbase import coinbase_webhook_router
 from .wallet.index import router as wallet_router

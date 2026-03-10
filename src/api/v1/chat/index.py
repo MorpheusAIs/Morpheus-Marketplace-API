@@ -273,6 +273,7 @@ async def _check_rate_limits(
         model=model,
         estimated_tokens=estimated_tokens,
         request_id=request_id,
+        multiplier=getattr(user, "rate_limit_multiplier", 1.0) or 1.0,
     )
     
     if not result.allowed and result.status != RateLimitStatus.ERROR:
