@@ -8,7 +8,6 @@
 ## 1. Coinbase Dashboard / Account Setup
 
 - [ ] **Create Coinbase Business account** (or convert existing Commerce account)
-  - Currently available in **US and Singapore only**
   - [Getting Started](https://docs.cdp.coinbase.com/coinbase-business/introduction/get-started)
 - [ ] **Complete KYB (Know Your Business) verification** if not already done
 - [ ] **Generate CDP API Key** in the [CDP Portal](https://portal.cdp.coinbase.com/access/api)
