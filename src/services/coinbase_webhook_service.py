@@ -1,12 +1,12 @@
 """
-Coinbase webhook service for processing payment events.
+Coinbase Business webhook service for processing Payment Link payment events.
 
-Supports both:
-- NEW: Payment Link API events (payment_link.payment.success/failed/expired)
-- LEGACY: Commerce Charge API events (charge:confirmed, etc.)
+Handles Payment Link API events:
+- payment_link.payment.success: Credits the user's account
+- payment_link.payment.failed: Logged for monitoring
+- payment_link.payment.expired: Logged for monitoring
 
 Docs: https://docs.cdp.coinbase.com/coinbase-business/payment-link-apis/webhooks
-Migration: https://docs.cdp.coinbase.com/coinbase-business/payment-link-apis/migrate/overview
 """
 from typing import Optional, Tuple, Dict, Any
 from decimal import Decimal
@@ -24,7 +24,7 @@ logger = get_core_logger()
 
 class CoinbaseWebhookService:
     """
-    Service for processing Coinbase webhook events.
+    Service for processing Coinbase Business Payment Link webhook events.
 
     All methods are idempotent - processing the same event multiple times
     will not result in duplicate credits or ledger entries.
@@ -32,17 +32,10 @@ class CoinbaseWebhookService:
 
     SOURCE_NAME = "coinbase"
 
-    # ── Payment Link API Event Types (New) ───────────────────────────────
+    # ── Payment Link API Event Types ─────────────────────────────────────
     EVENT_TYPE_PL_PAYMENT_SUCCESS = "payment_link.payment.success"
     EVENT_TYPE_PL_PAYMENT_FAILED = "payment_link.payment.failed"
     EVENT_TYPE_PL_PAYMENT_EXPIRED = "payment_link.payment.expired"
-
-    # ── Legacy Commerce Charge API Event Types (Deprecated) ──────────────
-    EVENT_TYPE_CHARGE_CONFIRMED = "charge:confirmed"
-    EVENT_TYPE_CHARGE_FAILED = "charge:failed"
-    EVENT_TYPE_CHARGE_DELAYED = "charge:delayed"
-    EVENT_TYPE_CHARGE_PENDING = "charge:pending"
-    EVENT_TYPE_CHARGE_RESOLVED = "charge:resolved"
 
     # Currencies treated as USD-equivalent for crediting purposes
     # USDC is a stablecoin pegged 1:1 to USD
@@ -196,7 +189,7 @@ class CoinbaseWebhookService:
         return entry
 
     # =====================================================================
-    #  Payment Link API Event Handlers (New)
+    #  Payment Link API Event Handlers
     # =====================================================================
 
     @staticmethod
@@ -414,138 +407,6 @@ class CoinbaseWebhookService:
         )
 
         return True, "Expired payment logged"
-
-    # =====================================================================
-    #  Legacy Commerce Charge API Handlers (Deprecated)
-    # =====================================================================
-
-    @staticmethod
-    def _validate_legacy_charge_amount(
-        pricing: Dict[str, Any],
-        log_context: Dict[str, Any],
-    ) -> Tuple[Optional[Decimal], Optional[str]]:
-        """
-        Validate and extract USD amount from legacy charge pricing data.
-
-        DEPRECATED: Will be removed after migration.
-        """
-        local_pricing = pricing.get("local") or {}
-        currency = local_pricing.get("currency")
-        amount_str = local_pricing.get("amount")
-
-        if not currency:
-            logger.error(
-                "Missing currency information in legacy Coinbase charge",
-                **log_context,
-            )
-            return None, "Missing currency information"
-
-        if currency != "USD":
-            logger.error(
-                f"Unsupported currency: {currency} (only USD accepted)",
-                currency=currency,
-                **log_context,
-            )
-            return None, f"Unsupported currency: {currency}"
-
-        if not amount_str:
-            return None, "Missing amount information"
-
-        try:
-            amount_usd = Decimal(amount_str)
-        except Exception as e:
-            logger.error(
-                "Invalid amount format",
-                amount_str=amount_str,
-                error=str(e),
-                **log_context,
-            )
-            return None, "Invalid amount format"
-
-        if amount_usd <= 0:
-            logger.warning(
-                "Invalid payment amount (zero or negative)",
-                amount_usd=str(amount_usd),
-                **log_context,
-            )
-            return None, "Invalid payment amount"
-
-        return amount_usd, None
-
-    async def handle_charge_confirmed(
-        self,
-        db: AsyncSession,
-        event_data: Dict[str, Any],
-        event_id: str,
-        event_type: str,
-    ) -> Tuple[bool, str]:
-        """
-        Handle a legacy charge:confirmed event (payment received).
-
-        DEPRECATED: Will be removed after migration to Payment Link API.
-        """
-        charge_code = event_data.get("code")
-        charge_id = event_data.get("id")
-        transaction_id = charge_code
-
-        log_context = {
-            "coinbase_charge_code": charge_code,
-            "coinbase_charge_id": charge_id,
-        }
-
-        # Check for duplicate
-        existing = await self._check_idempotency(
-            db, event_id, event_type, transaction_id, log_context
-        )
-        if existing:
-            return True, "Already processed"
-
-        # Get user from metadata
-        metadata = event_data.get("metadata") or {}
-        user, error = await self._get_user_from_metadata(
-            db, metadata, log_context=log_context
-        )
-        if error:
-            return False, error
-
-        # Validate amount
-        pricing = event_data.get("pricing") or {}
-        amount_usd, error = self._validate_legacy_charge_amount(pricing, log_context)
-        if error:
-            return False, error
-
-        # Build payment metadata
-        payment_metadata = {
-            "charge_id": charge_id,
-            "charge_code": charge_code,
-            "hosted_url": event_data.get("hosted_url"),
-            "created_at": event_data.get("created_at"),
-            "payments": event_data.get("payments", []),
-            "type": "charge",
-        }
-
-        # Create entry and update balance
-        entry = await self._create_purchase_entry(
-            db=db,
-            user_id=user.id,
-            amount_usd=amount_usd,
-            event_id=event_id,
-            event_type=event_type,
-            transaction_id=transaction_id,
-            payment_metadata=payment_metadata,
-            description="Coinbase payment - Charge Confirmed (Legacy)",
-        )
-
-        logger.info(
-            "Processed legacy Coinbase charge:confirmed",
-            event_type=self.EVENT_TYPE_CHARGE_CONFIRMED,
-            user_id=user.id,
-            amount_usd=str(amount_usd),
-            ledger_entry_id=str(entry.id),
-            **log_context,
-        )
-
-        return True, "Credits added successfully"
 
 
 # Singleton instance
