@@ -493,14 +493,12 @@ class CoinbaseWebhookService:
             "coinbase_charge_id": charge_id,
         }
 
-        # Check for duplicate
         existing = await self._check_idempotency(
             db, event_id, event_type, transaction_id, log_context
         )
         if existing:
             return True, "Already processed"
 
-        # Get user from metadata
         metadata = event_data.get("metadata") or {}
         user, error = await self._get_user_from_metadata(
             db, metadata, log_context=log_context
@@ -508,13 +506,11 @@ class CoinbaseWebhookService:
         if error:
             return False, error
 
-        # Validate amount
         pricing = event_data.get("pricing") or {}
         amount_usd, error = self._validate_legacy_charge_amount(pricing, log_context)
         if error:
             return False, error
 
-        # Build payment metadata
         payment_metadata = {
             "charge_id": charge_id,
             "charge_code": charge_code,
@@ -524,7 +520,6 @@ class CoinbaseWebhookService:
             "type": "charge",
         }
 
-        # Create entry and update balance
         entry = await self._create_purchase_entry(
             db=db,
             user_id=user.id,
