@@ -9,6 +9,7 @@ from .embeddings.index import router as embeddings_router
 from .audio.index import router as audio_router
 from .billing.index import router as billing_router
 from .billing.admin import admin_router as billing_admin_router
+from .billing.coinbase import coinbase_billing_router
 from .webhooks.stripe import stripe_webhook_router
 from .webhooks.coinbase import coinbase_webhook_router
 from .wallet.index import router as wallet_router
@@ -37,6 +38,7 @@ chat_history.include_router(chat_history_router)
 # Billing router
 billing = APIRouter()
 billing.include_router(billing_router)
+billing.include_router(coinbase_billing_router)
 
 # Billing admin router (separate Swagger page at /admin/docs)
 billing_admin = APIRouter()

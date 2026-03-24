@@ -296,7 +296,6 @@ async def _handle_payment_link_webhook(
                 coinbase_payment_link_id=payment_link_id,
                 error=message,
             )
-            # Don't raise 500 for failed payments - just log
 
     elif event_type == coinbase_webhook_service.EVENT_TYPE_PL_PAYMENT_EXPIRED:
         success, message = await coinbase_webhook_service.handle_payment_expired(
@@ -309,7 +308,6 @@ async def _handle_payment_link_webhook(
                 coinbase_payment_link_id=payment_link_id,
                 error=message,
             )
-            # Don't raise 500 for expired payments - just log
 
     else:
         logger.info(

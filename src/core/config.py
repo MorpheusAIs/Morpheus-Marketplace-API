@@ -226,10 +226,21 @@ class Settings(BaseSettings):
     # Required for processing legacy Coinbase Commerce charge webhooks
     COINBASE_COMMERCE_WEBHOOK_SECRET: str | None = Field(default=os.getenv("COINBASE_COMMERCE_WEBHOOK_SECRET"))
     
-    # Coinbase Payment Link Settings (New)
+    # Coinbase Business / CDP Settings
+    # Payment Link webhook signature verification secret
     # Secret from metadata.secret returned when creating a webhook subscription
     # See: https://docs.cdp.coinbase.com/coinbase-business/payment-link-apis/webhooks
     COINBASE_PAYMENT_LINK_WEBHOOK_SECRET: str | None = Field(default=os.getenv("COINBASE_PAYMENT_LINK_WEBHOOK_SECRET"))
+
+    # CDP API Key credentials for Payment Link CRUD operations
+    # Key ID: UUID from the CDP portal (Secret API Key tab)
+    # Key Secret: base64-encoded secret from the CDP portal
+    # See: https://docs.cdp.coinbase.com/api-reference/v2/authentication
+    CDP_API_KEY_ID: str | None = Field(default=os.getenv("CDP_API_KEY_ID"))
+    CDP_API_KEY_SECRET: str | None = Field(default=os.getenv("CDP_API_KEY_SECRET"))
+    # Set to true to use the Coinbase sandbox environment (no real transactions)
+    # See: https://docs.cdp.coinbase.com/coinbase-business/payment-link-apis/sandbox
+    CDP_SANDBOX: bool = Field(default=os.getenv("CDP_SANDBOX", "false").lower() == "true")
     
     # Web3 Provider Settings (optional - enables EIP-1271 smart contract wallet verification)
     # If not set, only EOA wallets will be supported
