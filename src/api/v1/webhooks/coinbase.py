@@ -1,13 +1,14 @@
 """
-Coinbase Business webhook endpoint for receiving Payment Link payment events.
+Coinbase webhook endpoint for receiving payment events.
 
-Supports Payment Link API webhooks:
-- payment_link.payment.success: Payment completed
-- payment_link.payment.failed: Payment failed
-- payment_link.payment.expired: Payment link expired
+Supports both:
+- NEW: Payment Link API webhooks (payment_link.payment.success/failed/expired)
+       Signature: X-Hook0-Signature header (t=timestamp,h=headers,v1=hmac)
+       Docs: https://docs.cdp.coinbase.com/coinbase-business/payment-link-apis/webhooks
 
-Signature: X-Hook0-Signature header (t=timestamp,h=headers,v1=hmac)
-Docs: https://docs.cdp.coinbase.com/coinbase-business/payment-link-apis/webhooks
+- LEGACY: Commerce Charge API webhooks (charge:confirmed, etc.)
+          Signature: X-CC-Webhook-Signature header (HMAC-SHA256 of body)
+          Will be removed after migration is complete.
 """
 import hmac
 import hashlib
@@ -30,6 +31,21 @@ MAX_WEBHOOK_AGE_MINUTES = 5
 
 
 # === Signature Verification ===
+
+
+def _detect_webhook_format(request: Request) -> str:
+    """
+    Detect whether the incoming webhook uses the new Payment Link format
+    or legacy Commerce Charge format based on the signature header.
+
+    Returns:
+        "payment_link" or "legacy_commerce"
+    """
+    if request.headers.get("x-hook0-signature"):
+        return "payment_link"
+    if request.headers.get("x-cc-webhook-signature"):
+        return "legacy_commerce"
+    return "unknown"
 
 
 async def verify_payment_link_signature(
@@ -150,7 +166,67 @@ async def verify_payment_link_signature(
         )
 
 
-# === Payment Link API Webhook Handler ===
+async def verify_legacy_commerce_signature(
+    request: Request, body_bytes: bytes
+) -> None:
+    """
+    Verify the legacy Commerce Charge API webhook signature (X-CC-Webhook-Signature).
+
+    DEPRECATED: This will be removed after migration to Payment Link API is complete.
+
+    Raises:
+        HTTPException: If verification fails
+    """
+    if not settings.COINBASE_COMMERCE_WEBHOOK_SECRET:
+        logger.error(
+            "Legacy Commerce webhook received but COINBASE_COMMERCE_WEBHOOK_SECRET not configured",
+            event_type="coinbase_legacy_webhook_not_configured",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Coinbase Commerce webhook not configured",
+        )
+
+    sig_header = request.headers.get("x-cc-webhook-signature")
+    if not sig_header:
+        logger.warning(
+            "Legacy Commerce webhook missing signature header",
+            event_type="coinbase_legacy_webhook_missing_signature",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing X-CC-Webhook-Signature header",
+        )
+
+    try:
+        signature = hmac.new(
+            settings.COINBASE_COMMERCE_WEBHOOK_SECRET.encode("utf-8"),
+            body_bytes,
+            digestmod=hashlib.sha256,
+        ).hexdigest()
+    except Exception as e:
+        logger.error(
+            "Error computing legacy Commerce signature",
+            error=str(e),
+            event_type="coinbase_legacy_webhook_verification_error",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Signature verification error",
+        )
+
+    if not hmac.compare_digest(signature, sig_header):
+        logger.warning(
+            "Legacy Commerce webhook signature verification failed",
+            event_type="coinbase_legacy_webhook_invalid_signature",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid signature",
+        )
+
+
+# === Payment Link API Webhook Handler (New) ===
 
 
 async def _handle_payment_link_webhook(
@@ -243,6 +319,82 @@ async def _handle_payment_link_webhook(
     return {"received": True}
 
 
+# === Legacy Commerce Webhook Handler ===
+
+
+async def _handle_legacy_commerce_webhook(
+    payload: dict,
+    db: AsyncSession,
+) -> dict:
+    """
+    Handle a legacy Commerce Charge API webhook event.
+
+    DEPRECATED: Will be removed after migration to Payment Link API is complete.
+
+    Legacy payloads wrap events:
+        { "id": "delivery-id", "event": { "id": "...", "type": "charge:confirmed", "data": {...} } }
+    """
+    event = payload.get("event")
+    if not event or not isinstance(event, dict):
+        logger.warning(
+            "Invalid legacy Commerce webhook payload (missing 'event' key)",
+            payload_keys=list(payload.keys()) if isinstance(payload, dict) else None,
+            event_type="coinbase_legacy_webhook_invalid_format",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid event format: missing 'event' key",
+        )
+
+    event_id = event.get("id")
+    event_type = event.get("type")
+
+    if not event_id or not event_type:
+        logger.warning(
+            "Invalid legacy Commerce event format (missing id or type)",
+            event_keys=list(event.keys()),
+            event_type="coinbase_legacy_webhook_invalid_format",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid event format: missing id or type",
+        )
+
+    logger.info(
+        "Received legacy Commerce webhook event (consider migrating to Payment Link API)",
+        coinbase_event_id=event_id,
+        coinbase_event_type=event_type,
+    )
+
+    event_data = event.get("data", {})
+
+    if event_type == coinbase_webhook_service.EVENT_TYPE_CHARGE_CONFIRMED:
+        success, message = await coinbase_webhook_service.handle_charge_confirmed(
+            db=db,
+            event_data=event_data,
+            event_id=event_id,
+            event_type=event_type,
+        )
+        if not success:
+            logger.error(
+                "Failed to process charge:confirmed",
+                coinbase_event_id=event_id,
+                error=message,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to process event: {message}",
+            )
+    else:
+        logger.info(
+            "Received unhandled legacy Commerce event type",
+            coinbase_event_id=event_id,
+            coinbase_event_type=event_type,
+        )
+
+    return {"received": True}
+
+
 # === Main Endpoint ===
 
 
@@ -252,14 +404,20 @@ async def handle_coinbase_webhook(
     db: AsyncSession = Depends(get_db_session),
 ):
     """
-    Handle incoming Coinbase Business Payment Link webhook events.
+    Handle incoming Coinbase webhook events.
 
-    Verifies the X-Hook0-Signature header and routes to the appropriate handler.
+    Supports both Payment Link API (new) and legacy Commerce Charge API formats.
+    Auto-detects the format based on the signature header:
+    - X-Hook0-Signature  → Payment Link API (payment_link.payment.*)
+    - X-CC-Webhook-Signature → Legacy Commerce (charge:*)
 
     Payment Link event types:
     - payment_link.payment.success: Payment completed successfully
     - payment_link.payment.failed: Payment failed
     - payment_link.payment.expired: Payment link expired
+
+    Legacy event types (deprecated):
+    - charge:confirmed: Payment confirmed
     """
     # Read body once for verification and parsing
     try:
@@ -275,8 +433,22 @@ async def handle_coinbase_webhook(
             detail="Invalid request body",
         )
 
-    # Verify Payment Link signature
-    await verify_payment_link_signature(request, body_bytes)
+    # Detect webhook format and verify signature
+    webhook_format = _detect_webhook_format(request)
+
+    if webhook_format == "payment_link":
+        await verify_payment_link_signature(request, body_bytes)
+    elif webhook_format == "legacy_commerce":
+        await verify_legacy_commerce_signature(request, body_bytes)
+    else:
+        logger.warning(
+            "Coinbase webhook missing both X-Hook0-Signature and X-CC-Webhook-Signature headers",
+            event_type="coinbase_webhook_no_signature",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing webhook signature header",
+        )
 
     # Parse JSON body
     try:
@@ -292,15 +464,19 @@ async def handle_coinbase_webhook(
             detail="Invalid JSON body",
         )
 
-    # Handle event
+    # Route to the appropriate handler
     try:
-        return await _handle_payment_link_webhook(payload, db)
+        if webhook_format == "payment_link":
+            return await _handle_payment_link_webhook(payload, db)
+        else:
+            return await _handle_legacy_commerce_webhook(payload, db)
 
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(
             "Error processing Coinbase webhook event",
+            webhook_format=webhook_format,
             error=str(e),
         )
         raise HTTPException(

@@ -1,35 +1,36 @@
 """
 CDP (Coinbase Developer Platform) API Key authentication.
 
-Generates ES256-signed JWTs for authenticating with the Coinbase Business API.
-Each request requires a unique JWT with the target URI embedded in the payload.
+Uses the CDP SDK to generate signed JWTs for authenticating with the
+Coinbase Business API. Each request requires a unique JWT with the
+target URI embedded in the payload.
 
-Docs: https://docs.cdp.coinbase.com/coinbase-business/authentication-authorization/api-key-authentication
+Docs: https://docs.cdp.coinbase.com/api-reference/v2/authentication
+Sandbox: https://docs.cdp.coinbase.com/coinbase-business/payment-link-apis/sandbox
 """
-import time
-import secrets
-
-from jose import jwt
+from cdp.auth.utils.jwt import generate_jwt, JwtOptions
 
 from src.core.config import settings
 from src.core.logging_config import get_core_logger
 
 logger = get_core_logger()
 
-# JWT lifetime in seconds (Coinbase enforces max 2 minutes)
-CDP_JWT_LIFETIME_SECONDS = 120
+CDP_API_HOST = "business.coinbase.com"
+CDP_API_BASE_URL = f"https://{CDP_API_HOST}"
 
-# Coinbase Business API base URL
-CDP_API_BASE_URL = "https://api.coinbase.com"
+# Sandbox adds /sandbox before the API path; production uses no prefix.
+CDP_PATH_PREFIX = "/sandbox" if settings.CDP_SANDBOX else ""
 
 
 def _build_jwt(method: str, path: str) -> str:
     """
-    Build a signed JWT for a CDP API request.
+    Build a signed JWT for a CDP API request using the CDP SDK.
+
+    The path should already include the sandbox prefix when applicable.
 
     Args:
         method: HTTP method (GET, POST, etc.)
-        path: API path (e.g., /api/v1/payment-links)
+        path: Full API path (e.g., /sandbox/api/v1/payment-links or /api/v1/payment-links)
 
     Returns:
         Signed JWT string
@@ -37,35 +38,20 @@ def _build_jwt(method: str, path: str) -> str:
     Raises:
         ValueError: If CDP API key credentials are not configured
     """
-    if not settings.CDP_API_KEY_NAME or not settings.CDP_API_KEY_PRIVATE_KEY:
+    if not settings.CDP_API_KEY_ID or not settings.CDP_API_KEY_SECRET:
         raise ValueError(
             "CDP API credentials not configured. "
-            "Set CDP_API_KEY_NAME and CDP_API_KEY_PRIVATE_KEY environment variables."
+            "Set CDP_API_KEY_ID and CDP_API_KEY_SECRET environment variables."
         )
 
-    now = int(time.time())
-    uri = f"{method.upper()} api.coinbase.com{path}"
-
-    payload = {
-        "sub": settings.CDP_API_KEY_NAME,
-        "iss": "cdp",
-        "nbf": now,
-        "exp": now + CDP_JWT_LIFETIME_SECONDS,
-        "uri": uri,
-    }
-
-    headers = {
-        "alg": "ES256",
-        "typ": "JWT",
-        "kid": settings.CDP_API_KEY_NAME,
-        "nonce": secrets.token_hex(16),
-    }
-
-    # CDP_API_KEY_PRIVATE_KEY is an EC PEM key.
-    # Environment variables may have literal \n — replace with real newlines.
-    private_key = settings.CDP_API_KEY_PRIVATE_KEY.replace("\\n", "\n")
-
-    return jwt.encode(payload, private_key, algorithm="ES256", headers=headers)
+    return generate_jwt(JwtOptions(
+        api_key_id=settings.CDP_API_KEY_ID,
+        api_key_secret=settings.CDP_API_KEY_SECRET,
+        request_method=method.upper(),
+        request_host=CDP_API_HOST,
+        request_path=path,
+        expires_in=120,
+    ))
 
 
 def get_auth_headers(method: str, path: str) -> dict:
@@ -74,7 +60,7 @@ def get_auth_headers(method: str, path: str) -> dict:
 
     Args:
         method: HTTP method
-        path: API path
+        path: Full API path (including sandbox prefix if applicable)
 
     Returns:
         Dict with Authorization header

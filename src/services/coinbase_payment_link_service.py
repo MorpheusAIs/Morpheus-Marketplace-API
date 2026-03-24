@@ -10,13 +10,13 @@ from typing import Optional, Dict, Any
 
 import httpx
 
-from src.services.coinbase_auth import get_auth_headers, CDP_API_BASE_URL
+from src.services.coinbase_auth import get_auth_headers, CDP_API_BASE_URL, CDP_PATH_PREFIX
 from src.core.logging_config import get_core_logger
 
 logger = get_core_logger()
 
-# Payment Link API base path
-PAYMENT_LINKS_PATH = "/api/v1/payment-links"
+# Payment Link API base path (includes /sandbox prefix when CDP_SANDBOX=true)
+PAYMENT_LINKS_PATH = f"{CDP_PATH_PREFIX}/api/v1/payment-links"
 
 # Default timeout for API calls (seconds)
 DEFAULT_TIMEOUT = 30.0
@@ -104,16 +104,16 @@ class CoinbasePaymentLinkService:
 
     async def list_payment_links(
         self,
-        limit: int = 25,
-        cursor: Optional[str] = None,
+        page_size: int = 20,
+        page_token: Optional[str] = None,
         status: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         List payment links with optional filtering and pagination.
 
         Args:
-            limit: Max results per page (default 25)
-            cursor: Pagination cursor from a previous response
+            page_size: Max results per page (default 20, max 100)
+            page_token: Pagination token from a previous response's nextPageToken
             status: Filter by status (ACTIVE, COMPLETED, EXPIRED, DEACTIVATED)
 
         Returns:
@@ -122,9 +122,9 @@ class CoinbasePaymentLinkService:
         path = PAYMENT_LINKS_PATH
         headers = get_auth_headers("GET", path)
 
-        params: Dict[str, Any] = {"limit": limit}
-        if cursor:
-            params["cursor"] = cursor
+        params: Dict[str, Any] = {"pageSize": page_size}
+        if page_token:
+            params["pageToken"] = page_token
         if status:
             params["status"] = status
 

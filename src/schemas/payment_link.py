@@ -34,6 +34,7 @@ class PaymentLinkResponse(BaseModel):
 
 class PaymentLinkListResponse(BaseModel):
     """Paginated list of payment links."""
-    data: List[Dict[str, Any]] = Field(default_factory=list)
-    has_more: Optional[bool] = None
-    cursor: Optional[str] = None
+    payment_links: List[Dict[str, Any]] = Field(default_factory=list, alias="paymentLinks")
+    next_page_token: Optional[str] = Field(None, alias="nextPageToken")
+
+    model_config = {"populate_by_name": True}
