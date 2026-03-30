@@ -24,9 +24,14 @@ from ....schemas.billing import (
     RateLimitMultiplierRequest,
     RateLimitMultiplierResponse,
 )
+from ....schemas.payment_link import (
+    PaymentLinkResponse,
+    PaymentLinkListResponse,
+)
 from ....core.logging_config import get_api_logger
 from ....core.config import settings
 from ....services.cache_service import cache_service
+from ....services.coinbase_payment_link_service import coinbase_payment_link_service
 
 logger = get_api_logger()
 
@@ -406,4 +411,91 @@ async def get_rate_limit_multiplier(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error getting rate limit multiplier: {str(e)}",
+        )
+
+
+# === Coinbase Payment Link Admin Endpoints ===
+
+
+@admin_router.get("/payment-links", response_model=PaymentLinkListResponse, tags=["Payment Links"])
+async def list_payment_links(
+    page_size: int = Query(default=20, ge=1, le=100, alias="pageSize", description="Max results per page"),
+    page_token: Optional[str] = Query(default=None, alias="pageToken", description="Pagination token from previous response"),
+    link_status: Optional[str] = Query(default=None, alias="status", description="Filter by status"),
+    current_user: User = Depends(get_current_user),
+    _admin_verified: bool = Depends(verify_billing_admin_secret),
+):
+    """
+    List Coinbase Business Payment Links.
+
+    **Admin endpoint** - Requires X-Admin-Secret header.
+
+    Returns a paginated list of payment links with optional status filtering.
+    Status values: ACTIVE, PROCESSING, COMPLETED, EXPIRED, DEACTIVATED, FAILED.
+    """
+    try:
+        result = await coinbase_payment_link_service.list_payment_links(
+            page_size=page_size,
+            page_token=page_token,
+            status=link_status,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(
+            "Error listing payment links",
+            error=str(e),
+            error_type=type(e).__name__,
+            event_type="admin_payment_link_list_error",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error listing payment links: {str(e)}",
+        )
+
+
+@admin_router.post("/payment-links/{payment_link_id}/deactivate", response_model=PaymentLinkResponse, tags=["Payment Links"])
+async def deactivate_payment_link(
+    payment_link_id: str,
+    current_user: User = Depends(get_current_user),
+    _admin_verified: bool = Depends(verify_billing_admin_secret),
+):
+    """
+    Deactivate a Coinbase Business Payment Link.
+
+    **Admin endpoint** - Requires X-Admin-Secret header.
+
+    Prevents further payments on this link. Cannot be undone.
+    """
+    try:
+        result = await coinbase_payment_link_service.deactivate_payment_link(payment_link_id)
+
+        logger.info(
+            "Payment link deactivated via admin API",
+            user_id=current_user.id,
+            payment_link_id=payment_link_id,
+            event_type="admin_payment_link_deactivated",
+        )
+
+        return result
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(
+            "Error deactivating payment link",
+            payment_link_id=payment_link_id,
+            error=str(e),
+            error_type=type(e).__name__,
+            event_type="admin_payment_link_deactivate_error",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deactivating payment link: {str(e)}",
         )

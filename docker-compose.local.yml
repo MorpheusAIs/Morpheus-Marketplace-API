@@ -72,6 +72,12 @@ services:
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
 
+      # Coinbase Business / CDP (new Payment Link API)
+      CDP_API_KEY_ID: ${CDP_API_KEY_ID:-}
+      CDP_API_KEY_SECRET: ${CDP_API_KEY_SECRET:-}
+      CDP_SANDBOX: ${CDP_SANDBOX:-true}
+      COINBASE_PAYMENT_LINK_WEBHOOK_SECRET: ${COINBASE_PAYMENT_LINK_WEBHOOK_SECRET:-}
+
       LOCAL_TESTING_MODE: ${LOCAL_TESTING_MODE:-false}
 
       # Cognito authentication (ensure these are passed from .env.local)
