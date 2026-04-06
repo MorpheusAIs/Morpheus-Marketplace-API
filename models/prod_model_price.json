@@ -10,11 +10,18 @@
     "kimi-k2.5": { "input": "0.60", "output": "3.00" },
     "kimi-k2-thinking": { "input": "0.60", "output": "3.00" },
 
+    "gemma-4-31b": { "input": "0.15", "output": "0.40" },
+    "gemma-4-26b-a4b": { "input": "0.15", "output": "0.40" },
+
     "qwen3-235b": { "input": "0.40", "output": "3.00" },
     "qwen-3-235b": { "input": "0.40", "output": "3.00" },
     "qwen3-coder-480b-a35b-instruct": { "input": "0.70", "output": "2.80" },
     "qwen3-coder-480b-a35b": { "input": "0.70", "output": "2.80" },
     "qwen3-next-80b": { "input": "0.15", "output": "1.50" },
+    "qwen35-35b-a3b": { "input": "0.30", "output": "1.25" },
+    "qwen35-9b": { "input": "0.05", "output": "0.15" },
+
+    "arcee-trinity-large-thinking": { "input": "0.30", "output": "1.00" },
 
     "minimax-m2.5": { "input": "0.30", "output": "1.20" },
 
