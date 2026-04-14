@@ -103,6 +103,20 @@ class ProxyRouterServiceError(Exception):
         return error_type_mapping.get(self.error_type, 500)
 
 
+# Error substrings from the proxy router that indicate permanent failures
+# where retrying the same request will never succeed.
+NON_RETRIABLE_ERROR_PATTERNS = [
+    "llm tee verification failed",
+    "p-node tee attestation failed"
+]
+
+
+def _is_non_retriable_error(response_text: str) -> bool:
+    """Return True if the response body contains a known non-retriable error."""
+    text_lower = response_text.lower()
+    return any(pattern in text_lower for pattern in NON_RETRIABLE_ERROR_PATTERNS)
+
+
 
 
 async def _execute_request(
@@ -214,8 +228,28 @@ async def _execute_request(
                           error = response.text,
                           event_type="proxy_http_error")
             
+            error_type = "http_error"
+            if status_code >= 500:
+                error_type = "server_error"
+            elif status_code >= 400:
+                error_type = "client_error"
+            
+            non_retriable = _is_non_retriable_error(response.text)
+            if non_retriable:
+                req_logger.error(
+                    "Non-retriable error detected, skipping remaining retries",
+                    status_code=status_code,
+                    url=e.response.url,
+                    method=method,
+                    error=response.text,
+                    event_type="proxy_non_retriable_error")
+                raise ProxyRouterServiceError(
+                    sanitize_error_message(f"HTTP {status_code}: {response.text}"),
+                    status_code=status_code,
+                    error_type=error_type
+                )
+            
             if attempt == max_retries - 1:
-                # If this was the last attempt, raise with status code info
                 req_logger.error("Proxy router request failed after all retries",
                             max_retries=max_retries,
                             url=e.response.url,
@@ -223,12 +257,6 @@ async def _execute_request(
                             error=response.text,
                             status_code=status_code,
                             event_type="proxy_request_failed")
-                error_type = "http_error"
-                if status_code >= 500:
-                    error_type = "server_error"
-                elif status_code >= 400:
-                    error_type = "client_error"
-                
                 raise ProxyRouterServiceError(
                     sanitize_error_message(f"HTTP {status_code}: {response.text}"),
                     status_code=status_code,
