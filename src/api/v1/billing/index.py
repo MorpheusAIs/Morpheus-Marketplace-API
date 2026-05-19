@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from ....db.database import get_db_session
 from ....db.models import User, LedgerEntryType
-from ....dependencies import get_current_user, get_api_key_user
+from ....dependencies import get_current_user, get_user_jwt_or_api_key
 from ....services.billing_service import billing_service
 from ....crud import credits as credits_crud
 from ....schemas.billing import (
@@ -40,10 +40,12 @@ router = APIRouter(tags=["Billing"])
 async def get_balance(
     request: Request,
     db: AsyncSession = Depends(get_db_session),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_user_jwt_or_api_key),
 ):
     """
     Get current credit balance for the authenticated user.
+
+    Authenticate with either a Cognito JWT or an ``sk-…`` API key.
     
     Returns:
     - paid: Paid bucket balance (posted, holds, available)
@@ -132,11 +134,13 @@ async def list_transactions(
     from_date: Optional[datetime] = Query(default=None, alias="from"),
     to_date: Optional[datetime] = Query(default=None, alias="to"),
     db: AsyncSession = Depends(get_db_session),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_user_jwt_or_api_key),
 ):
     """
     Get paginated list of credit transactions (ledger entries).
-    
+
+    Authenticate with either a Cognito JWT or an ``sk-…`` API key.
+
     Parameters:
     - limit: Maximum number of items to return (1-∞)
     - offset: Number of items to skip
@@ -226,11 +230,13 @@ async def get_monthly_spending(
     year: int = Query(default=None, description="Year for spending data (defaults to current year)"),
     mode: SpendingModeEnum = Query(default=SpendingModeEnum.gross),
     db: AsyncSession = Depends(get_db_session),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_user_jwt_or_api_key),
 ):
     """
     Get monthly spending metrics for a year.
-    
+
+    Authenticate with either a Cognito JWT or an ``sk-…`` API key.
+
     Parameters:
     - year: Year to get spending for (defaults to current year)
     - mode: 
@@ -300,11 +306,13 @@ async def list_usage(
     to_date: Optional[datetime] = Query(default=None, alias="to"),
     model: Optional[str] = Query(default=None),
     db: AsyncSession = Depends(get_db_session),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_user_jwt_or_api_key),
 ):
     """
     Get paginated list of usage entries (posted usage charges only).
-    
+
+    Authenticate with either a Cognito JWT or an ``sk-…`` API key.
+
     Parameters:
     - limit: Maximum number of items to return (1-∞)
     - offset: Number of items to skip
@@ -374,11 +382,13 @@ async def list_usage_for_month(
     limit: int = Query(default=50, ge=1),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db_session),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_user_jwt_or_api_key),
 ):
     """
     Get paginated list of usage entries for a specific month.
-    
+
+    Authenticate with either a Cognito JWT or an ``sk-…`` API key.
+
     Parameters:
     - year: Year
     - month: Month (1-12)
