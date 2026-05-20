@@ -554,10 +554,61 @@ async def get_current_api_key(
 
 
 # ---------------------------------------------------------------------------
+# Union auth: accept either Cognito JWT or sk-… API key
+# ---------------------------------------------------------------------------
+
+async def get_user_jwt_or_api_key(
+    db: AsyncSession = Depends(get_db_session),
+    token: Optional[HTTPAuthorizationCredentials] = Depends(oauth2_scheme_optional),
+    api_key_str: Optional[str] = Security(api_key_header),
+) -> User:
+    """
+    Authenticate via either a Cognito JWT or an ``sk-…`` API key and return
+    the associated :class:`User`.
+
+    Both schemes are carried in the ``Authorization`` header; the scheme is
+    selected purely by the credential prefix:
+
+    * value starts with ``sk-`` → treated as API key, delegated to
+      :func:`get_api_key_auth`
+    * anything else → treated as a Cognito JWT, delegated to
+      :func:`get_current_user`
+
+    Intended for read-only endpoints (e.g. billing GETs) that should be
+    reachable from both the dashboard (JWT) and programmatic clients (key).
+    """
+    # Local testing bypass mirrors the underlying dependencies.
+    from src.core.local_testing import is_local_testing_mode, get_or_create_test_user
+    if is_local_testing_mode():
+        return await get_or_create_test_user(db)
+
+    # Both HTTPBearer and APIKeyHeader read the same Authorization header.
+    # Prefer the HTTPBearer-parsed credential (already stripped of "Bearer ");
+    # fall back to the raw header for clients that omit the scheme prefix.
+    raw = token.credentials if token else (api_key_str or "")
+    if raw.startswith("Bearer "):
+        raw = raw[7:]
+
+    if not raw:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if raw.startswith("sk-"):
+        auth = await get_api_key_auth(api_key_str=raw)
+        return auth.user
+
+    return await get_current_user(db=db, token=token)
+
+
+# ---------------------------------------------------------------------------
 # Type aliases for commonly used dependency chains
 # ---------------------------------------------------------------------------
 CurrentUser = Annotated[User, Depends(get_current_user)]
 APIKeyUser = Annotated[User, Depends(get_api_key_user)]
 CurrentAPIKey = Annotated[APIKey, Depends(get_current_api_key)]
 APIKeyAuthentication = Annotated[APIKeyAuth, Depends(get_api_key_auth)]
+JwtOrApiKeyUser = Annotated[User, Depends(get_user_jwt_or_api_key)]
 DBSession = Annotated[AsyncSession, Depends(get_db_session)]
