@@ -68,6 +68,10 @@ class SessionRoutingService:
         # Automation loop control
         self._automation_task: Optional[asyncio.Task] = None
         self._shutdown_event = asyncio.Event()
+
+        # Strong refs to fire-and-forget close tasks (event loop keeps only
+        # weak refs; an unreferenced task can be GC'd before it runs).
+        self._background_close_tasks: set = set()
         
         logger.info("SessionRoutingService initialized",
                    event_type="session_routing_service_init")
@@ -205,6 +209,82 @@ class SessionRoutingService:
                                exc_info=True)
             await db.rollback()
     
+    async def invalidate_session(
+        self,
+        db: AsyncSession,
+        session_id: str,
+        reason: str,
+        state: SessionState = SessionState.FAILED,
+    ) -> bool:
+        """
+        Mark a session FAILED (provider failover) or EXPIRED (session
+        renewal) so it is never routed to again, and close it on the proxy
+        router in the background (best-effort).
+
+        Marking matters in both cases: the row's DB expires_at can lie in
+        the future (on-chain endsAt may pass earlier), so a released-only
+        row would keep being re-picked by route_request.
+
+        Unlike _close_session this works while the session is still
+        utilized (the failing request itself holds an assignment) and never
+        blocks the caller on the on-chain close transaction.
+
+        Returns True if this call transitioned the session out of OPEN.
+        """
+        invalidate_logger = logger.bind(session_id=session_id, target_state=state.value)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        try:
+            result = await db.execute(
+                update(RoutedSession)
+                .where(
+                    RoutedSession.id == session_id,
+                    RoutedSession.state == SessionState.OPEN.value,
+                )
+                .values(
+                    state=state.value,
+                    error_reason=f"recovery: {reason}"[:500],
+                    updated_at=now,
+                )
+            )
+            await db.commit()
+        except Exception as e:
+            invalidate_logger.error("Error invalidating session",
+                                    error=str(e),
+                                    event_type="session_invalidate_error",
+                                    exc_info=True)
+            await db.rollback()
+            return False
+
+        transitioned = (getattr(result, "rowcount", 0) or 0) > 0
+        if transitioned:
+            invalidate_logger.warning("Session invalidated after prompt failure",
+                                      reason=reason,
+                                      event_type="session_invalidated")
+            # Close on-chain in the background: close needs a (possibly
+            # failing) provider-report RPC plus a blockchain tx — too slow
+            # to block the user's retry on. closeSession tolerates
+            # already-closed sessions.
+            task = asyncio.create_task(self._close_invalidated_session(session_id))
+            self._background_close_tasks.add(task)
+            task.add_done_callback(self._background_close_tasks.discard)
+        return transitioned
+
+    async def _close_invalidated_session(self, session_id: str) -> None:
+        """Best-effort proxy-router close for an invalidated session."""
+        try:
+            await proxy_router_service.closeSession(session_id)
+            logger.info("Invalidated session closed on proxy router",
+                        session_id=session_id,
+                        event_type="invalidated_session_closed")
+        except Exception as e:
+            # The proxy-router's SessionExpiryHandler will close it after
+            # EndsAt anyway; losing this close only delays stake recovery.
+            logger.warning("Best-effort close of invalidated session failed",
+                           session_id=session_id,
+                           error=str(e),
+                           event_type="invalidated_session_close_error")
+
     @asynccontextmanager
     async def session_context(
         self,
