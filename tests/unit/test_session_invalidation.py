@@ -50,6 +50,7 @@ async def test_invalidate_marks_failed_and_schedules_close(service, mock_db):
     update_stmt = mock_db.execute.await_args.args[0]
     compiled = str(update_stmt.compile(compile_kwargs={"literal_binds": True}))
     assert "FAILED" in compiled
+    assert "state = 'OPEN'" in compiled
 
 
 async def test_invalidate_with_expired_state_for_renewal(service, mock_db):
@@ -95,6 +96,23 @@ async def test_invalidate_survives_close_failure(service, mock_db):
         side_effect=Exception("proxy down"),
     ):
         # Must not raise even though the background close fails
-        await service.invalidate_session(mock_db, "0xdead", "reason")
+        ok = await service.invalidate_session(mock_db, "0xdead", "reason")
         await asyncio.sleep(0)
         await asyncio.sleep(0)
+
+    assert ok is True
+
+
+async def test_invalidate_db_error_rolls_back_and_skips_close(service, mock_db):
+    mock_db.execute.side_effect = Exception("db down")
+
+    with patch(
+        "src.services.session_routing_service.proxy_router_service.closeSession",
+        new_callable=AsyncMock,
+    ) as mock_close:
+        ok = await service.invalidate_session(mock_db, "0xdead", "reason")
+        await asyncio.sleep(0)
+
+    assert ok is False
+    mock_db.rollback.assert_awaited_once()
+    mock_close.assert_not_awaited()

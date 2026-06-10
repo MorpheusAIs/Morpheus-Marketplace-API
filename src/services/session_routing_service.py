@@ -68,6 +68,10 @@ class SessionRoutingService:
         # Automation loop control
         self._automation_task: Optional[asyncio.Task] = None
         self._shutdown_event = asyncio.Event()
+
+        # Strong refs to fire-and-forget close tasks (event loop keeps only
+        # weak refs; an unreferenced task can be GC'd before it runs).
+        self._background_close_tasks: set = set()
         
         logger.info("SessionRoutingService initialized",
                    event_type="session_routing_service_init")
@@ -252,7 +256,7 @@ class SessionRoutingService:
             await db.rollback()
             return False
 
-        transitioned = bool(getattr(result, "rowcount", 0))
+        transitioned = (getattr(result, "rowcount", 0) or 0) > 0
         if transitioned:
             invalidate_logger.warning("Session invalidated after prompt failure",
                                       reason=reason,
@@ -261,7 +265,9 @@ class SessionRoutingService:
             # failing) provider-report RPC plus a blockchain tx — too slow
             # to block the user's retry on. closeSession tolerates
             # already-closed sessions.
-            asyncio.create_task(self._close_invalidated_session(session_id))
+            task = asyncio.create_task(self._close_invalidated_session(session_id))
+            self._background_close_tasks.add(task)
+            task.add_done_callback(self._background_close_tasks.discard)
         return transitioned
 
     async def _close_invalidated_session(self, session_id: str) -> None:
