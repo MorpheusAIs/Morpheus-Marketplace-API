@@ -78,6 +78,20 @@
 
     "venice-uncensored": { "input": "0.20", "output": "0.90" },
 
+    "claude-fable-5": { "input": "12.00", "output": "60.00" },
+    "claude-fable-5:web": { "input": "12.00", "output": "60.00" },
+    "claude-opus-4.8": { "input": "6.00", "output": "30.00" },
+    "claude-opus-4.8:web": { "input": "6.00", "output": "30.00" },
+    "clause-opus-4.8:web": { "input": "6.00", "output": "30.00" },
+    "gemini-3.1-pro-preview": { "input": "2.50", "output": "15.00" },
+    "gemini-3.1-pro-preview:web": { "input": "2.50", "output": "15.00" },
+    "gpt-5.5-pro": { "input": "38.00", "output": "250.00" },
+    "gpt-5.5-pro:web": { "input": "38.00", "output": "250.00" },
+    "gpt-5.5": { "input": "6.50", "output": "38.00" },
+    "gpt-5.5:web": { "input": "6.50", "output": "38.00" },
+    "grok-4.20": { "input": "1.40", "output": "2.80" },
+    "grok-4.20:web": { "input": "1.40", "output": "2.80" },
+
     "text-embedding-bge-m3": { "input": "0.10", "output": "0.50" }
   }
 }
