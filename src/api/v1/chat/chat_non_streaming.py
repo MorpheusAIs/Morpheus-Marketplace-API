@@ -2,7 +2,10 @@
 Non-streaming chat completion handler.
 
 This module provides non-streaming response handling with:
-- Session expiry detection and automatic retry
+- Expired-session renewal: "session expired" errors reopen a session for the
+  same model and retry once
+- Provider failover: provider-unavailability errors fail over to a different
+  provider (chat_failover) and retry once
 - Proper error propagation using custom exceptions
 """
 
@@ -73,6 +76,20 @@ def _make_error_response(status_code: int, message: str, error_type: str = "prox
     )
 
 
+async def _release_session_quiet(session_id: str, logger) -> None:
+    """Release a session's request slot, logging (not raising) failures."""
+    try:
+        async with get_db() as db:
+            await session_routing_service.release_session(db, session_id)
+    except Exception as release_err:
+        logger.warning(
+            "Failed to release retry session",
+            session_id=session_id,
+            error=str(release_err),
+            event_type="session_release_error",
+        )
+
+
 async def _make_proxy_request(session_id: str, messages: list, chat_params: dict, request_id: str = None) -> httpx.Response:
     """Make a chat completion request to the proxy router."""
     return await proxy_router_service.chatCompletions(
@@ -108,12 +125,18 @@ async def _create_new_session(
             # background. The original's active_requests release stays
             # owned by index.py's finally.
             if original_session_id:
-                await session_routing_service.invalidate_session(
+                invalidated = await session_routing_service.invalidate_session(
                     db,
                     original_session_id,
                     "session expired on proxy",
                     state=SessionState.EXPIRED,
                 )
+                if not invalidated:
+                    logger.warning(
+                        "Expired session was not transitioned (already non-OPEN or DB error)",
+                        session_id=original_session_id,
+                        event_type="session_invalidate_skipped",
+                    )
 
             # Route to a new session
             new_session_id = await session_routing_service.route_request(
@@ -136,7 +159,16 @@ async def _create_new_session(
                 event_type="new_session_created",
             )
             
-            await asyncio.sleep(1.0)  # Brief delay to ensure session is registered
+            try:
+                await asyncio.sleep(1.0)  # Brief delay to ensure session is registered
+            except asyncio.CancelledError:
+                # Client disconnected before the retry could take ownership —
+                # release the just-assigned session so it doesn't leak.
+                try:
+                    await asyncio.shield(_release_session_quiet(new_session_id, logger))
+                except asyncio.CancelledError:
+                    pass
+                raise
             return new_session_id
             
     except Exception as e:
@@ -316,14 +348,9 @@ async def _retry_with_new_session(
 
     finally:
         # The retry owns the new session's assignment; index.py's finally
-        # only releases the ORIGINAL session.
+        # only releases the ORIGINAL session. Shielded so a client
+        # disconnect can't leak the slot.
         try:
-            async with get_db() as db:
-                await session_routing_service.release_session(db, new_session_id)
-        except Exception as release_err:
-            logger.warning(
-                "Failed to release retry session",
-                session_id=new_session_id,
-                error=str(release_err),
-                event_type="session_release_error",
-            )
+            await asyncio.shield(_release_session_quiet(new_session_id, logger))
+        except asyncio.CancelledError:
+            pass

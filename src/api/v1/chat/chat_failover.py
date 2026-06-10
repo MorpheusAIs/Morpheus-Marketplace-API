@@ -184,5 +184,15 @@ async def attempt_failover(
                          event_type="failover_new_session")
     # Brief delay so the freshly opened session is registered everywhere
     # (same as the renewal path).
-    await asyncio.sleep(1.0)
+    try:
+        await asyncio.sleep(1.0)
+    except asyncio.CancelledError:
+        # Client disconnected before the retry took ownership — release the
+        # just-assigned session so its request slot doesn't leak.
+        try:
+            async with get_db() as db:
+                await session_routing_service.release_session(db, new_session_id)
+        except Exception:
+            pass
+        raise
     return new_session_id

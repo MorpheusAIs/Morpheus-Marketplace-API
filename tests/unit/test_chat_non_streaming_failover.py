@@ -151,9 +151,43 @@ async def test_failed_retry_returns_real_status_not_200(mock_user):
          patch.object(chat_non_streaming.chat_failover, "attempt_failover",
                       new_callable=AsyncMock, return_value="0xnew"), \
          patch.object(chat_non_streaming.session_routing_service, "release_session",
-                      new_callable=AsyncMock), \
+                      new_callable=AsyncMock) as release, \
          patch.object(chat_non_streaming, "get_db", _fake_get_db()):
         response = await _call(mock_user)
 
     # Real failure status so index.py voids (not finalizes) the billing hold.
+    assert response.status_code == 500
+    release.assert_awaited_once()
+    assert release.await_args.args[1] == "0xnew"
+
+
+async def test_retry_returning_non_200_response_propagates_status(mock_user):
+    bad_response = httpx.Response(502, text="upstream exploded")
+    with patch.object(chat_non_streaming.proxy_router_service, "chatCompletions",
+                      new_callable=AsyncMock, side_effect=[PROVIDER_DOWN, bad_response]), \
+         patch.object(chat_non_streaming.chat_failover, "attempt_failover",
+                      new_callable=AsyncMock, return_value="0xnew"), \
+         patch.object(chat_non_streaming.session_routing_service, "release_session",
+                      new_callable=AsyncMock) as release, \
+         patch.object(chat_non_streaming, "get_db", _fake_get_db()):
+        response = await _call(mock_user)
+
+    assert response.status_code == 502
+    release.assert_awaited_once()
+
+
+async def test_renewal_route_failure_surfaces_original_error(mock_user):
+    with patch.object(chat_non_streaming.proxy_router_service, "chatCompletions",
+                      new_callable=AsyncMock, side_effect=[SESSION_EXPIRED]), \
+         patch.object(chat_non_streaming.chat_failover, "attempt_failover",
+                      new_callable=AsyncMock) as failover, \
+         patch.object(chat_non_streaming.session_routing_service, "invalidate_session",
+                      new_callable=AsyncMock, return_value=True), \
+         patch.object(chat_non_streaming.session_routing_service, "route_request",
+                      new_callable=AsyncMock, side_effect=Exception("no session")), \
+         patch.object(chat_non_streaming, "get_db", _fake_get_db()), \
+         patch("asyncio.sleep", new_callable=AsyncMock):
+        response = await _call(mock_user)
+
+    failover.assert_not_awaited()
     assert response.status_code == 500
