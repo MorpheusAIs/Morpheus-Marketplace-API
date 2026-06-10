@@ -18,7 +18,9 @@ from fastapi.responses import JSONResponse
 from ....services import proxy_router_service
 from ....services import session_routing_service
 from ....db.database import get_db
+from ....db.models import SessionState
 from ....utils.error_sanitizer import sanitize_error_message
+from . import chat_failover
 from .chat_exceptions import (
     RequestParseError,
     SessionExpiredError,
@@ -100,10 +102,19 @@ async def _create_new_session(
     
     try:
         async with get_db() as db:
-            # Release the old session first if provided
+            # Mark the expired session EXPIRED (not just released): its DB
+            # expires_at may still be in the future, and route_request only
+            # skips non-OPEN rows. Also closes it on the proxy in the
+            # background. The original's active_requests release stays
+            # owned by index.py's finally.
             if original_session_id:
-                await session_routing_service.release_session(db, original_session_id)
-            
+                await session_routing_service.invalidate_session(
+                    db,
+                    original_session_id,
+                    "session expired on proxy",
+                    state=SessionState.EXPIRED,
+                )
+
             # Route to a new session
             new_session_id = await session_routing_service.route_request(
                 db=db,
@@ -145,6 +156,7 @@ async def handle_non_streaming_request(
     db_api_key,
     user,
     requested_model: Optional[str],
+    model_id: Optional[str] = None,
     session_id: str,
 ) -> JSONResponse:
     """
@@ -167,9 +179,50 @@ async def handle_non_streaming_request(
             "Proxy router error on initial request",
             error=str(e),
             error_type=e.error_type,
+            status_code=e.status_code,
             session_id=session_id,
             event_type="proxy_router_error",
         )
+        if db_api_key and user and _is_session_expired(str(e)):
+            # Separate mechanism: expired-session renewal. The provider is
+            # healthy; reopen a session for the same model and retry once.
+            logger.warning(
+                "Detected session expired error, will create new session and retry",
+                session_id=session_id,
+                event_type="session_expired_detected",
+            )
+            new_session_id = await _create_new_session(
+                db_api_key, user, requested_model, logger, request_id, session_id
+            )
+            if new_session_id:
+                return await _retry_with_new_session(
+                    new_session_id=new_session_id,
+                    original_session_id=session_id,
+                    messages=messages,
+                    chat_params=chat_params,
+                    logger=logger,
+                    request_id=request_id,
+                )
+        elif db_api_key and user and chat_failover.is_failover_eligible(e):
+            # Provider became unavailable: fail over to a different provider.
+            new_session_id = await chat_failover.attempt_failover(
+                original_session_id=session_id,
+                model_id=model_id,
+                requested_model=requested_model,
+                user=user,
+                logger=logger,
+                request_id=request_id,
+                failure_reason=str(e),
+            )
+            if new_session_id:
+                return await _retry_with_new_session(
+                    new_session_id=new_session_id,
+                    original_session_id=session_id,
+                    messages=messages,
+                    chat_params=chat_params,
+                    logger=logger,
+                    request_id=request_id,
+                )
         return _make_error_response(e.get_http_status_code(), sanitize_error_message(str(e)), e.error_type)
 
     # Handle success
@@ -192,25 +245,6 @@ async def handle_non_streaming_request(
         session_id=session_id,
         event_type="proxy_error_response",
     )
-
-    # Check for session expired - attempt retry
-    if _is_session_expired(error_content) and db_api_key and user:
-        logger.warning(
-            "Detected session expired error, will create new session and retry",
-            session_id=session_id,
-            event_type="session_expired_detected",
-        )
-        
-        new_session_id = await _create_new_session(db_api_key, user, requested_model, logger, request_id, session_id)
-        if new_session_id:
-            return await _retry_with_new_session(
-                new_session_id=new_session_id,
-                original_session_id=session_id,
-                messages=messages,
-                chat_params=chat_params,
-                logger=logger,
-                request_id=request_id,
-            )
 
     # Return original error
     try:
@@ -236,7 +270,7 @@ async def _retry_with_new_session(
     logger,
     request_id: str = None,
 ) -> JSONResponse:
-    """Retry the request with a new session."""
+    """Retry the request once with a new session. Releases the new session."""
     logger.info(
         "Retrying request with new session",
         new_session_id=new_session_id,
@@ -245,29 +279,51 @@ async def _retry_with_new_session(
     )
 
     try:
-        response = await _make_proxy_request(new_session_id, messages, chat_params, request_id=request_id)
-    except proxy_router_service.ProxyRouterServiceError as e:
-        logger.error(
-            "Retry request failed",
-            new_session_id=new_session_id,
-            error=str(e),
-            error_type=e.error_type,
-            event_type="session_retry_failed",
-        )
-        return _make_error_response(
-            e.get_http_status_code(),
-            f"Retry after session refresh failed: {e}",
-            "retry_failed",
-        )
+        try:
+            response = await _make_proxy_request(new_session_id, messages, chat_params, request_id=request_id)
+        except proxy_router_service.ProxyRouterServiceError as e:
+            logger.error(
+                "Retry request failed",
+                new_session_id=new_session_id,
+                error=str(e),
+                error_type=e.error_type,
+                event_type="session_retry_failed",
+            )
+            return _make_error_response(
+                e.get_http_status_code(),
+                f"Retry after session recovery failed: {sanitize_error_message(str(e))}",
+                "retry_failed",
+            )
 
-    content, error = _parse_response(response, logger, request_id)
-    if content:
-        logger.info(
-            "Non-streaming chat completion successful after retry",
-            session_id=new_session_id,
-            original_session_id=original_session_id,
-            event_type="chat_completion_success",
-        )
-        return JSONResponse(content=content, status_code=200)
-    
-    return _make_error_response(500, error, "unexpected_response_format", session_id=new_session_id)
+        if response.status_code != 200:
+            return _make_error_response(
+                response.status_code,
+                sanitize_error_message(response.text),
+                "proxy_error",
+            )
+
+        content, error = _parse_response(response, logger, request_id)
+        if content:
+            logger.info(
+                "Non-streaming chat completion successful after retry",
+                session_id=new_session_id,
+                original_session_id=original_session_id,
+                event_type="recovery_retry_success",
+            )
+            return JSONResponse(content=content, status_code=200)
+
+        return _make_error_response(500, error, "unexpected_response_format", session_id=new_session_id)
+
+    finally:
+        # The retry owns the new session's assignment; index.py's finally
+        # only releases the ORIGINAL session.
+        try:
+            async with get_db() as db:
+                await session_routing_service.release_session(db, new_session_id)
+        except Exception as release_err:
+            logger.warning(
+                "Failed to release retry session",
+                session_id=new_session_id,
+                error=str(release_err),
+                event_type="session_release_error",
+            )

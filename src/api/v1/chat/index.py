@@ -520,6 +520,7 @@ async def _handle_non_streaming_request(
             db_api_key=db_api_key,
             user=user,
             requested_model=requested_model,
+            model_id=model_id,
             session_id=session_id,
         )
         
