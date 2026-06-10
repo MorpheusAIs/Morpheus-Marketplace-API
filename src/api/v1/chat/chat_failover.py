@@ -77,3 +77,106 @@ def is_failover_eligible(exc: proxy_router_service.ProxyRouterServiceError) -> b
     if exc.error_type == "network_error":
         return True
     return any(p in message for p in PROVIDER_FAILURE_PATTERNS)
+
+
+async def _has_alternate_bids(model_id: str, logger) -> bool:
+    """True if the model has more than one rated bid.
+
+    On lookup failure we proceed optimistically: route_request will fail
+    with a clean error anyway if no healthy bid exists.
+    """
+    try:
+        response = await proxy_router_service.getRatedBids(model_id)
+        result = response.json()
+        if isinstance(result, list):
+            count = len(result)
+        elif isinstance(result, dict):
+            count = len(result.get("bids", []))
+        else:
+            count = 0
+        logger.info("Failover bid availability check",
+                    model_id=model_id,
+                    bid_count=count,
+                    event_type="failover_bid_check")
+        return count > 1
+    except Exception as e:
+        logger.warning("Failover bid check failed, proceeding with retry",
+                       model_id=model_id,
+                       error=str(e),
+                       event_type="failover_bid_check_error")
+        return True
+
+
+async def attempt_failover(
+    *,
+    original_session_id: str,
+    model_id: Optional[str],
+    requested_model: Optional[str],
+    user,
+    logger,
+    request_id: Optional[str] = None,
+    failure_reason: str = "",
+) -> Optional[str]:
+    """
+    Gateway-owned provider failover: mark the dead session FAILED (with a
+    background on-chain close), verify the model has an alternate bid,
+    and route to a fresh session for the same model — the proxy-router's
+    per-bid handshake lands it on a surviving provider.
+
+    Returns the new session id (already assigned to this request), or None
+    when failover is not possible (caller surfaces the original error).
+
+    Session-accounting contract: this function does NOT release or assign
+    the ORIGINAL session (its release stays with index.py's finally); the
+    NEW session is assigned by route_request and must be released by the
+    code that performs the retry.
+    """
+    failover_logger = logger.bind(
+        original_session_id=original_session_id,
+        model_id=model_id,
+        request_id=request_id,
+    )
+    failover_logger.warning("Attempting gateway failover to a new provider",
+                            failure_reason=failure_reason[:300],
+                            event_type="failover_triggered")
+
+    # 1. Unpin the dead session so no request routes to it again.
+    #    Do this even if we end up unable to retry.
+    async with get_db() as db:
+        await session_routing_service.invalidate_session(
+            db, original_session_id, failure_reason[:300]
+        )
+
+    # 2. Only retry when the model has >1 bid (spec guardrail).
+    if model_id and not await _has_alternate_bids(model_id, failover_logger):
+        failover_logger.warning("No alternate bid available, not retrying",
+                                event_type="failover_no_alternate_bids")
+        return None
+
+    # 3. Open/route a fresh session by model. The proxy-router tries bids
+    #    best-first with a provider handshake per bid, so the dead
+    #    provider is skipped automatically.
+    try:
+        async with get_db() as db:
+            new_session_id = await session_routing_service.route_request(
+                db=db,
+                user_id=user.id,
+                requested_model=requested_model,
+                model_type="LLM",
+            )
+    except Exception as e:
+        failover_logger.error("Failover rerouting failed",
+                              error=str(e),
+                              event_type="failover_route_failed")
+        return None
+
+    if not new_session_id:
+        return None
+
+    failover_logger.info("Failover routed to new session",
+                         new_session_id=new_session_id,
+                         event_type="failover_new_session")
+    # Brief delay so the freshly opened session is registered everywhere
+    # (same as the renewal path).
+    await asyncio.sleep(1.0)
+    return new_session_id

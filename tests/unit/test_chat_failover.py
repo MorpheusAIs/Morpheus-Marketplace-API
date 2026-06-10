@@ -50,3 +50,77 @@ class TestIsFailoverEligible:
         exc = _err('HTTP 500: {"error":"provider request failed"}', 500, "server_error")
         with patch.object(chat_failover.settings, "CHAT_FAILOVER_ENABLED", False):
             assert chat_failover.is_failover_eligible(exc) is False
+
+
+def _rated_bids_response(n):
+    resp = MagicMock()
+    resp.json.return_value = [{"bid": {"provider": f"0xp{i}"}} for i in range(n)]
+    return resp
+
+
+@pytest.fixture
+def mock_user():
+    user = MagicMock()
+    user.id = 42
+    return user
+
+
+@pytest.fixture
+def failover_mocks(mock_user):
+    """Patch DB, routing service and bids lookup used by attempt_failover."""
+    db = AsyncMock()
+
+    class FakeGetDb:
+        async def __aenter__(self):
+            return db
+        async def __aexit__(self, *args):
+            return False
+
+    with patch.object(chat_failover, "get_db", lambda: FakeGetDb()), \
+         patch.object(chat_failover.session_routing_service, "invalidate_session",
+                      new_callable=AsyncMock, return_value=True) as invalidate, \
+         patch.object(chat_failover.session_routing_service, "route_request",
+                      new_callable=AsyncMock, return_value="0xnew") as route, \
+         patch.object(chat_failover.proxy_router_service, "getRatedBids",
+                      new_callable=AsyncMock, return_value=_rated_bids_response(2)) as bids, \
+         patch.object(chat_failover.asyncio, "sleep", new_callable=AsyncMock):
+        yield {"invalidate": invalidate, "route": route, "bids": bids, "user": mock_user}
+
+
+def _failover(mocks, **overrides):
+    kwargs = dict(
+        original_session_id="0xdead",
+        model_id="0xmodel",
+        requested_model="llama-3.3-70b",
+        user=mocks["user"],
+        logger=MagicMock(),
+        failure_reason="connection refused",
+    )
+    kwargs.update(overrides)
+    return chat_failover.attempt_failover(**kwargs)
+
+
+class TestAttemptFailover:
+    async def test_happy_path_returns_new_session(self, failover_mocks):
+        new_id = await _failover(failover_mocks)
+        assert new_id == "0xnew"
+        failover_mocks["invalidate"].assert_awaited_once()
+        failover_mocks["bids"].assert_awaited_once()
+        failover_mocks["route"].assert_awaited_once()
+
+    async def test_single_bid_blocks_retry_but_still_invalidates(self, failover_mocks):
+        failover_mocks["bids"].return_value = _rated_bids_response(1)
+        new_id = await _failover(failover_mocks)
+        assert new_id is None
+        failover_mocks["invalidate"].assert_awaited_once()
+        failover_mocks["route"].assert_not_awaited()
+
+    async def test_bids_lookup_failure_proceeds_optimistically(self, failover_mocks):
+        failover_mocks["bids"].side_effect = Exception("chain read failed")
+        new_id = await _failover(failover_mocks)
+        assert new_id == "0xnew"
+
+    async def test_route_failure_returns_none(self, failover_mocks):
+        failover_mocks["route"].side_effect = Exception("no bids left")
+        new_id = await _failover(failover_mocks)
+        assert new_id is None
