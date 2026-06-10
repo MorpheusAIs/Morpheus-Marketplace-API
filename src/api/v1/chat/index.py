@@ -462,6 +462,7 @@ def _handle_streaming_request(
         session_id=session_id,
         body=body,
         requested_model=requested_model,
+        model_id=model_id,
         db_api_key=db_api_key,
         user=user,
         ledger_entry_id=ledger_entry_id,
