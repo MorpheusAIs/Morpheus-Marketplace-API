@@ -202,3 +202,49 @@ async def test_failover_retry_failure_emits_error_chunk(mock_user):
     assert any(b"error" in c for c in chunks)
     # New session released exactly once by the failover retry path.
     release.assert_awaited_once()
+
+
+async def test_failover_retry_releases_new_session_on_disconnect(mock_user):
+    """Client disconnect mid-retry must still release the new session
+    (shielded finally)."""
+    import asyncio
+
+    hang = asyncio.Event()
+
+    async def hanging_stream(**kwargs):
+        await hang.wait()
+        yield b"never"
+
+    with patch.object(chat_streaming.chat_failover, "attempt_failover",
+                      new_callable=AsyncMock, return_value="0xnew"), \
+         patch.object(chat_streaming, "_process_stream_request", hanging_stream), \
+         patch.object(chat_streaming.session_routing_service, "release_session",
+                      new_callable=AsyncMock) as release, \
+         patch.object(chat_streaming, "get_db", _fake_get_db()):
+
+        async def consume():
+            gen = chat_streaming._handle_failover_retry(
+                original_session_id="0xdead",
+                messages=[],
+                chat_params={},
+                user=mock_user,
+                requested_model="llama-3.3-70b",
+                model_id="0xmodel",
+                failure_reason="provider down",
+                logger=MagicMock(),
+            )
+            async for _ in gen:
+                pass
+
+        task = asyncio.create_task(consume())
+        for _ in range(10):
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Let the shielded release task finish
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    release.assert_awaited_once()
+    assert release.await_args.args[1] == "0xnew"

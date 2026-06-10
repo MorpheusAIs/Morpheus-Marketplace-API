@@ -109,6 +109,20 @@ def _format_sse_error(error_type: str, message: str, **extra) -> bytes:
     return f"data: {json.dumps(error_msg)}\n\n".encode("utf-8")
 
 
+async def _release_session_quiet(session_id: str, logger) -> None:
+    """Release a session's request slot, logging (not raising) failures."""
+    try:
+        async with get_db() as db:
+            await session_routing_service.release_session(db, session_id)
+    except Exception as release_err:
+        logger.warning(
+            "Failed to release retry session",
+            session_id=session_id,
+            error=str(release_err),
+            event_type="session_release_error",
+        )
+
+
 async def _finalize_streaming_billing(
     user_id: int,
     ledger_entry_id: uuid.UUID,
@@ -691,18 +705,12 @@ async def _handle_session_retry(
         )
         yield StreamResult(success=False, error=str(e))
     finally:
-        # Release the new session after retry completes
+        # Shielded so a client disconnect can't leak the new session's slot.
         if new_session_id:
             try:
-                async with get_db() as db:
-                    await session_routing_service.release_session(db, new_session_id)
-            except Exception as release_err:
-                logger.warning(
-                    "Failed to release retry session",
-                    session_id=new_session_id,
-                    error=str(release_err),
-                    event_type="session_release_error",
-                )
+                await asyncio.shield(_release_session_quiet(new_session_id, logger))
+            except asyncio.CancelledError:
+                pass
 
 
 async def _handle_failover_retry(
@@ -777,20 +785,19 @@ async def _handle_failover_retry(
             error=str(e),
             event_type="stream_failover_error",
         )
-        yield _format_sse_error("retry_failed", sanitize_error_message(str(e)))
+        yield _format_sse_error(
+            "retry_failed",
+            sanitize_error_message(str(e)),
+            session_id=new_session_id or original_session_id,
+        )
         yield StreamResult(success=False, error=str(e))
     finally:
+        # Shielded so a client disconnect can't leak the new session's slot.
         if new_session_id:
             try:
-                async with get_db() as db:
-                    await session_routing_service.release_session(db, new_session_id)
-            except Exception as release_err:
-                logger.warning(
-                    "Failed to release failover retry session",
-                    session_id=new_session_id,
-                    error=str(release_err),
-                    event_type="session_release_error",
-                )
+                await asyncio.shield(_release_session_quiet(new_session_id, logger))
+            except asyncio.CancelledError:
+                pass
 
 
 __all__ = [
