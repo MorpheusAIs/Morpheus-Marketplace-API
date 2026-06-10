@@ -79,6 +79,18 @@ def is_failover_eligible(exc: proxy_router_service.ProxyRouterServiceError) -> b
     return any(p in message for p in PROVIDER_FAILURE_PATTERNS)
 
 
+async def _release_new_session_quiet(session_id: str, logger) -> None:
+    """Release a just-assigned session's request slot, logging failures."""
+    try:
+        async with get_db() as db:
+            await session_routing_service.release_session(db, session_id)
+    except Exception as release_err:
+        logger.warning("Failed to release abandoned failover session",
+                       session_id=session_id,
+                       error=str(release_err),
+                       event_type="session_release_error")
+
+
 async def _has_alternate_bids(model_id: str, logger) -> bool:
     """True if the model has more than one rated bid.
 
@@ -188,11 +200,11 @@ async def attempt_failover(
         await asyncio.sleep(1.0)
     except asyncio.CancelledError:
         # Client disconnected before the retry took ownership — release the
-        # just-assigned session so its request slot doesn't leak.
+        # just-assigned session so its request slot doesn't leak. Shielded
+        # so a second cancellation can't abandon the release mid-flight.
         try:
-            async with get_db() as db:
-                await session_routing_service.release_session(db, new_session_id)
-        except Exception:
+            await asyncio.shield(_release_new_session_quiet(new_session_id, failover_logger))
+        except asyncio.CancelledError:
             pass
         raise
     return new_session_id
