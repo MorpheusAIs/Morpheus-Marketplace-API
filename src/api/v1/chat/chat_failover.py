@@ -142,10 +142,16 @@ async def attempt_failover(
 
     # 1. Unpin the dead session so no request routes to it again.
     #    Do this even if we end up unable to retry.
-    async with get_db() as db:
-        await session_routing_service.invalidate_session(
-            db, original_session_id, failure_reason[:300]
-        )
+    try:
+        async with get_db() as db:
+            await session_routing_service.invalidate_session(
+                db, original_session_id, failure_reason[:300]
+            )
+    except Exception as e:
+        failover_logger.error("Failover invalidation failed",
+                              error=str(e),
+                              event_type="failover_invalidate_failed")
+        return None
 
     # 2. Only retry when the model has >1 bid (spec guardrail).
     if model_id and not await _has_alternate_bids(model_id, failover_logger):

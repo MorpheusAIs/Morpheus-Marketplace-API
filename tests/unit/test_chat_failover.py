@@ -124,3 +124,9 @@ class TestAttemptFailover:
         failover_mocks["route"].side_effect = Exception("no bids left")
         new_id = await _failover(failover_mocks)
         assert new_id is None
+
+    async def test_invalidate_failure_returns_none_without_routing(self, failover_mocks):
+        failover_mocks["invalidate"].side_effect = Exception("db teardown failed")
+        new_id = await _failover(failover_mocks)
+        assert new_id is None
+        failover_mocks["route"].assert_not_awaited()
