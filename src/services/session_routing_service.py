@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Tuple
 
-from sqlalchemy import select, update, func, and_, or_
+from sqlalchemy import select, update, func, and_, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import RoutedSession, SessionState
@@ -133,40 +133,41 @@ class SessionRoutingService:
         route_logger.info("Routing request to session",
                          event_type="route_request_start")
         
-        # Acquire per-model lock to prevent race conditions
+        # FAST PATH (lock-free): atomically claim an idle OPEN session for this
+        # model with a single UPDATE ... FOR UPDATE SKIP LOCKED. This replaces the
+        # old "take per-model asyncio.Lock -> SELECT all rows -> pick in Python ->
+        # separate UPDATE+COMMIT" sequence. The DB row lock (not an in-process
+        # lock) guarantees a session is handed to exactly one request, so it is
+        # correct across replicas, and it never holds a lock across the slow
+        # blockchain openSession() call.
+        claimed_id = await self._claim_idle_session(db, model_id)
+        if claimed_id is not None:
+            route_logger.info("Routed to idle session (atomic claim)",
+                             session_id=claimed_id,
+                             event_type="route_to_unutilized")
+            return claimed_id
+
+        # OPEN PATH: no idle session is available -> open a new one. Opening is a
+        # paid on-chain transaction, so we serialize opens per model with the lock
+        # to avoid a thundering herd of duplicate opens. The fast path above no
+        # longer touches this lock, so a slow open only blocks other requests that
+        # *also* need a brand-new session for the same model (not every request).
+        # We re-claim once after acquiring the lock: while we waited, a concurrent
+        # opener may have created a session that has since been released.
+        # NOTE: if open latency under heavy scale-up becomes a problem, replace
+        # this lock with a bounded asyncio.Semaphore to cap (rather than serialize)
+        # concurrent on-chain opens per model.
         model_lock = await self._get_model_lock(model_id)
-        
         async with model_lock:
-            # Step 1: Check if any open sessions exist for this model
-            open_sessions = await self._get_open_sessions_for_model(db, model_id)
-            
-            if not open_sessions:
-                # No open sessions - create one
-                route_logger.info("No open sessions for model, creating new session",
-                                 event_type="no_open_sessions")
-                session = await self._open_session_for_model(
-                    db, model_id, requested_model, model_type, user_id
-                )
-                return await self._assign_request_to_session(db, session.id)
-            
-            # Step 2: Check if all sessions are utilized
-            unutilized_sessions = [s for s in open_sessions if not s.is_utilized]
-            
-            if unutilized_sessions:
-                # Route to an unutilized session (least recently used)
-                session = min(
-                    unutilized_sessions,
-                    key=lambda s: s.last_used_at or s.created_at
-                )
-                route_logger.info("Routing to unutilized session",
-                                 session_id=session.id,
-                                 event_type="route_to_unutilized")
-                return await self._assign_request_to_session(db, session.id)
-            
-            # Step 3: All sessions utilized - open another
-            route_logger.info("All sessions utilized, opening another",
-                             current_count=len(open_sessions),
-                             event_type="all_sessions_utilized")
+            claimed_id = await self._claim_idle_session(db, model_id)
+            if claimed_id is not None:
+                route_logger.info("Routed to idle session after lock wait (atomic claim)",
+                                 session_id=claimed_id,
+                                 event_type="route_to_unutilized_after_wait")
+                return claimed_id
+
+            route_logger.info("No idle session for model, opening a new one",
+                             event_type="no_idle_session")
             session = await self._open_session_for_model(
                 db, model_id, requested_model, model_type, user_id
             )
@@ -530,9 +531,70 @@ class SessionRoutingService:
         logger.debug("Request assigned to session",
                     session_id=session_id,
                     event_type="request_assigned")
-        
+
         return session_id
-    
+
+    async def _claim_idle_session(
+        self,
+        db: AsyncSession,
+        model_id: str
+    ) -> Optional[str]:
+        """
+        Atomically claim one idle (active_requests == 0), OPEN, non-expired
+        session for a model and increment its active_requests in a single round
+        trip.
+
+        Implemented as
+            UPDATE routed_sessions SET active_requests = active_requests + 1
+            WHERE id = (SELECT id ... FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id
+        so that:
+        - a given idle session is claimed by exactly one request, even across
+          processes/replicas (the row lock, not an in-process asyncio.Lock,
+          provides the mutual exclusion);
+        - concurrent claimers SKIP each other's locked rows instead of blocking
+          or double-assigning the same "unutilized" session (the old read-all +
+          Python-pick + separate UPDATE could double-assign across replicas);
+        - routing the common case costs one statement served by
+          idx_routed_sessions_model_state, with no lock held across I/O.
+
+        Returns the claimed session id, or None when no idle session exists.
+        """
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        stmt = text(
+            """
+            UPDATE routed_sessions
+            SET active_requests = active_requests + 1,
+                last_used_at = :now,
+                updated_at = :now
+            WHERE id = (
+                SELECT id FROM routed_sessions
+                WHERE model_id = :model_id
+                  AND state = :open_state
+                  AND active_requests = 0
+                  AND expires_at > :now
+                ORDER BY last_used_at ASC NULLS FIRST
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id
+            """
+        )
+        try:
+            result = await db.execute(
+                stmt,
+                {
+                    "now": now,
+                    "model_id": model_id,
+                    "open_state": SessionState.OPEN.value,
+                },
+            )
+            claimed_id = result.scalar_one_or_none()
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+        return claimed_id
+
     # =========================================================================
     # QUERY HELPERS
     # =========================================================================
