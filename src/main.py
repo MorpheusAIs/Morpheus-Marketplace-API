@@ -427,7 +427,25 @@ async def startup_event():
             logger.warning("Continuing startup without rate limiting")
     else:
         logger.info("Rate limiting is disabled", event_type="rate_limit_disabled")
-    
+
+    # Initialize Redis cache service (eager, so the connection/circuit-breaker is
+    # established at startup instead of lazily on the first request). Safe to call
+    # when CACHE_ENABLED=false (it no-ops) and never blocks startup on a Redis
+    # outage — a failed connect just opens the circuit and degrades to the DB.
+    if settings.CACHE_ENABLED:
+        try:
+            cache_ok = await cache_service.initialize()
+            logger.info("Redis cache service initialization attempted",
+                       connected=cache_ok,
+                       event_type="cache_init_attempt")
+        except Exception as e:
+            logger.error("Failed to initialize Redis cache service",
+                        error=str(e),
+                        event_type="cache_init_error")
+            logger.warning("Continuing startup with cache degraded to DB")
+    else:
+        logger.info("Redis caching is disabled", event_type="cache_disabled")
+
     logger.info("Application startup complete", event_type="startup_complete")
 
 @app.on_event("shutdown")
