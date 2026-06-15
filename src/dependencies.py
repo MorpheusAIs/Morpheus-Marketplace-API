@@ -369,6 +369,32 @@ async def _build_auth_from_cache(
                         key_prefix=key_prefix,
                         event_type="cached_legacy_api_key_verified")
 
+    # ── Reject revoked keys / inactive users (cache path) ───────────────
+    # A revoked key whose cache entry is still warm (e.g. invalidation lost, or
+    # revoked via a path that didn't clear the cache) must NOT authenticate.
+    # Default True keeps any pre-existing cache entries valid. Drop the stale
+    # entry so it stops being served before its TTL expires.
+    if not cached_data.get("is_active", True):
+        await cache_service.delete("api_key", key_prefix)
+        auth_logger.warning("Revoked API key rejected (cache)",
+                            key_prefix=key_prefix,
+                            event_type="api_key_revoked")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not cached_data.get("user", {}).get("is_active", True):
+        await cache_service.delete("api_key", key_prefix)
+        auth_logger.warning("Inactive user rejected (cache)",
+                            key_prefix=key_prefix,
+                            event_type="user_inactive")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account is inactive",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     # ── Background last-used update (non-blocking) ──────────────────────
     asyncio.create_task(_update_api_key_last_used_background(cached_data.get("id")))
 
@@ -444,6 +470,19 @@ async def _build_auth_from_db(
                            key_prefix=key_prefix,
                            event_type="legacy_api_key_verified")
 
+        # ── Reject revoked keys ─────────────────────────────────────────
+        # Checked before update_last_used and before the write-through cache,
+        # so a revoked key neither bumps last_used nor gets re-cached.
+        if not db_api_key.is_active:
+            auth_logger.warning("Revoked API key rejected",
+                               key_prefix=key_prefix,
+                               event_type="api_key_revoked")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
         # ── Update last-used ────────────────────────────────────────────
         await api_key_crud.update_last_used(db, db_api_key)
 
@@ -453,6 +492,16 @@ async def _build_auth_from_db(
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="API key not associated with a valid user",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if not db_user.is_active:
+            auth_logger.warning("Inactive user rejected",
+                               key_prefix=key_prefix,
+                               user_id=db_user.id,
+                               event_type="user_inactive")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Account is inactive",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
