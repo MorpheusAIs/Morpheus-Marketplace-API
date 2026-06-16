@@ -4,14 +4,18 @@ Redis Rate Limiter
 Implements FIXED-window rate limiting using Redis for distributed rate tracking.
 Supports both RPM (requests per minute) and TPM (tokens per minute) limits.
 
-Windows are clock-aligned (e.g. each minute boundary) and tracked with plain
-integer counters keyed by window start:
+Windows are clock-aligned and tracked with plain integer counters keyed by
+window start (ratelimit:{rpm|tpm}:{group}:{user}:{window_start}): O(1) per check
+(INCRBY + GET) instead of a per-request ZSET.
 
-    ratelimit:rpm:{model_group}:{user_id}:{window_start}
-    ratelimit:tpm:{model_group}:{user_id}:{window_start}
-
-This is O(1) per check (INCRBY + GET) instead of the previous per-request ZSET
-that required an O(n) ZRANGE + member parsing on every call.
+Resilience: a circuit breaker guards every Redis access. The limiter already
+fails open by design, so during a timeout-mode Redis outage the breaker opens
+after the first failure and every check returns "allowed" *immediately* — no
+per-request connect timeouts, no global init lock contention on the hot path.
+A single background task re-probes Redis with exponential backoff and closes the
+breaker on recovery, so reconnection attempts never run on the request path.
+The limiter also uses much tighter socket timeouts than the cache (a rate-limit
+check must never be allowed to block for seconds).
 """
 
 import time
@@ -21,8 +25,10 @@ from contextlib import asynccontextmanager
 
 import redis.asyncio as aioredis
 from redis.asyncio import ConnectionPool
+from redis.exceptions import RedisError
 
 from src.core.config import settings
+from src.core.circuit_breaker import CircuitBreaker, run_reprobe
 from src.core.logging_config import get_core_logger
 
 from .types import RateLimitConfig
@@ -61,7 +67,7 @@ class RedisRateLimiter:
     Provides:
     - Atomic O(1) rate limit checks using a Lua INCRBY counter
     - Support for both RPM and TPM limits
-    - Graceful degradation on Redis failures (fail open)
+    - Circuit-breaker graceful degradation on Redis failures (fail open)
     - Connection pooling for efficiency
     """
 
@@ -72,53 +78,139 @@ class RedisRateLimiter:
         self._initialized = False
         self._initialization_lock = asyncio.Lock()
 
+        # Circuit breaker: open => skip Redis and fail open immediately.
+        self._breaker = CircuitBreaker("rate_limiter", initial_backoff=0.5, max_backoff=10.0)
+        self._reprobe_task: Optional[asyncio.Task] = None
+
+    # ------------------------------------------------------------------ #
+    # Connection lifecycle + circuit breaker
+    # ------------------------------------------------------------------ #
+
+    async def _connect_locked(self) -> bool:
+        """Build (once) or reuse the pool, verify it, and load the Lua script.
+        Assumes the init lock is held. Returns True on success."""
+        try:
+            if self._pool is None:
+                # Pool is built once and reused — redis-py reconnects on demand,
+                # so we must not rebuild it per attempt.
+                self._pool = ConnectionPool.from_url(
+                    settings.REDIS_URL,
+                    max_connections=settings.REDIS_MAX_CONNECTIONS,
+                    socket_timeout=settings.RATE_LIMIT_REDIS_SOCKET_TIMEOUT,
+                    socket_connect_timeout=settings.RATE_LIMIT_REDIS_SOCKET_CONNECT_TIMEOUT,
+                    decode_responses=True,
+                    health_check_interval=30,
+                    retry_on_timeout=True,
+                )
+            self._redis = aioredis.Redis(connection_pool=self._pool)
+            await self._redis.ping()
+            self._script_sha = await self._redis.script_load(FIXED_WINDOW_SCRIPT)
+            self._initialized = True
+            return True
+        except Exception as e:
+            # Drop the broken client so it is never yielded to the request path.
+            self._redis = None
+            self._initialized = False
+            logger.error(
+                "Failed to connect Redis rate limiter",
+                error=str(e),
+                event_type="redis_limiter_init_error",
+            )
+            return False
+
+    async def _attempt_locked(self) -> bool:
+        """Connect (if needed) and update the breaker, under the init lock."""
+        if self._initialized and self._redis is not None:
+            return True
+        ok = await self._connect_locked()
+        if ok:
+            self._breaker.record_success()
+        else:
+            self._breaker.record_failure()
+        return ok
+
     async def initialize(self) -> bool:
         """
-        Initialize Redis connection pool.
+        Initialize the Redis connection pool. Safe to call at startup; also used
+        as the single-flight (re)connect on the request path.
 
-        Returns:
-            True if initialization was successful
+        Returns True if a usable connection is established.
         """
         async with self._initialization_lock:
             if self._initialized:
                 return True
-
-            try:
-                self._pool = ConnectionPool.from_url(
-                    settings.REDIS_URL,
-                    max_connections=settings.REDIS_MAX_CONNECTIONS,
-                    socket_timeout=settings.REDIS_SOCKET_TIMEOUT,
-                    socket_connect_timeout=settings.REDIS_SOCKET_CONNECT_TIMEOUT,
-                    decode_responses=True,
-                )
-
-                self._redis = aioredis.Redis(connection_pool=self._pool)
-
-                # Test connection
-                await self._redis.ping()
-
-                # Load Lua script
-                self._script_sha = await self._redis.script_load(FIXED_WINDOW_SCRIPT)
-
-                self._initialized = True
-                logger.info(
-                    "Redis rate limiter initialized",
-                    redis_url=settings.REDIS_URL.split("@")[-1],  # Hide password
-                    event_type="redis_limiter_init",
-                )
-                return True
-
-            except Exception as e:
-                logger.error(
-                    "Failed to initialize Redis rate limiter",
-                    error=str(e),
-                    event_type="redis_limiter_init_error",
-                )
-                self._initialized = False
+            if self._breaker.is_open():
                 return False
+            ok = await self._attempt_locked()
+
+        if ok:
+            logger.info(
+                "Redis rate limiter initialized",
+                redis_url=settings.REDIS_URL.split("@")[-1],  # Hide password
+                event_type="redis_limiter_init",
+            )
+        else:
+            self._ensure_reprobe()
+            logger.warning(
+                "Redis rate limiter unavailable; circuit opened, failing open",
+                retry_in=round(self._breaker.cooldown_remaining, 1),
+                event_type="redis_limiter_circuit_open",
+            )
+        return ok
+
+    async def _probe(self) -> bool:
+        """Background re-probe used by run_reprobe; updates the breaker."""
+        try:
+            async with self._initialization_lock:
+                return await self._attempt_locked()
+        except Exception:
+            return False
+
+    def _ensure_reprobe(self) -> None:
+        """Start the single background recovery loop if not already running."""
+        if self._reprobe_task is not None and not self._reprobe_task.done():
+            return
+        try:
+            self._reprobe_task = asyncio.create_task(run_reprobe(self._breaker, self._probe))
+        except RuntimeError:
+            self._reprobe_task = None
+
+    def _note_op_error(self, error: Exception) -> None:
+        """Trip the breaker on a connectivity error so subsequent checks fail open fast."""
+        if not isinstance(error, (RedisError, OSError, asyncio.TimeoutError)):
+            return
+        if self._breaker.is_open():
+            return
+        self._redis = None
+        self._initialized = False
+        backoff = self._breaker.record_failure()
+        self._ensure_reprobe()
+        logger.warning(
+            "Redis rate limiter circuit opened after operation failure",
+            retry_in=round(backoff, 1),
+            error=str(error),
+            event_type="redis_limiter_circuit_open",
+        )
+
+    async def _acquire_redis(self) -> Optional[aioredis.Redis]:
+        """Return a usable client, or None to signal 'fail open' — never dials
+        while the breaker is open."""
+        if self._breaker.is_open():
+            return None
+        if self._initialized and self._redis is not None:
+            return self._redis
+        await self.initialize()
+        return self._redis if self._initialized else None
 
     async def close(self) -> None:
-        """Close Redis connections."""
+        """Close Redis connections and stop the recovery loop."""
+        if self._reprobe_task is not None and not self._reprobe_task.done():
+            self._reprobe_task.cancel()
+            try:
+                await self._reprobe_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._reprobe_task = None
         if self._redis:
             await self._redis.close()
         if self._pool:
@@ -128,14 +220,8 @@ class RedisRateLimiter:
 
     @asynccontextmanager
     async def _get_redis(self):
-        """Get Redis connection with lazy initialization."""
-        if not self._initialized:
-            await self.initialize()
-
-        if not self._redis:
-            raise RuntimeError("Redis not initialized")
-
-        yield self._redis
+        """Yield a usable Redis client, or None when the limiter is degraded."""
+        yield await self._acquire_redis()
 
     @staticmethod
     def _window_start(config: RateLimitConfig) -> int:
@@ -179,19 +265,23 @@ class RedisRateLimiter:
         request_id: Optional[str] = None,
     ) -> Tuple[int, int, bool]:
         """
-        Check and increment the RPM counter for the current window.
+        Check and increment the RPM counter.
 
         Args:
             user_id: The user identifier
             config: Rate limit configuration
             model_group: Optional model group for separate limits
-            request_id: Unused (kept for signature compatibility)
+            request_id: Unique identifier for this request
 
         Returns:
             Tuple of (current_count, limit, allowed)
         """
         try:
             async with self._get_redis() as redis:
+                if redis is None:
+                    # Degraded (circuit open) - fail open
+                    return 0, config.rpm, True
+
                 window_start = self._window_start(config)
                 key = self._get_key(user_id, "rpm", model_group, window_start)
                 ttl = config.window_seconds + 10  # outlive the window by a small buffer
@@ -209,6 +299,7 @@ class RedisRateLimiter:
                 return int(current_count), config.rpm, bool(allowed)
 
         except Exception as e:
+            self._note_op_error(e)
             logger.warning(
                 "RPM check failed, allowing request",
                 error=str(e),
@@ -227,7 +318,7 @@ class RedisRateLimiter:
         request_id: Optional[str] = None,
     ) -> bool:
         """
-        Add tokens to the TPM counter for the current window (no limit check).
+        Add tokens to the TPM counter without checking limits.
 
         Used to record actual token usage after a request completes.
 
@@ -236,13 +327,17 @@ class RedisRateLimiter:
             token_count: Number of tokens to add
             config: Rate limit configuration
             model_group: Optional model group
-            request_id: Unused (kept for signature compatibility)
+            request_id: Unique identifier for this request
 
         Returns:
             True if successful
         """
         try:
             async with self._get_redis() as redis:
+                if redis is None:
+                    # Degraded (circuit open) - skip recording
+                    return False
+
                 window_start = self._window_start(config)
                 key = self._get_key(user_id, "tpm", model_group, window_start)
                 ttl = config.window_seconds + 10
@@ -255,6 +350,7 @@ class RedisRateLimiter:
                 return True
 
         except Exception as e:
+            self._note_op_error(e)
             logger.warning(
                 "Failed to add tokens",
                 error=str(e),
@@ -271,9 +367,7 @@ class RedisRateLimiter:
         model_group: Optional[str] = None,
     ) -> Tuple[int, int]:
         """
-        Get current usage counts for the active window without incrementing.
-
-        Two O(1) GETs against the window-stamped counters.
+        Get current usage counts without incrementing.
 
         Args:
             user_id: The user identifier
@@ -285,6 +379,10 @@ class RedisRateLimiter:
         """
         try:
             async with self._get_redis() as redis:
+                if redis is None:
+                    # Degraded (circuit open) - report no usage
+                    return 0, 0
+
                 window_start = self._window_start(config)
                 rpm_key = self._get_key(user_id, "rpm", model_group, window_start)
                 tpm_key = self._get_key(user_id, "tpm", model_group, window_start)
@@ -297,6 +395,7 @@ class RedisRateLimiter:
                 return int(rpm_value or 0), int(tpm_value or 0)
 
         except Exception as e:
+            self._note_op_error(e)
             logger.warning(
                 "Failed to get current usage",
                 error=str(e),
@@ -311,10 +410,7 @@ class RedisRateLimiter:
         model_group: Optional[str] = None,
     ) -> bool:
         """
-        Reset rate limits for a user by deleting their window-stamped counters.
-
-        Rare admin operation: SCANs the user's rpm/tpm key prefixes (all windows)
-        and deletes them. Hot-path checks never SCAN.
+        Reset rate limits for a user.
 
         Args:
             user_id: The user identifier
@@ -325,6 +421,9 @@ class RedisRateLimiter:
         """
         try:
             async with self._get_redis() as redis:
+                if redis is None:
+                    return False
+
                 # Prefix without the window suffix, plus '*' to match every window.
                 prefixes = [
                     self._get_key(user_id, "rpm", model_group),
@@ -346,6 +445,7 @@ class RedisRateLimiter:
                 return True
 
         except Exception as e:
+            self._note_op_error(e)
             logger.error(
                 "Failed to reset user limits",
                 error=str(e),
@@ -356,23 +456,32 @@ class RedisRateLimiter:
 
     async def health_check(self) -> dict:
         """
-        Check Redis health status.
-
-        Returns:
-            Health status dictionary
+        Check Redis health status. Returns fast (no dial) while the circuit is
+        open so /health probes never hang on a Redis outage.
         """
-        try:
-            async with self._get_redis() as redis:
-                await redis.ping()
-                info = await redis.info("memory")
+        if self._breaker.is_open():
+            return {
+                "status": "degraded",
+                "connected": False,
+                "circuit": "open",
+                "retry_in_seconds": round(self._breaker.cooldown_remaining, 1),
+            }
 
-                return {
-                    "status": "healthy",
-                    "connected": True,
-                    "used_memory": info.get("used_memory_human", "unknown"),
-                    "max_memory": info.get("maxmemory_human", "unknown"),
-                }
+        try:
+            redis = await self._acquire_redis()
+            if redis is None:
+                return {"status": "degraded", "connected": False, "circuit": "open"}
+            await redis.ping()
+            info = await redis.info("memory")
+
+            return {
+                "status": "healthy",
+                "connected": True,
+                "used_memory": info.get("used_memory_human", "unknown"),
+                "max_memory": info.get("maxmemory_human", "unknown"),
+            }
         except Exception as e:
+            self._note_op_error(e)
             return {
                 "status": "unhealthy",
                 "connected": False,

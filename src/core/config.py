@@ -261,6 +261,11 @@ class Settings(BaseSettings):
     REDIS_MAX_CONNECTIONS: int = Field(default=int(os.getenv("REDIS_MAX_CONNECTIONS", "20")))
     REDIS_SOCKET_TIMEOUT: float = Field(default=float(os.getenv("REDIS_SOCKET_TIMEOUT", "5.0")))
     REDIS_SOCKET_CONNECT_TIMEOUT: float = Field(default=float(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT", "5.0")))
+    # Rate-limit checks sit on the hot path and fail open, so they use much
+    # tighter Redis timeouts than the cache: a limiter call must never be allowed
+    # to block for seconds before degrading.
+    RATE_LIMIT_REDIS_SOCKET_TIMEOUT: float = Field(default=float(os.getenv("RATE_LIMIT_REDIS_SOCKET_TIMEOUT", "1.0")))
+    RATE_LIMIT_REDIS_SOCKET_CONNECT_TIMEOUT: float = Field(default=float(os.getenv("RATE_LIMIT_REDIS_SOCKET_CONNECT_TIMEOUT", "0.5")))
     
     # Cache Settings
     # Enable Redis caching for API keys, users, sessions, and JWKS
