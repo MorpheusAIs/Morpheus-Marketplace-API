@@ -1,8 +1,17 @@
 """
 Redis Rate Limiter
 
-Implements sliding window rate limiting using Redis for distributed rate tracking.
+Implements FIXED-window rate limiting using Redis for distributed rate tracking.
 Supports both RPM (requests per minute) and TPM (tokens per minute) limits.
+
+Windows are clock-aligned (e.g. each minute boundary) and tracked with plain
+integer counters keyed by window start:
+
+    ratelimit:rpm:{model_group}:{user_id}:{window_start}
+    ratelimit:tpm:{model_group}:{user_id}:{window_start}
+
+This is O(1) per check (INCRBY + GET) instead of the previous per-request ZSET
+that required an O(n) ZRANGE + member parsing on every call.
 """
 
 import time
@@ -21,90 +30,59 @@ from .types import RateLimitConfig
 logger = get_core_logger()
 
 
-# Lua script for fixed window rate limiting
-# This script atomically:
-# 1. Removes entries from previous windows (before window_start)
-# 2. Counts current entries/tokens in the current window
-# 3. Adds new entry if under limit
-# Returns: (current_count, allowed, ttl)
-#
-# For sorted sets:
-# - Score = timestamp in milliseconds (for time-based window management)
-# - Member = "increment:entry_id:timestamp" (stores the count value in the member name)
-#
-# Window is FIXED: all entries with score >= window_start are in the current window
+# Lua script for fixed-window rate limiting on a plain integer counter.
+# Atomically: read the current count, reject if adding `increment` would exceed
+# `limit` (check-before-add, so no rollback is ever needed), otherwise INCRBY
+# and refresh the TTL. The key is window-stamped, so it represents exactly the
+# current clock-aligned window and self-expires.
+# Returns: {current_count, allowed (1/0), ttl}
 FIXED_WINDOW_SCRIPT = """
 local key = KEYS[1]
-local window_start = tonumber(ARGV[1])
-local current_time = tonumber(ARGV[2])
-local limit = tonumber(ARGV[3])
-local increment = tonumber(ARGV[4])
-local entry_id = ARGV[5]
-local ttl = tonumber(ARGV[6])
+local limit = tonumber(ARGV[1])
+local increment = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
 
--- Remove entries BEFORE the current window (score < window_start)
--- Using (window_start - 1) to exclude entries exactly at window_start
-redis.call('ZREMRANGEBYSCORE', key, 0, window_start - 1)
+local current = tonumber(redis.call('GET', key) or '0')
 
--- Get current count by parsing increment values from member names
--- Member format: "increment:entry_id:timestamp"
-local current = 0
-local members = redis.call('ZRANGE', key, 0, -1)
-for i, member in ipairs(members) do
-    -- Extract the increment value from the member name (first part before :)
-    local inc = tonumber(string.match(member, "^(%d+):"))
-    if inc then
-        current = current + inc
-    end
-end
-
--- Check if we're over the limit
 if current + increment > limit then
     return {current, 0, redis.call('TTL', key)}
 end
 
--- Add the new entry with timestamp as score, increment in member name
--- Member format: "increment:entry_id:timestamp" to ensure uniqueness
-local member = increment .. ':' .. entry_id .. ':' .. current_time
-redis.call('ZADD', key, current_time, member)
-
--- Set expiration on the key
+local updated = redis.call('INCRBY', key, increment)
 redis.call('EXPIRE', key, ttl)
-
--- Return current count (after adding) and allowed flag
-return {current + increment, 1, ttl}
+return {updated, 1, ttl}
 """
 
 
 class RedisRateLimiter:
     """
-    Redis-based rate limiter using sliding window algorithm.
-    
+    Redis-based fixed-window rate limiter.
+
     Provides:
-    - Atomic rate limit checks using Lua scripts
+    - Atomic O(1) rate limit checks using a Lua INCRBY counter
     - Support for both RPM and TPM limits
-    - Graceful degradation on Redis failures
+    - Graceful degradation on Redis failures (fail open)
     - Connection pooling for efficiency
     """
-    
+
     def __init__(self):
         self._pool: Optional[ConnectionPool] = None
         self._redis: Optional[aioredis.Redis] = None
         self._script_sha: Optional[str] = None
         self._initialized = False
         self._initialization_lock = asyncio.Lock()
-    
+
     async def initialize(self) -> bool:
         """
         Initialize Redis connection pool.
-        
+
         Returns:
             True if initialization was successful
         """
         async with self._initialization_lock:
             if self._initialized:
                 return True
-            
+
             try:
                 self._pool = ConnectionPool.from_url(
                     settings.REDIS_URL,
@@ -113,15 +91,15 @@ class RedisRateLimiter:
                     socket_connect_timeout=settings.REDIS_SOCKET_CONNECT_TIMEOUT,
                     decode_responses=True,
                 )
-                
+
                 self._redis = aioredis.Redis(connection_pool=self._pool)
-                
+
                 # Test connection
                 await self._redis.ping()
-                
+
                 # Load Lua script
                 self._script_sha = await self._redis.script_load(FIXED_WINDOW_SCRIPT)
-                
+
                 self._initialized = True
                 logger.info(
                     "Redis rate limiter initialized",
@@ -129,7 +107,7 @@ class RedisRateLimiter:
                     event_type="redis_limiter_init",
                 )
                 return True
-                
+
             except Exception as e:
                 logger.error(
                     "Failed to initialize Redis rate limiter",
@@ -138,7 +116,7 @@ class RedisRateLimiter:
                 )
                 self._initialized = False
                 return False
-    
+
     async def close(self) -> None:
         """Close Redis connections."""
         if self._redis:
@@ -147,34 +125,52 @@ class RedisRateLimiter:
             await self._pool.disconnect()
         self._initialized = False
         logger.info("Redis rate limiter closed", event_type="redis_limiter_close")
-    
+
     @asynccontextmanager
     async def _get_redis(self):
         """Get Redis connection with lazy initialization."""
         if not self._initialized:
             await self.initialize()
-        
+
         if not self._redis:
             raise RuntimeError("Redis not initialized")
-        
+
         yield self._redis
-    
-    def _get_key(self, user_id: str, key_type: str, model_group: Optional[str] = None) -> str:
+
+    @staticmethod
+    def _window_start(config: RateLimitConfig) -> int:
+        """Clock-aligned start (epoch seconds) of the current fixed window."""
+        now = int(time.time())
+        return (now // config.window_seconds) * config.window_seconds
+
+    def _get_key(
+        self,
+        user_id: str,
+        key_type: str,
+        model_group: Optional[str] = None,
+        window_start: Optional[int] = None,
+    ) -> str:
         """
-        Generate Redis key for rate limiting.
-        
+        Generate the window-stamped Redis key for rate limiting.
+
         Args:
             user_id: The user identifier
             key_type: Either 'rpm' or 'tpm'
             model_group: Optional model group name
-            
+            window_start: Clock-aligned window start (epoch seconds). Omitted only
+                          when building a SCAN prefix (see reset_user_limits).
+
         Returns:
             Redis key string
         """
         if model_group:
-            return f"ratelimit:{key_type}:{model_group}:{user_id}"
-        return f"ratelimit:{key_type}:{user_id}"
-    
+            base = f"ratelimit:{key_type}:{model_group}:{user_id}"
+        else:
+            base = f"ratelimit:{key_type}:{user_id}"
+        if window_start is None:
+            return base
+        return f"{base}:{window_start}"
+
     async def check_and_increment_rpm(
         self,
         user_id: str,
@@ -183,47 +179,35 @@ class RedisRateLimiter:
         request_id: Optional[str] = None,
     ) -> Tuple[int, int, bool]:
         """
-        Check and increment the RPM counter.
-        
+        Check and increment the RPM counter for the current window.
+
         Args:
             user_id: The user identifier
             config: Rate limit configuration
             model_group: Optional model group for separate limits
-            request_id: Unique identifier for this request
-            
+            request_id: Unused (kept for signature compatibility)
+
         Returns:
             Tuple of (current_count, limit, allowed)
         """
         try:
             async with self._get_redis() as redis:
-                key = self._get_key(user_id, "rpm", model_group)
-                
-                # Use fixed window boundaries aligned to clock intervals
-                # This ensures the window resets at predictable times (e.g., start of each minute)
-                current_time_seconds = int(time.time())
-                window_start_seconds = (current_time_seconds // config.window_seconds) * config.window_seconds
-                
-                # Convert to milliseconds for Redis storage
-                current_time = int(time.time() * 1000)
-                window_start = window_start_seconds * 1000  # Window boundary in milliseconds
-                
-                entry_id = request_id or str(current_time)
-                
+                window_start = self._window_start(config)
+                key = self._get_key(user_id, "rpm", model_group, window_start)
+                ttl = config.window_seconds + 10  # outlive the window by a small buffer
+
                 result = await redis.evalsha(
                     self._script_sha,
                     1,  # Number of keys
                     key,
-                    str(window_start),
-                    str(current_time),
-                    str(config.rpm),
-                    "1",  # Increment by 1 for RPM
-                    entry_id,
-                    str(config.window_seconds + 10),  # TTL with buffer
+                    str(config.rpm),  # limit
+                    "1",              # increment by 1 for RPM
+                    str(ttl),
                 )
-                
+
                 current_count, allowed, _ = result
                 return int(current_count), config.rpm, bool(allowed)
-                
+
         except Exception as e:
             logger.warning(
                 "RPM check failed, allowing request",
@@ -233,7 +217,7 @@ class RedisRateLimiter:
             )
             # Fail open - allow the request if Redis fails
             return 0, config.rpm, True
-    
+
     async def add_tokens(
         self,
         user_id: str,
@@ -243,34 +227,33 @@ class RedisRateLimiter:
         request_id: Optional[str] = None,
     ) -> bool:
         """
-        Add tokens to the TPM counter without checking limits.
-        
+        Add tokens to the TPM counter for the current window (no limit check).
+
         Used to record actual token usage after a request completes.
-        
+
         Args:
             user_id: The user identifier
             token_count: Number of tokens to add
             config: Rate limit configuration
             model_group: Optional model group
-            request_id: Unique identifier for this request
-            
+            request_id: Unused (kept for signature compatibility)
+
         Returns:
             True if successful
         """
         try:
             async with self._get_redis() as redis:
-                key = self._get_key(user_id, "tpm", model_group)
-                current_time = int(time.time() * 1000)
-                entry_id = f"{request_id or current_time}:actual"
-                
-                # Add tokens with timestamp as score, token count in member name
-                # Member format: "token_count:entry_id:timestamp"
-                member = f"{token_count}:{entry_id}:{current_time}"
-                await redis.zadd(key, {member: current_time})
-                await redis.expire(key, config.window_seconds + 10)
-                
+                window_start = self._window_start(config)
+                key = self._get_key(user_id, "tpm", model_group, window_start)
+                ttl = config.window_seconds + 10
+
+                pipe = redis.pipeline()
+                pipe.incrby(key, int(token_count))
+                pipe.expire(key, ttl)
+                await pipe.execute()
+
                 return True
-                
+
         except Exception as e:
             logger.warning(
                 "Failed to add tokens",
@@ -280,7 +263,7 @@ class RedisRateLimiter:
                 event_type="add_tokens_error",
             )
             return False
-    
+
     async def get_current_usage(
         self,
         user_id: str,
@@ -288,53 +271,31 @@ class RedisRateLimiter:
         model_group: Optional[str] = None,
     ) -> Tuple[int, int]:
         """
-        Get current usage counts without incrementing.
-        
+        Get current usage counts for the active window without incrementing.
+
+        Two O(1) GETs against the window-stamped counters.
+
         Args:
             user_id: The user identifier
             config: Rate limit configuration
             model_group: Optional model group
-            
+
         Returns:
             Tuple of (rpm_current, tpm_current)
         """
         try:
             async with self._get_redis() as redis:
-                # Use fixed window boundaries aligned to clock intervals
-                current_time_seconds = int(time.time())
-                window_start_seconds = (current_time_seconds // config.window_seconds) * config.window_seconds
-                window_start = window_start_seconds * 1000  # Convert to milliseconds
-                
-                rpm_key = self._get_key(user_id, "rpm", model_group)
-                tpm_key = self._get_key(user_id, "tpm", model_group)
-                
-                # Clean up old entries (before current window) and get members
+                window_start = self._window_start(config)
+                rpm_key = self._get_key(user_id, "rpm", model_group, window_start)
+                tpm_key = self._get_key(user_id, "tpm", model_group, window_start)
+
                 pipe = redis.pipeline()
-                pipe.zremrangebyscore(rpm_key, 0, window_start - 1)  # Remove entries before window start
-                pipe.zremrangebyscore(tpm_key, 0, window_start - 1)
-                pipe.zrange(rpm_key, 0, -1)  # Get all RPM members
-                pipe.zrange(tpm_key, 0, -1)  # Get all TPM members
-                
-                results = await pipe.execute()
-                
-                rpm_members = results[2] or []
-                tpm_members = results[3] or []
-                
-                # For RPM, each entry represents 1 request
-                rpm_count = len(rpm_members)
-                
-                # For TPM, parse increment from member names (format: "increment:entry_id:timestamp")
-                tpm_count = 0
-                for member in tpm_members:
-                    try:
-                        increment = int(member.split(':')[0])
-                        tpm_count += increment
-                    except (ValueError, IndexError):
-                        # Fallback: count as 1 if parsing fails
-                        tpm_count += 1
-                
-                return int(rpm_count), int(tpm_count)
-                
+                pipe.get(rpm_key)
+                pipe.get(tpm_key)
+                rpm_value, tpm_value = await pipe.execute()
+
+                return int(rpm_value or 0), int(tpm_value or 0)
+
         except Exception as e:
             logger.warning(
                 "Failed to get current usage",
@@ -343,37 +304,47 @@ class RedisRateLimiter:
                 event_type="get_usage_error",
             )
             return 0, 0
-    
+
     async def reset_user_limits(
         self,
         user_id: str,
         model_group: Optional[str] = None,
     ) -> bool:
         """
-        Reset rate limits for a user.
-        
+        Reset rate limits for a user by deleting their window-stamped counters.
+
+        Rare admin operation: SCANs the user's rpm/tpm key prefixes (all windows)
+        and deletes them. Hot-path checks never SCAN.
+
         Args:
             user_id: The user identifier
             model_group: Optional model group
-            
+
         Returns:
             True if successful
         """
         try:
             async with self._get_redis() as redis:
-                rpm_key = self._get_key(user_id, "rpm", model_group)
-                tpm_key = self._get_key(user_id, "tpm", model_group)
-                
-                await redis.delete(rpm_key, tpm_key)
-                
+                # Prefix without the window suffix, plus '*' to match every window.
+                prefixes = [
+                    self._get_key(user_id, "rpm", model_group),
+                    self._get_key(user_id, "tpm", model_group),
+                ]
+                deleted = 0
+                for prefix in prefixes:
+                    async for key in redis.scan_iter(match=f"{prefix}:*"):
+                        await redis.delete(key)
+                        deleted += 1
+
                 logger.info(
                     "User rate limits reset",
                     user_id=user_id,
                     model_group=model_group,
+                    deleted_keys=deleted,
                     event_type="rate_limits_reset",
                 )
                 return True
-                
+
         except Exception as e:
             logger.error(
                 "Failed to reset user limits",
@@ -382,11 +353,11 @@ class RedisRateLimiter:
                 event_type="reset_limits_error",
             )
             return False
-    
+
     async def health_check(self) -> dict:
         """
         Check Redis health status.
-        
+
         Returns:
             Health status dictionary
         """
@@ -394,7 +365,7 @@ class RedisRateLimiter:
             async with self._get_redis() as redis:
                 await redis.ping()
                 info = await redis.info("memory")
-                
+
                 return {
                     "status": "healthy",
                     "connected": True,
@@ -411,4 +382,3 @@ class RedisRateLimiter:
 
 # Singleton instance
 redis_limiter = RedisRateLimiter()
-
