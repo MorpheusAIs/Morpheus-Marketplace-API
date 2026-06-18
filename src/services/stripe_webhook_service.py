@@ -6,6 +6,7 @@ Handles:
 - invoice.paid: Subscription invoice payments
 - invoice.payment_failed: Failed payment attempts
 """
+import asyncio
 from typing import Optional, Tuple, Dict, Any
 from decimal import Decimal
 import stripe
@@ -345,7 +346,28 @@ class StripeWebhookService:
         )
         
         return True, "Credits added successfully"
-    
+
+    @staticmethod
+    def _subscription_ref(invoice: "stripe.Invoice") -> Tuple[Dict[str, Any], Optional[str]]:
+        """
+        Extract (subscription_metadata_snapshot, subscription_id) from an invoice.
+
+        Handles both invoice schemas: the legacy top-level fields and the
+        2025-03-31+ schema where they moved under ``invoice.parent``.
+        ``subscription_details.metadata`` is an immutable snapshot of the
+        subscription metadata captured at invoice finalization, so reading it
+        avoids a Stripe API round trip in the common case.
+        """
+        sub_details = invoice.get("subscription_details")
+        subscription_id = invoice.get("subscription")
+        if not sub_details:
+            parent = invoice.get("parent") or {}
+            sub_details = parent.get("subscription_details")
+        sub_details = sub_details or {}
+        if not subscription_id:
+            subscription_id = sub_details.get("subscription")
+        return (sub_details.get("metadata") or {}), subscription_id
+
     async def handle_invoice_paid(
         self,
         db: AsyncSession,
@@ -373,17 +395,29 @@ class StripeWebhookService:
         metadata = invoice.metadata or {}
         fallback_metadata = None
         
-        if not metadata.get("user_id") and invoice.get("subscription"):
-            try:
-                subscription = stripe.Subscription.retrieve(invoice.subscription)
-                fallback_metadata = subscription.metadata or {}
-            except stripe.error.StripeError as e:
-                logger.warning(
-                    "Failed to retrieve subscription metadata",
-                    stripe_subscription_id=invoice.subscription,
-                    error=str(e),
-                    **log_context,
-                )
+        if not metadata.get("user_id"):
+            # Prefer the subscription-metadata snapshot carried on the invoice
+            # (immutable, taken at finalization): no HTTP call in the common case.
+            snapshot_metadata, subscription_id = self._subscription_ref(invoice)
+            fallback_metadata = snapshot_metadata or None
+
+            # Only call the Stripe API if the snapshot lacked user_id, and run the
+            # synchronous SDK call OFF the event loop so the open webhook
+            # transaction and other in-flight requests (incl. streaming chat) are
+            # not frozen for up to the Stripe read timeout.
+            if not (fallback_metadata or {}).get("user_id") and subscription_id:
+                try:
+                    subscription = await asyncio.to_thread(
+                        stripe.Subscription.retrieve, subscription_id
+                    )
+                    fallback_metadata = subscription.metadata or {}
+                except stripe.error.StripeError as e:
+                    logger.warning(
+                        "Failed to retrieve subscription metadata",
+                        stripe_subscription_id=subscription_id,
+                        error=str(e),
+                        **log_context,
+                    )
         
         user, error = await self._get_user_from_metadata(
             db, metadata, fallback_metadata, log_context
@@ -448,16 +482,24 @@ class StripeWebhookService:
         metadata = invoice.metadata or {}
         user_id_str = metadata.get("user_id")
         
-        if not user_id_str and invoice.subscription:
-            try:
-                subscription = stripe.Subscription.retrieve(invoice.subscription)
-                user_id_str = (subscription.metadata or {}).get("user_id")
-            except stripe.error.StripeError as e:
-                logger.warning(
-                    "Failed to retrieve subscription metadata for failed payment",
-                    stripe_invoice_id=invoice_id,
-                    error=str(e),
-                )
+        if not user_id_str:
+            # Prefer the snapshot carried on the invoice (no HTTP); fall back to
+            # the Stripe API off the event loop so the sync SDK call cannot freeze
+            # the loop while the webhook transaction is open. Handles both schemas.
+            snapshot_metadata, subscription_id = self._subscription_ref(invoice)
+            user_id_str = (snapshot_metadata or {}).get("user_id")
+            if not user_id_str and subscription_id:
+                try:
+                    subscription = await asyncio.to_thread(
+                        stripe.Subscription.retrieve, subscription_id
+                    )
+                    user_id_str = (subscription.metadata or {}).get("user_id")
+                except stripe.error.StripeError as e:
+                    logger.warning(
+                        "Failed to retrieve subscription metadata for failed payment",
+                        stripe_invoice_id=invoice_id,
+                        error=str(e),
+                    )
         
         logger.warning(
             "Stripe webhook event failed",
