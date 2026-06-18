@@ -351,6 +351,8 @@ class BillingService:
             paid_holds_delta=-paid_hold,  # Negative (reduces paid_available)
             staking_delta=-staking_hold,  # Negative (reduces staking_available)
             auto_commit=False,
+            ensure_exists=False,   # row already locked above (for_update)
+            return_balance=False,  # result is discarded
         )
         
         # Commit both ledger entry and balance update atomically
@@ -481,6 +483,8 @@ class BillingService:
             paid_posted_delta=-paid_charge,  # Apply paid charge (negative)
             staking_delta=-original_hold_staking - staking_charge,  # Release staking hold + apply staking charge
             auto_commit=False,
+            ensure_exists=False,   # row ensured above; UPDATE locks it
+            return_balance=False,  # result is discarded
         )
         
         # Commit both ledger update and balance update atomically
@@ -565,6 +569,8 @@ class BillingService:
             paid_holds_delta=-original_hold_paid,  # Release paid hold (add back the negative)
             staking_delta=-original_hold_staking,  # Release staking hold (add back the negative)
             auto_commit=False,
+            ensure_exists=False,   # hold creation already ensured/locked the row
+            return_balance=False,  # result is discarded
         )
         
         # Commit both ledger update and balance update atomically
