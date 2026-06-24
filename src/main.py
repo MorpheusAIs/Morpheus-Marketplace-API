@@ -42,6 +42,10 @@ APP_START_TIME = None
 CONTAINER_ID = str(uuid.uuid4())
 APP_VERSION = get_version()
 
+# Handles to long-lived background tasks so they can be cancelled on shutdown
+_staking_sync_task = None
+_hold_reconciliation_task = None
+
 # Using our production-ready fixed route class
 app = FastAPI(
     title="Morpheus API Gateway",
@@ -397,7 +401,8 @@ async def startup_event():
     # Start the background tasks
     # Start the daily staking sync task
     try:
-        asyncio.create_task(daily_staking_sync())
+        global _staking_sync_task
+        _staking_sync_task = asyncio.create_task(daily_staking_sync())
         logger.info("Started background task for daily staking sync",
                    event_type="staking_sync_task_start")
     except Exception as e:
@@ -420,7 +425,8 @@ async def startup_event():
     
     # Start hold reconciliation loop (auto-void stale pending holds)
     try:
-        asyncio.create_task(hold_reconciliation_loop())
+        global _hold_reconciliation_task
+        _hold_reconciliation_task = asyncio.create_task(hold_reconciliation_loop())
         logger.info("Started background task for hold reconciliation",
                    interval_seconds=settings.HOLD_RECONCILIATION_INTERVAL_SECONDS,
                    max_pending_seconds=settings.HOLD_MAX_PENDING_SECONDS,
@@ -484,6 +490,26 @@ async def shutdown_event():
     except Exception as e:
         logger.warning("Error stopping session routing automation", error=str(e), event_type="session_routing_automation_stop_error")
     
+    # Cancel the fire-and-forget background loops
+    for task_name, task in (
+        ("staking_sync", _staking_sync_task),
+        ("hold_reconciliation", _hold_reconciliation_task),
+    ):
+        if task is None:
+            continue
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning("Error stopping background task",
+                          task=task_name, error=str(e),
+                          event_type="background_task_stop_error")
+        else:
+            logger.info("Background task stopped", task=task_name,
+                       event_type="background_task_stopped")
+    
     # Close rate limiting service
     try:
         await rate_limit_service.close()
@@ -512,6 +538,14 @@ async def shutdown_event():
         logger.info("Staking service HTTP client closed successfully", event_type="staking_service_shutdown")
     except Exception as e:
         logger.warning("Error closing staking service HTTP client", error=str(e), event_type="staking_service_shutdown_error")
+    
+    # Dispose the SQLAlchemy engine last, after all DB users are stopped, so the
+    # connection pool is closed cleanly on the way out.
+    try:
+        await engine.dispose()
+        logger.info("Database engine disposed", event_type="db_engine_disposed")
+    except Exception as e:
+        logger.warning("Error disposing database engine", error=str(e), event_type="db_engine_dispose_error")
     
     logger.info("Application shutdown complete", event_type="shutdown_complete")
 
