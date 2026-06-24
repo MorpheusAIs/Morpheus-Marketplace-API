@@ -26,6 +26,7 @@ from ..core.config import settings
 from ..core.logging_config import get_api_logger
 from ..db.models import WalletLink, CreditAccountBalance, LedgerStatus, LedgerEntryType
 from ..crud import credits as credits_crud
+from .cache_service import cache_service
 from .mor_pricing_service import get_mor_pricing_service
 from .mor_emission_service import get_mor_emission_service
 
@@ -460,6 +461,12 @@ class StakingService:
                     # Commit ledger entry + balance update atomically
                     await db.commit()
                     
+                    # Invalidate the Redis balance cache so the freshly granted
+                    # staking_available is not served stale for up to the TTL.
+                    # The for_update read above bypasses the cache, so without this
+                    # the write-through is skipped (audit L16). delete() fails open.
+                    await cache_service.delete("balance", f"user_balance:{user_id}")
+                    
                     users_processed += 1
                     wallets_updated += user_wallets_updated
                     
@@ -495,6 +502,7 @@ class StakingService:
                 stale_result = await db.execute(stale_query)
                 stale_balances = list(stale_result.scalars().all())
                 
+                zeroed_user_ids: List[int] = []
                 for balance in stale_balances:
                     if balance.user_id not in linked_user_ids:
                         balance.staking_daily_amount = Decimal("0")
@@ -503,6 +511,7 @@ class StakingService:
                         balance.is_staker = False
                         balance.updated_at = datetime.utcnow()
                         users_zeroed += 1
+                        zeroed_user_ids.append(balance.user_id)
                         
                         sync_logger.info(
                             "Zeroed staking balance for unlinked user",
@@ -512,6 +521,12 @@ class StakingService:
                 
                 if users_zeroed > 0:
                     await db.commit()
+                    
+                    # Invalidate the Redis balance cache for every zeroed user so
+                    # the now-zero staking_available isn't served stale (audit L16).
+                    for zeroed_user_id in zeroed_user_ids:
+                        await cache_service.delete("balance", f"user_balance:{zeroed_user_id}")
+                    
                     sync_logger.info(
                         "Zeroed staking balances for unlinked users",
                         users_zeroed=users_zeroed,
