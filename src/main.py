@@ -204,7 +204,7 @@ async def daily_staking_sync():
     Background task to sync staking data and update user balances daily.
     Runs at 0:05 UTC every day.
     """
-    from src.db.database import AsyncSessionLocal
+    from src.db.database import AsyncSessionLocal, advisory_xact_lock
     from datetime import datetime, timezone, timedelta
     import traceback
     
@@ -234,14 +234,26 @@ async def daily_staking_sync():
             
             staking_sync_logger.info("Starting daily staking sync", event_type="staking_sync_start")
             
-            # Run the sync
-            async with AsyncSessionLocal() as db:
-                summary = await staking_service.run_daily_sync(db)
-                staking_sync_logger.info(
-                    "Daily staking sync completed",
-                    **summary,
-                    event_type="staking_sync_complete"
-                )
+            # Leader election: every replica wakes at 00:05 UTC, but only the one
+            # that wins this advisory lock runs the sync. Without it, R replicas
+            # each run the full Builders-API pagination + per-user FOR UPDATE pass
+            # at the same second, creating a lock convoy on credit_account_balances
+            # shared with live billing (audit M24).
+            async with advisory_xact_lock("staking_sync") as is_leader:
+                if not is_leader:
+                    staking_sync_logger.info(
+                        "Skipping daily staking sync - another replica holds the leader lock",
+                        event_type="staking_sync_skipped_not_leader"
+                    )
+                else:
+                    # Run the sync
+                    async with AsyncSessionLocal() as db:
+                        summary = await staking_service.run_daily_sync(db)
+                        staking_sync_logger.info(
+                            "Daily staking sync completed",
+                            **summary,
+                            event_type="staking_sync_complete"
+                        )
                 
         except Exception as e:
             staking_sync_logger.error(
@@ -262,7 +274,7 @@ async def hold_reconciliation_loop():
     HOLD_MAX_PENDING_SECONDS is auto-voided and the affected users'
     balance caches are reconciled against the ledger.
     """
-    from src.db.database import AsyncSessionLocal
+    from src.db.database import AsyncSessionLocal, advisory_xact_lock
     from src.services.billing_service import billing_service
     import traceback
 
@@ -280,8 +292,17 @@ async def hold_reconciliation_loop():
     while True:
         await asyncio.sleep(interval)
         try:
-            async with AsyncSessionLocal() as db:
-                summary = await billing_service.reconcile_stale_holds(db, max_age)
+            # Leader election: only one replica reconciles stale holds per tick,
+            # so replicas don't redundantly scan/void the same holds (audit M24).
+            async with advisory_xact_lock("hold_reconciliation") as is_leader:
+                if not is_leader:
+                    recon_logger.debug(
+                        "Skipping hold reconciliation - another replica holds the leader lock",
+                        event_type="hold_reconciliation_skipped_not_leader",
+                    )
+                    continue
+                async with AsyncSessionLocal() as db:
+                    summary = await billing_service.reconcile_stale_holds(db, max_age)
 
             if summary["voided_count"] > 0:
                 recon_logger.warning(
