@@ -175,13 +175,11 @@ async def attempt_failover(
     #    best-first with a provider handshake per bid, so the dead
     #    provider is skipped automatically.
     try:
-        async with get_db() as db:
-            new_session_id = await session_routing_service.route_request(
-                db=db,
-                user_id=user.id,
-                requested_model=requested_model,
-                model_type="LLM",
-            )
+        new_session_id = await session_routing_service.route_request(
+            user_id=user.id,
+            requested_model=requested_model,
+            model_type="LLM",
+        )
     except Exception as e:
         failover_logger.error("Failover rerouting failed",
                               error=str(e),

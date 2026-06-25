@@ -56,15 +56,19 @@ class SessionRoutingService:
     Service for routing requests to sessions and managing session lifecycle.
     
     Thread-safety:
-    - Uses per-model locking to prevent race conditions
+    - On-chain session ops are serialized per replica on a single wallet lock
+      (the consumer wallet's nonce is shared across all models)
     - Database operations use row-level locking where needed
     """
     
     def __init__(self):
-        # Per-model locks for request routing
-        self._model_locks: Dict[str, asyncio.Lock] = {}
-        self._locks_lock = asyncio.Lock()
-        
+        # On-chain wallet serialization (per replica). A single consumer wallet
+        # signs every open/closeSession, so concurrent on-chain txs collide on
+        # nonce ("replacement transaction underpriced"). This lock serializes
+        # ALL on-chain session ops on this replica (opens AND closes), across
+        # models — nonce is per-wallet, not per-model.
+        self._wallet_lock = asyncio.Lock()
+
         # Automation loop control
         self._automation_task: Optional[asyncio.Task] = None
         self._shutdown_event = asyncio.Event()
@@ -75,13 +79,6 @@ class SessionRoutingService:
         
         logger.info("SessionRoutingService initialized",
                    event_type="session_routing_service_init")
-    
-    async def _get_model_lock(self, model_id: str) -> asyncio.Lock:
-        """Get or create a lock for a specific model."""
-        async with self._locks_lock:
-            if model_id not in self._model_locks:
-                self._model_locks[model_id] = asyncio.Lock()
-            return self._model_locks[model_id]
     
     def _get_preferred_models(self) -> set:
         """Get the set of preferred model IDs from configuration."""
@@ -95,27 +92,25 @@ class SessionRoutingService:
     
     async def route_request(
         self,
-        db: AsyncSession,
         user_id: int,
         requested_model: Optional[str] = None,
         model_type: str = "LLM"
     ) -> str:
         """
         Route an authorized request to an appropriate session.
-        
-        This is the main entry point for the request path.
-        Sessions are shared across users - user_id is only used for
-        private key lookup when opening new sessions.
-        
-        Args:
-            db: Database session
-            user_id: User ID for private key lookup when opening sessions
-            requested_model: Model name or blockchain ID requested
-            model_type: Type of model (LLM, EMBEDDINGS, TTS, STT)
-            
+
+        Main entry point for the request path. Sessions are shared across
+        users - user_id is only used for private key lookup when opening a new
+        session.
+
+        Manages its own short-lived DB connections and holds NO DB connection
+        while waiting on the wallet lock / the slow on-chain openSession call.
+        This means any number of concurrent requests can queue for an open
+        without pinning the DB pool (the wallet lock itself is the queue).
+
         Returns:
             str: Session ID to use for the request
-            
+
         Raises:
             NoSessionAvailableError: If no session could be acquired
             SessionOpenError: If session opening failed
@@ -125,54 +120,45 @@ class SessionRoutingService:
             requested_model=requested_model,
             model_type=model_type
         )
-        
+
         # Resolve model to blockchain ID
         model_id = await model_router.get_target_model(requested_model, type=model_type)
         route_logger = route_logger.bind(model_id=model_id)
-        
+
         route_logger.info("Routing request to session",
                          event_type="route_request_start")
-        
+
         # FAST PATH (lock-free): atomically claim an idle OPEN session for this
-        # model with a single UPDATE ... FOR UPDATE SKIP LOCKED. This replaces the
-        # old "take per-model asyncio.Lock -> SELECT all rows -> pick in Python ->
-        # separate UPDATE+COMMIT" sequence. The DB row lock (not an in-process
-        # lock) guarantees a session is handed to exactly one request, so it is
-        # correct across replicas, and it never holds a lock across the slow
-        # blockchain openSession() call.
-        claimed_id = await self._claim_idle_session(db, model_id)
+        # model with a single UPDATE ... FOR UPDATE SKIP LOCKED on its own
+        # short-lived connection. The DB row lock (not an in-process lock) hands
+        # a session to exactly one request, correct across replicas, and the
+        # connection is released immediately (never held across the open below).
+        async with get_db() as db:
+            claimed_id = await self._claim_idle_session(db, model_id)
         if claimed_id is not None:
             route_logger.info("Routed to idle session (atomic claim)",
                              session_id=claimed_id,
                              event_type="route_to_unutilized")
             return claimed_id
 
-        # OPEN PATH: no idle session is available -> open a new one. Opening is a
-        # paid on-chain transaction, so we serialize opens per model with the lock
-        # to avoid a thundering herd of duplicate opens. The fast path above no
-        # longer touches this lock, so a slow open only blocks other requests that
-        # *also* need a brand-new session for the same model (not every request).
-        # We re-claim once after acquiring the lock: while we waited, a concurrent
-        # opener may have created a session that has since been released.
-        # NOTE: if open latency under heavy scale-up becomes a problem, replace
-        # this lock with a bounded asyncio.Semaphore to cap (rather than serialize)
-        # concurrent on-chain opens per model.
-        model_lock = await self._get_model_lock(model_id)
-        async with model_lock:
-            claimed_id = await self._claim_idle_session(db, model_id)
-            if claimed_id is not None:
-                route_logger.info("Routed to idle session after lock wait (atomic claim)",
-                                 session_id=claimed_id,
-                                 event_type="route_to_unutilized_after_wait")
-                return claimed_id
+        # OPEN PATH: no idle session -> open a new paid on-chain session. The tx
+        # is serialized on the wallet lock inside _open_session_for_model (one
+        # consumer wallet -> one nonce sequence). NO DB connection is held while
+        # waiting on that lock, so any number of concurrent openers may queue
+        # without exhausting the DB pool. The session is created already assigned
+        # to this request (active_requests=1), so it is never momentarily visible
+        # as idle - and thus claimable by another request - between insert and
+        # use.
+        route_logger.info("No idle session for model, opening a new one",
+                         event_type="no_idle_session")
+        return await self._open_session_for_model(
+            model_id=model_id,
+            model_name=requested_model,
+            model_type=model_type,
+            user_id=user_id,
+            initial_active_requests=1,
+        )
 
-            route_logger.info("No idle session for model, opening a new one",
-                             event_type="no_idle_session")
-            session = await self._open_session_for_model(
-                db, model_id, requested_model, model_type, user_id
-            )
-            return await self._assign_request_to_session(db, session.id)
-    
     async def release_session(self, db: AsyncSession, session_id: str) -> None:
         """
         Release a session after request completion.
@@ -274,7 +260,11 @@ class SessionRoutingService:
     async def _close_invalidated_session(self, session_id: str) -> None:
         """Best-effort proxy-router close for an invalidated session."""
         try:
-            await proxy_router_service.closeSession(session_id)
+            # Same wallet, same nonce sequence as opens -> serialize on the
+            # wallet lock so a failover storm's closes don't collide with its
+            # opens (or each other).
+            async with self._wallet_lock:
+                await proxy_router_service.closeSession(session_id)
             logger.info("Invalidated session closed on proxy router",
                         session_id=session_id,
                         event_type="invalidated_session_closed")
@@ -302,11 +292,10 @@ class SessionRoutingService:
                 ...
             # Session automatically released on exit
         """
-        async with get_db() as db:
-            session_id = await self.route_request(
-                db, user_id, requested_model, model_type
-            )
-        
+        session_id = await self.route_request(
+            user_id, requested_model, model_type
+        )
+
         try:
             yield session_id
         finally:
@@ -319,30 +308,39 @@ class SessionRoutingService:
     
     async def _open_session_for_model(
         self,
-        db: AsyncSession,
         model_id: str,
         model_name: Optional[str] = None,
         model_type: str = "LLM",
-        user_id: Optional[int] = None
-    ) -> RoutedSession:
+        user_id: Optional[int] = None,
+        initial_active_requests: int = 0,
+    ) -> str:
         """
-        Open a new session for a model.
-        
-        Sessions are shared across users. The user_id is only used for
-        private key lookup when calling the proxy router.
-        
-        Note: DB row is only created after successful session opening (no OPENING state).
-        
+        Open a new on-chain session for a model and persist its row.
+
+        Sessions are shared across users. The user_id is only used for private
+        key lookup when calling the proxy router.
+
+        Holds NO DB connection while it waits on the wallet lock / the slow
+        on-chain openSession call - the row insert uses its own short-lived
+        connection afterwards. This lets any number of concurrent openers queue
+        on the wallet lock without pinning the DB pool.
+
+        DB row is only created after a successful open (no OPENING state).
+
         Args:
-            db: Database session
             model_id: Blockchain model ID (hex string)
             model_name: Human-readable model name
             model_type: Type of model
             user_id: Optional user ID for private key lookup (uses fallback if not provided)
-            
+            initial_active_requests: active_requests to create the row with. The
+                request path passes 1 so the session is created already assigned
+                to its caller (never momentarily idle / claimable by another
+                request between insert and use); the automation path passes 0 to
+                create an idle, pre-warmed session.
+
         Returns:
-            RoutedSession: The newly opened session
-            
+            str: The blockchain session id of the newly opened session.
+
         Raises:
             SessionOpenError: If session opening fails
         """
@@ -350,35 +348,41 @@ class SessionRoutingService:
             model_id=model_id,
             model_name=model_name
         )
-        
+
         open_logger.info("Opening new session for model",
                         event_type="session_open_start")
-        
+
         session_duration = settings.SESSION_DEFAULT_DURATION_SECONDS
         expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=session_duration)
-        
+
         try:
             # Call proxy router to open session
             # Uses user's private key if provided, otherwise uses fallback key
             open_logger.info("Calling proxy router to open session",
                            user_id=user_id,
                            event_type="proxy_open_session_start")
-            
-            response = await proxy_router_service.openSession(
-                target_model=model_id,
-                session_duration=session_duration,
-                failover=False,
-                direct_payment=False
-            )
-            
+
+            # Serialize the on-chain tx on the wallet lock: one consumer wallet
+            # signs every session tx, so concurrent opens collide on nonce. No DB
+            # connection is held across this wait/call (the row insert below uses
+            # its own short-lived session), so unbounded concurrent openers can
+            # queue here without exhausting the DB pool.
+            async with self._wallet_lock:
+                response = await proxy_router_service.openSession(
+                    target_model=model_id,
+                    session_duration=session_duration,
+                    failover=False,
+                    direct_payment=False
+                )
+
             blockchain_session_id = response.get("sessionID")
-            
+
             if not blockchain_session_id:
                 raise SessionOpenError(
                     "No session ID returned from proxy router",
                     model_id=model_id
                 )
-            
+
             # Create session record only after successful open
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             endpoint = "/v1/chat/completions"
@@ -386,44 +390,51 @@ class SessionRoutingService:
                 endpoint = "/v1/embeddings"
             elif model_type == "AUTOMATION":
                 endpoint = ""
-            session = RoutedSession(
-                id=blockchain_session_id,
-                model_id=model_id,
-                model_name=model_name,
-                state=SessionState.OPEN,
-                expires_at=expires_at,
-                active_requests=0,
-                created_at=now,
-                updated_at=now,
-                endpoint=endpoint
-            )
-            
-            db.add(session)
-            await db.commit()
-            await db.refresh(session)
-            
+
+            # Persist on a fresh short-lived connection. Create the row already
+            # assigned (active_requests=initial_active_requests) so a request-path
+            # session (1) is never visible as idle - and thus claimable by a
+            # concurrent request via _claim_idle_session - between insert and use.
+            async with get_db() as db:
+                session = RoutedSession(
+                    id=blockchain_session_id,
+                    model_id=model_id,
+                    model_name=model_name,
+                    state=SessionState.OPEN,
+                    expires_at=expires_at,
+                    active_requests=initial_active_requests,
+                    created_at=now,
+                    updated_at=now,
+                    endpoint=endpoint
+                )
+                db.add(session)
+                await db.commit()
+
             open_logger.info("Session opened successfully",
                            session_id=blockchain_session_id,
                            event_type="session_opened")
-            
-            return session
-            
+
+            return blockchain_session_id
+
+        except SessionOpenError:
+            # Already a clean domain error (e.g. no session id returned).
+            raise
         except proxy_router_service.ProxyRouterServiceError as e:
             open_logger.error("Proxy router error opening session",
                             error=str(e),
                             event_type="session_open_proxy_error")
-            
+
             raise SessionOpenError(
                 f"Failed to open session: {e.message}",
                 model_id=model_id
             ) from e
-            
+
         except Exception as e:
             open_logger.error("Error opening session",
                             error=str(e),
                             event_type="session_open_error",
                             exc_info=True)
-            
+
             raise SessionOpenError(
                 f"Failed to open session: {str(e)}",
                 model_id=model_id
@@ -462,9 +473,12 @@ class SessionRoutingService:
                          event_type="session_close_start")
         
         try:
-            # Call proxy router to close session
-            await proxy_router_service.closeSession(session.id)
-            
+            # Call proxy router to close session. Serialize on the wallet lock:
+            # the consumer wallet's nonce is shared with every other on-chain
+            # session op on this replica.
+            async with self._wallet_lock:
+                await proxy_router_service.closeSession(session.id)
+
             # Mark as CLOSED
             session.state = SessionState.CLOSED
             session.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -499,41 +513,6 @@ class SessionRoutingService:
                              exc_info=True)
             return False
     
-    async def _assign_request_to_session(
-        self,
-        db: AsyncSession,
-        session_id: str
-    ) -> str:
-        """
-        Assign a request to a session (increment active_requests).
-        
-        Args:
-            db: Database session
-            session_id: Session ID to assign to
-            
-        Returns:
-            str: The session ID
-        """
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        
-        # Atomic increment of active_requests and update last_used_at
-        await db.execute(
-            update(RoutedSession)
-            .where(RoutedSession.id == session_id)
-            .values(
-                active_requests=RoutedSession.active_requests + 1,
-                last_used_at=now,
-                updated_at=now
-            )
-        )
-        await db.commit()
-        
-        logger.debug("Request assigned to session",
-                    session_id=session_id,
-                    event_type="request_assigned")
-
-        return session_id
-
     async def _claim_idle_session(
         self,
         db: AsyncSession,
@@ -759,7 +738,6 @@ class SessionRoutingService:
                 
                 try:
                     await self._open_session_for_model(
-                        db=db,
                         model_id=model_id,
                         model_name=None,
                         model_type="AUTOMATION",
@@ -824,7 +802,6 @@ class SessionRoutingService:
                                   event_type="preferred_all_utilized")
                 try:
                     await self._open_session_for_model(
-                        db=db,
                         model_id=model_id,
                         model_name=None,
                         model_type="LLM",
@@ -884,10 +861,12 @@ class SessionRoutingService:
             session.state = SessionState.EXPIRED
             session.updated_at = now
             
-            # Still try to close on proxy router
+            # Still try to close on proxy router (serialized on the wallet lock
+            # with all other on-chain session ops to avoid nonce collisions).
             try:
-                await proxy_router_service.closeSession(session.id)
-                
+                async with self._wallet_lock:
+                    await proxy_router_service.closeSession(session.id)
+
             except Exception as e:
                 logger.warning("Error closing expired session on proxy",
                              session_id=session.id,
