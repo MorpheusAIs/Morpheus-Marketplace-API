@@ -151,23 +151,35 @@ async def update_balance(
     staking_daily_amount: Optional[Decimal] = None,
     staking_refresh_date: Optional[date] = None,
     auto_commit: bool = True,
-) -> CreditAccountBalance:
+    ensure_exists: bool = True,
+    return_balance: bool = True,
+) -> Optional[CreditAccountBalance]:
     """
     Update account balance using SQL-level atomic arithmetic.
-    
+
     Uses ``UPDATE ... SET column = column + delta`` to prevent lost-update race
     conditions under concurrent access.  Python-level read-modify-write is NOT
     used for delta operations.
-    
+
     Deltas are added to existing values via server-side expressions.
     Optional values (staking_daily_amount, staking_refresh_date) replace if provided.
-    
+
     Args:
         auto_commit: If False, the UPDATE is executed but not committed.
                      Caller is responsible for committing the transaction.
+        ensure_exists: If True (default), ensure the balance row exists before
+                     updating. Hot-path callers that already fetched/locked the
+                     row in the same transaction pass False to skip the redundant
+                     read + cache work — and to avoid get_or_create_balance's
+                     mid-flight commit() inside an auto_commit=False transaction.
+        return_balance: If True (default), re-read and return the updated row.
+                     Callers that discard the result pass False to skip the extra
+                     SELECT, in which case this returns None.
     """
-    # Ensure the record exists (no-op for existing users)
-    await get_or_create_balance(db, user_id)
+    # Ensure the record exists (no-op for existing users). Skipped by hot-path
+    # callers that already hold the locked row in this transaction.
+    if ensure_exists:
+        await get_or_create_balance(db, user_id)
     
     # Build SQL UPDATE with server-side arithmetic for deltas.
     # This is atomic at the database level – concurrent transactions each see
@@ -202,10 +214,17 @@ async def update_balance(
         .values(**values)
     )
     await db.execute(stmt)
-    
+
     if auto_commit:
         await db.commit()
-    
+
+    # Invalidate balance cache since it changed
+    cache_key = f"user_balance:{user_id}"
+    await cache_service.delete("balance", cache_key)
+
+    if not return_balance:
+        return None
+
     # Expire any stale ORM-cached object and re-read the updated row
     # (the raw UPDATE bypasses ORM identity map, so cached objects are stale)
     result = await db.execute(
@@ -213,13 +232,7 @@ async def update_balance(
         .where(CreditAccountBalance.user_id == user_id)
         .execution_options(populate_existing=True)
     )
-    balance = result.scalar_one()
-    
-    # Invalidate balance cache since it changed
-    cache_key = f"user_balance:{user_id}"
-    await cache_service.delete("balance", cache_key)
-    
-    return balance
+    return result.scalar_one()
 
 
 async def set_staking_daily_amount(db: AsyncSession, user_id: int, amount: Decimal) -> CreditAccountBalance:
