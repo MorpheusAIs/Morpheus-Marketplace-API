@@ -638,9 +638,8 @@ async def _handle_session_retry(
                 state=SessionState.EXPIRED,
             )
 
-            # Route to a new session
+            # Route to a new session (route_request manages its own DB session)
             new_session_id = await session_routing_service.route_request(
-                db=db,
                 user_id=user.id,
                 requested_model=requested_model,
                 model_type="LLM",

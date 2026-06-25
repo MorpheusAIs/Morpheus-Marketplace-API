@@ -102,13 +102,11 @@ async def create_audio_transcription(
                     requested_model=requested_model,
                     event_type="session_routing_start"
                 )
-                async with get_db() as db:
-                    session_id = await session_routing_service.route_request(
-                        db=db,
-                        user_id=user.id,
-                        requested_model=requested_model,
-                        model_type='STT'
-                    )
+                session_id = await session_routing_service.route_request(
+                    user_id=user.id,
+                    requested_model=requested_model,
+                    model_type='STT'
+                )
                 
                 if session_id:
                     transcription_logger.info(
@@ -358,13 +356,11 @@ async def create_audio_speech(
                     requested_model=requested_model,
                     event_type="session_routing_start"
                 )
-                async with get_db() as db:
-                    session_id = await session_routing_service.route_request(
-                        db=db,
-                        user_id=user.id,
-                        requested_model=requested_model,
-                        model_type='TTS'
-                    )
+                session_id = await session_routing_service.route_request(
+                    user_id=user.id,
+                    requested_model=requested_model,
+                    model_type='TTS'
+                )
                 
                 if session_id:
                     speech_logger.info(
