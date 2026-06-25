@@ -23,7 +23,7 @@ from sqlalchemy import select, update, func, and_, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import RoutedSession, SessionState
-from ..db.database import get_db, AsyncSessionLocal
+from ..db.database import get_db, advisory_xact_lock
 from ..core.config import settings
 from ..core.model_routing import model_router
 from ..core.logging_config import get_api_logger
@@ -704,8 +704,19 @@ class SessionRoutingService:
                 auto_logger.debug("Running automation cycle",
                                 event_type="automation_cycle_start")
                 
-                async with get_db() as db:
-                    await self._run_automation_cycle(db)
+                # Leader election: only one replica runs the scaling cycle per
+                # tick. Without this, every replica's loop wakes on the same
+                # shared state and can open/close duplicate paid blockchain
+                # sessions (see efficiency audit H15/H16).
+                async with advisory_xact_lock("session_automation") as is_leader:
+                    if not is_leader:
+                        auto_logger.debug(
+                            "Skipping automation cycle - another replica holds the leader lock",
+                            event_type="automation_cycle_skipped_not_leader")
+                        continue
+                    
+                    async with get_db() as db:
+                        await self._run_automation_cycle(db)
                 
             except asyncio.CancelledError:
                 break

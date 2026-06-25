@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy import text
 from typing import AsyncGenerator
 from contextlib import asynccontextmanager
 from src.core.config import settings
@@ -53,6 +54,46 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
         finally:
             await session.close()
+
+# Cluster-wide leader election for in-process background loops
+@asynccontextmanager
+async def advisory_xact_lock(lock_name: str) -> AsyncGenerator[bool, None]:
+    """
+    Try to acquire a cluster-wide PostgreSQL advisory lock for the duration of
+    the context, so only one replica runs a given background job at a time.
+
+    Usage:
+        async with advisory_xact_lock("staking_sync") as is_leader:
+            if not is_leader:
+                return  # another replica owns this run
+            ...  # do the work
+
+    Yields True if this process acquired the lock, False otherwise.
+
+    Implementation notes:
+    - Uses a transaction-scoped advisory lock
+      (``pg_try_advisory_xact_lock(hashtext(:name))``) held on a dedicated
+      connection for the duration of the context.
+    - Transaction scope is required on a pooled asyncpg engine: a session-scoped
+      advisory lock (``pg_advisory_lock``) can outlive the work and be released
+      on — or leak across — a different pooled connection. The xact lock is
+      always released when this transaction ends (commit, rollback, or
+      connection drop), so a crashed leader never wedges the rest of the fleet.
+    - The lock is held on its own connection; the actual job should run on
+      separate ``get_db()`` / ``AsyncSessionLocal()`` connections so its own
+      commits do not release the lock.
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            result = await session.execute(
+                text("SELECT pg_try_advisory_xact_lock(hashtext(:name))"),
+                {"name": lock_name},
+            )
+            yield bool(result.scalar())
+        finally:
+            # Rollback ends the transaction, releasing the xact-scoped lock.
+            await session.rollback()
+
 
 # FastAPI dependency version (for use with Depends())
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
