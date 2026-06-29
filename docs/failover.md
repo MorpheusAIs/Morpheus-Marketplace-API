@@ -4,9 +4,18 @@ Two separate mechanisms, both bounded to exactly one retry per request:
 
 ## 1. Provider failover (different provider)
 
-Applies only when the provider becomes **unavailable during a session**:
-connection refused, dial/read timeouts, provider death, proxy 5xx,
-gateway↔proxy transport failures.
+Applies only when the provider becomes **unreachable during a session** — a
+*transport* failure: connection refused / can't connect or write to provider,
+provider closed the connection, provider not found, read timeout, LB 502/503/504,
+or a gateway↔proxy transport failure.
+
+It deliberately does **not** trigger when the provider *answered* with an
+application/config error — e.g. `api adapter not found` (bid is misconfigured)
+or an upstream `EOF` mid-prompt (the bid's backend failed). Those arrive as a
+bare `5xx` wrapped in the generic `provider request failed: ...` envelope;
+retrying them on a fresh session cannot fix a broken bid and only churns
+sessions (open → fail → early on-chain close → reopen), so a plain `5xx` is no
+longer sufficient on its own — a transport signature is required.
 
 1. The `routed_sessions` row is marked `FAILED` (it will never be routed to
    again) and closed on the proxy-router in the background (best-effort;
