@@ -184,7 +184,12 @@ class Settings(BaseSettings):
     SESSION_DEFAULT_DURATION_SECONDS: int = Field(default=int(os.getenv("SESSION_DEFAULT_DURATION_SECONDS", "1800")))
     # Comma-separated list of preferred models (keep at least one idle session)
     SESSION_PREFERRED_MODELS: str = Field(default=os.getenv("SESSION_PREFERRED_MODELS", ""))
-    
+    # Adaptive on-chain wallet throttle: after a nonce conflict is observed on a
+    # session open/close, on-chain ops serialize on the wallet lock for this many
+    # seconds (sliding; each new conflict re-arms it). 0 disables the throttle
+    # (always concurrent). The happy path is never serialized.
+    SESSION_ONCHAIN_THROTTLE_COOLDOWN_SECONDS: float = Field(default=float(os.getenv("SESSION_ONCHAIN_THROTTLE_COOLDOWN_SECONDS", "20")))
+
     # Direct Model Fetching Settings (replaces model sync)
     ACTIVE_MODELS_URL: str = Field(default=os.getenv("ACTIVE_MODELS_URL", "https://active.dev.mor.org/active_models.json"))
     DEFAULT_FALLBACK_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_MODEL", "mistral-31-24b"))

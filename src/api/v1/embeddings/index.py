@@ -96,14 +96,12 @@ async def create_embeddings(
                        api_key_id=db_api_key.id,
                        requested_model=requested_model,
                        event_type="session_routing_start")
-            async with get_db() as db:
-                session_id = await session_routing_service.route_request(
-                    db=db,
-                    user_id=user.id,
-                    requested_model=requested_model,
-                    model_type='EMBEDDINGS'
-                )
-            
+            session_id = await session_routing_service.route_request(
+                user_id=user.id,
+                requested_model=requested_model,
+                model_type='EMBEDDINGS'
+            )
+
             embeddings_logger.info("Session routed successfully",
                         request_id=request_id,
                         session_id=session_id,

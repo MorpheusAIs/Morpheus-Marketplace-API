@@ -10,6 +10,7 @@ at runtime/CI against the real database.
 """
 import os
 import sys
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -43,66 +44,55 @@ def _claim_result(value):
 
 # ---------------------------------------------------------------------------
 # route_request control flow
+#
+# route_request no longer takes a `db` param — it manages its own short-lived
+# connections (so it holds none while waiting on the wallet lock). It opens at
+# most one claim attempt, then opens a new session created already-assigned
+# (no separate _assign step, no re-claim).
 # ---------------------------------------------------------------------------
 
 
-async def test_fast_path_returns_claimed_session_without_lock_or_open(service, mock_db):
-    """An idle session is claimed lock-free; no open, single claim attempt."""
+def _patch_get_db(db):
+    @asynccontextmanager
+    async def _fake_get_db():
+        yield db
+    return patch("src.services.session_routing_service.get_db", _fake_get_db)
+
+
+async def test_fast_path_returns_claimed_session_without_open(service, mock_db):
+    """An idle session is claimed lock-free; no open."""
     service._claim_idle_session = AsyncMock(return_value="0xidle")
     service._open_session_for_model = AsyncMock()
-    service._assign_request_to_session = AsyncMock()
 
-    with patch(
+    with _patch_get_db(mock_db), patch(
         "src.services.session_routing_service.model_router.get_target_model",
         new_callable=AsyncMock,
         return_value="0xmodel",
     ):
-        session_id = await service.route_request(mock_db, user_id=1, requested_model="m")
+        session_id = await service.route_request(user_id=1, requested_model="m")
 
     assert session_id == "0xidle"
     service._claim_idle_session.assert_awaited_once_with(mock_db, "0xmodel")
     service._open_session_for_model.assert_not_awaited()
-    service._assign_request_to_session.assert_not_awaited()
 
 
-async def test_open_path_opens_new_session_when_none_idle(service, mock_db):
-    """Two misses (fast path + re-claim under lock) -> open + assign."""
-    service._claim_idle_session = AsyncMock(side_effect=[None, None])
-    new_session = MagicMock()
-    new_session.id = "0xnew"
-    service._open_session_for_model = AsyncMock(return_value=new_session)
-    service._assign_request_to_session = AsyncMock(return_value="0xnew")
+async def test_open_path_opens_assigned_session_when_none_idle(service, mock_db):
+    """Fast-path miss -> open a new session, created already assigned (active_requests=1)."""
+    service._claim_idle_session = AsyncMock(return_value=None)
+    service._open_session_for_model = AsyncMock(return_value="0xnew")
 
-    with patch(
+    with _patch_get_db(mock_db), patch(
         "src.services.session_routing_service.model_router.get_target_model",
         new_callable=AsyncMock,
         return_value="0xmodel",
     ):
-        session_id = await service.route_request(mock_db, user_id=1, requested_model="m")
+        session_id = await service.route_request(user_id=1, requested_model="m")
 
     assert session_id == "0xnew"
-    assert service._claim_idle_session.await_count == 2
+    service._claim_idle_session.assert_awaited_once()
     service._open_session_for_model.assert_awaited_once()
-    service._assign_request_to_session.assert_awaited_once_with(mock_db, "0xnew")
-
-
-async def test_reclaim_after_lock_wait_avoids_redundant_open(service, mock_db):
-    """Fast path misses, but a session freed up while waiting on the lock:
-    the re-claim succeeds and we must NOT open another session."""
-    service._claim_idle_session = AsyncMock(side_effect=[None, "0xfreed"])
-    service._open_session_for_model = AsyncMock()
-    service._assign_request_to_session = AsyncMock()
-
-    with patch(
-        "src.services.session_routing_service.model_router.get_target_model",
-        new_callable=AsyncMock,
-        return_value="0xmodel",
-    ):
-        session_id = await service.route_request(mock_db, user_id=1, requested_model="m")
-
-    assert session_id == "0xfreed"
-    assert service._claim_idle_session.await_count == 2
-    service._open_session_for_model.assert_not_awaited()
+    _, kwargs = service._open_session_for_model.call_args
+    assert kwargs.get("initial_active_requests") == 1
 
 
 # ---------------------------------------------------------------------------

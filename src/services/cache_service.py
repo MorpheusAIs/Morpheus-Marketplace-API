@@ -20,7 +20,7 @@ database", so this is correctness-safe.
 
 import json
 import asyncio
-from typing import Optional, Any, Dict, Callable, TypeVar
+from typing import Optional, Any, Dict, TypeVar
 from contextlib import asynccontextmanager
 
 import redis.asyncio as aioredis
@@ -397,118 +397,6 @@ class CacheService:
                 event_type="cache_delete_error",
             )
             return False
-
-    async def get_or_fetch(
-        self,
-        entity_type: str,
-        identifier: str,
-        fetch_fn: Callable[[], Any],
-        serializer: Optional[Callable[[Any], Dict[str, Any]]] = None,
-        ttl_seconds: Optional[int] = None,
-    ) -> Optional[Any]:
-        """
-        Read-through cache pattern: Get from cache, or fetch and cache.
-
-        This is the main method to use for caching - it implements the full
-        read-through pattern with automatic cache population.
-
-        Args:
-            entity_type: Type of entity
-            identifier: Unique identifier
-            fetch_fn: Async function to fetch data on cache miss
-            serializer: Optional function to serialize fetched data for caching
-            ttl_seconds: Optional TTL override
-
-        Returns:
-            The entity (either from cache or freshly fetched)
-        """
-        # Try cache first
-        cached = await self.get(entity_type, identifier)
-        if cached is not None:
-            # Cache hit - return cached data
-            # Note: Data is already deserialized from JSON
-            return cached
-
-        # Cache miss - fetch from source
-        try:
-            fetched = await fetch_fn()
-
-            if fetched is None:
-                # Source returned None - don't cache
-                return None
-
-            # Serialize for caching if serializer provided
-            if serializer:
-                cache_data = serializer(fetched)
-            elif isinstance(fetched, dict):
-                # Already a dict - use as-is
-                cache_data = fetched
-            else:
-                # Can't cache this - return without caching
-                logger.warning(
-                    "Cannot cache non-dict data without serializer",
-                    entity_type=entity_type,
-                    event_type="cache_skip_no_serializer",
-                )
-                return fetched
-
-            # Cache the fetched data
-            await self.set(entity_type, identifier, cache_data, ttl_seconds)
-
-            return fetched
-
-        except Exception as e:
-            logger.error(
-                "Fetch function failed in read-through cache",
-                entity_type=entity_type,
-                error=str(e),
-                event_type="cache_fetch_error",
-            )
-            # Return None on fetch errors
-            return None
-
-    async def invalidate_pattern(self, pattern: str) -> int:
-        """
-        Invalidate all keys matching a pattern.
-
-        WARNING: Use sparingly - SCAN can be expensive on large datasets.
-
-        Args:
-            pattern: Redis key pattern (e.g., "cache:user:*")
-
-        Returns:
-            Number of keys deleted
-        """
-        try:
-            async with self._get_redis() as redis:
-                if redis is None:
-                    # Caching disabled or circuit open - nothing to invalidate
-                    return 0
-
-                deleted = 0
-
-                # Use SCAN to avoid blocking Redis
-                async for key in redis.scan_iter(match=pattern):
-                    await redis.delete(key)
-                    deleted += 1
-
-                logger.info(
-                    "Cache pattern invalidated",
-                    pattern=pattern,
-                    deleted_count=deleted,
-                    event_type="cache_pattern_invalidate",
-                )
-                return deleted
-
-        except Exception as e:
-            self._note_op_error(e)
-            logger.error(
-                "Cache pattern invalidation failed",
-                pattern=pattern,
-                error=str(e),
-                event_type="cache_pattern_invalidate_error",
-            )
-            return 0
 
     def get_stats(self) -> Dict[str, int]:
         """Get cache statistics."""
