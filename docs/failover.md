@@ -4,26 +4,23 @@ Two separate mechanisms, both bounded to exactly one retry per request:
 
 ## 1. Provider failover (different provider)
 
-Applies only when the provider becomes **unreachable during a session** — a
-*transport* failure: connection refused / can't connect or write to provider,
-provider closed the connection, provider not found, read timeout, LB 502/503/504,
-or a gateway↔proxy transport failure.
+Applies only when the provider becomes **unavailable during a session**
+(connection refused, dial/read timeouts, provider death, proxy 5xx,
+gateway↔proxy transport failures) **and the model has an alternate bid**.
 
-It deliberately does **not** trigger when the provider *answered* with an
-application/config error — e.g. `api adapter not found` (bid is misconfigured)
-or an upstream `EOF` mid-prompt (the bid's backend failed). Those arrive as a
-bare `5xx` wrapped in the generic `provider request failed: ...` envelope;
-retrying them on a fresh session cannot fix a broken bid and only churns
-sessions (open → fail → early on-chain close → reopen), so a plain `5xx` is no
-longer sufficient on its own — a transport signature is required.
-
-1. The `routed_sessions` row is marked `FAILED` (it will never be routed to
-   again) and closed on the proxy-router in the background (best-effort;
-   close works against a dead provider via the self-signed user report, and
-   the proxy-router's expiry handler is the backstop).
-2. The model must have **more than one** rated bid
-   (`GET blockchain/models/{id}/bids/rated`), otherwise the original error
-   is surfaced with no retry.
+1. **Alternate-bid check first.** The model must have **more than one** rated
+   bid (`GET blockchain/models/{id}/bids/rated`). If it has only one bid there
+   is nowhere to fail over to, so the session is **left OPEN** (NOT invalidated
+   or closed early): it rides to its natural on-chain expiry, the user's MOR is
+   **not** locked, and the original error is surfaced with no retry. This is
+   the pre-failover behavior and avoids the open→fail→early-close→reopen churn
+   (the bulk of it, since the dead single-bid legacy models drive ~98% of
+   failover attempts).
+2. With a sibling bid present, the `routed_sessions` row is marked `FAILED`
+   (it will never be routed to again) and closed on the proxy-router in the
+   background (best-effort; close works against a dead provider via the
+   self-signed user report, and the proxy-router's expiry handler is the
+   backstop).
 3. A fresh session is opened by model: the proxy-router tries bids
    best-first with a per-bid provider handshake, so the dead provider is
    skipped automatically and the session lands on the surviving provider.

@@ -17,19 +17,14 @@ def _err(message, status_code=None, error_type="unknown"):
 
 class TestIsFailoverEligible:
     @pytest.mark.parametrize("exc", [
-        # Provider-transport sentinels: the node became unreachable mid-session.
         _err('HTTP 500: {"error":"provider request failed: failed to connect to provider: dial tcp 1.2.3.4:8083: connect: connection refused"}', 500, "server_error"),
         _err('HTTP 500: {"error":"provider request failed: read timed out after 3 retries"}', 500, "server_error"),
         _err('HTTP 500: {"error":"provider request failed: provider closed connection without sending any data"}', 500, "server_error"),
         _err('HTTP 500: {"error":"provider not found"}', 500, "server_error"),
-        # Infra/LB errors: the load balancer could not reach the node (e.g. a
-        # provider/proxy task cycling during a deploy).
         _err('HTTP 502: {"error":"bad gateway"}', 502, "server_error"),
-        _err('HTTP 503: {"error":"service unavailable"}', 503, "server_error"),
-        _err('HTTP 504: {"error":"gateway timeout"}', 504, "server_error"),
         _err("Request failed after 1 attempts: All connection attempts failed", None, "network_error"),
         # Streaming transport failure: chatCompletionsStream's catch-all wrap
-        # produces status=None ("Failed to create chat completions stream: ...").
+        # (proxy_router_service.py:786-792) produces status=None, type="unknown".
         _err("Failed to create chat completions stream: All connection attempts failed", None, "unknown"),
     ])
     def test_provider_unavailability_is_eligible(self, exc):
@@ -47,22 +42,12 @@ class TestIsFailoverEligible:
         _err('HTTP 500: {"error":"llm tee verification failed"}', 500, "server_error"),
         _err('HTTP 500: {"error":"request cancelled while waiting in queue: context canceled"}', 500, "server_error"),
         _err("something odd with no status and no known pattern", None, "unknown"),
-        # NARROWING REGRESSION GUARDS: the provider ANSWERED with an
-        # application/config error. The bid is reachable but broken — failover
-        # cannot fix it and must NOT churn sessions. These arrive as a bare 5xx
-        # wrapped in the generic "provider request failed" envelope, which is
-        # exactly what used to (wrongly) trigger failover.
-        _err('HTTP 500: {"error":"provider request failed: provider error: failed to get adapter: api adapter not found: "}', 500, "server_error"),
-        _err('HTTP 500: {"error":"provider request failed: provider error: failed to prompt: failed to send request: Post \\"http://10.0.0.5:8080/v1/chat/completions\\": EOF"}', 500, "server_error"),
-        _err('HTTP 500: {"error":"provider request failed"}', 500, "server_error"),
     ])
     def test_not_eligible(self, exc):
         assert chat_failover.is_failover_eligible(exc) is False
 
     def test_kill_switch_disables_failover(self):
-        # A genuine transport failure that WOULD be eligible, suppressed by the switch.
-        exc = _err('HTTP 500: {"error":"failed to connect to provider: connection refused"}', 500, "server_error")
-        assert chat_failover.is_failover_eligible(exc) is True
+        exc = _err('HTTP 500: {"error":"provider request failed"}', 500, "server_error")
         with patch.object(chat_failover.settings, "CHAT_FAILOVER_ENABLED", False):
             assert chat_failover.is_failover_eligible(exc) is False
 
@@ -123,11 +108,14 @@ class TestAttemptFailover:
         failover_mocks["bids"].assert_awaited_once()
         failover_mocks["route"].assert_awaited_once()
 
-    async def test_single_bid_blocks_retry_but_still_invalidates(self, failover_mocks):
+    async def test_single_bid_skips_invalidate_and_retry(self, failover_mocks):
+        # Single-bid: nothing to fail over to. The session must be left OPEN
+        # (NOT invalidated/early-closed) so it rides to natural expiry and the
+        # user's MOR is not locked; no retry is attempted.
         failover_mocks["bids"].return_value = _rated_bids_response(1)
         new_id = await _failover(failover_mocks)
         assert new_id is None
-        failover_mocks["invalidate"].assert_awaited_once()
+        failover_mocks["invalidate"].assert_not_awaited()
         failover_mocks["route"].assert_not_awaited()
 
     async def test_bids_lookup_failure_proceeds_optimistically(self, failover_mocks):

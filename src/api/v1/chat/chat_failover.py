@@ -2,18 +2,18 @@
 Gateway-owned provider failover.
 
 Failover = open a new session with a DIFFERENT provider. It applies ONLY
-when the provider becomes UNREACHABLE during a session — i.e. a transport
-failure (conn refused / write failure / provider closed the connection /
-provider-task gone / read timeout / LB 502-504). On such a failure the
-gateway marks the dead RoutedSession FAILED, opens a fresh session for the
-same model (the proxy-router's per-bid handshake skips the dead provider),
-and the caller retries the prompt exactly once.
+when the provider becomes unavailable during a session (conn refused /
+timeouts / 5xx / provider death) AND the model has an alternate bid to fail
+over to. On such a failure the gateway marks the dead RoutedSession FAILED,
+opens a fresh session for the same model (the proxy-router's per-bid
+handshake skips the dead provider), and the caller retries the prompt
+exactly once.
 
-It deliberately does NOT trigger on errors where the provider ANSWERED with
-an application/config error (e.g. "api adapter not found", an upstream EOF
-mid-prompt). Those mean the bid is reachable but misconfigured/broken;
-retrying them on a fresh session cannot fix the model and previously caused
-an open/fail/early-close reopen storm (see narrowing rationale below).
+Single-bid models are left untouched: with no alternate bid there is nothing
+to fail over to, so the session is NOT invalidated or closed early (which
+would lock the user's MOR for ~1 day). It rides to natural expiry and the
+original error is surfaced — the pre-failover behavior. The alternate-bid
+check therefore runs BEFORE any invalidation.
 
 Session expiry ("session expired") is a SEPARATE mechanism — the renewal
 flow in the chat handlers — and is explicitly EXCLUDED here.
@@ -44,49 +44,29 @@ NON_FAILOVER_ERROR_PATTERNS = [
     "request cancelled while waiting in queue",
 ]
 
-# Transport-level signatures meaning a node became UNREACHABLE — the only
-# class of failure that warrants opening a new session on a different bid.
-#
-# These are the proxy-router's provider-transport sentinels (see
-# proxy-router/internal/proxyapi/proxy_sender.go) plus the gateway<->proxy
-# stream-setup transport wrapper. A provider that ANSWERS with an
-# application/config error (e.g. "api adapter not found", or an upstream
-# "...EOF" mid-prompt) is reachable and is NOT listed here on purpose:
-# failover cannot fix a broken/misconfigured bid, and treating those as
-# provider-unavailability caused a reopen storm (open -> immediate fail ->
-# early on-chain close (MOR lock) -> reopen) that amplified session volume.
-#
-# NB: the generic envelope "provider request failed: ..." was REMOVED — the
-# proxy-router wraps EVERY provider error in it (including adapter-not-found
-# and upstream EOF), so it matched far more than genuine provider death.
-PROVIDER_TRANSPORT_PATTERNS = [
+# Provider-unavailability signatures from the proxy-router (see
+# proxy-router/internal/proxyapi/proxy_sender.go sentinel errors).
+# Used when no status code is available on the exception.
+PROVIDER_FAILURE_PATTERNS = [
     "failed to connect to provider",
     "failed to write to provider",
+    "provider request failed",
     "provider closed connection",
     "provider not found",
     "read timed out",
-    # chatCompletionsStream wraps gateway<->proxy transport failures with
-    # status=None ("Failed to create chat completions stream: <transport
-    # error>"). App errors arrive as ProxyRouterServiceError with a status and
-    # are re-raised before this wrap, so this only catches real transport.
+    # chatCompletionsStream wraps transport errors with status=None and
+    # error_type="unknown" (proxy_router_service.py:786-792). Mid-stream
+    # wraps match too, but those are excluded by the chunk_count==0 gate.
     "failed to create chat completions stream",
 ]
 
 
 def is_failover_eligible(exc: proxy_router_service.ProxyRouterServiceError) -> bool:
-    """Decide whether a proxy error means the provider became UNREACHABLE.
+    """Decide whether a proxy error means the provider is unavailable.
 
-    Eligible (transport failure -> a different bid may work):
-      - LB infra errors (502/503/504): the node could not be reached.
-      - gateway<->proxy transport failure (error_type == "network_error").
-      - proxy-router provider-transport sentinels (PROVIDER_TRANSPORT_PATTERNS).
-
-    NOT eligible:
-      - session expired/not found (handled by the separate renewal mechanism),
-      - user/4xx errors, TEE failures, client-cancelled requests,
-      - a bare 5xx whose body is an application/config error (e.g.
-        "api adapter not found", upstream "EOF") — the bid is reachable but
-        broken; failover just churns sessions and locks MOR.
+    Eligible: provider unreachable / 5xx / timeouts / transport failures.
+    Not eligible: session expired/not found (separate renewal mechanism),
+    user/4xx errors, TEE failures, client-cancelled requests.
     """
     if not settings.CHAT_FAILOVER_ENABLED:
         return False
@@ -96,20 +76,14 @@ def is_failover_eligible(exc: proxy_router_service.ProxyRouterServiceError) -> b
         return False
 
     status = exc.status_code
-    # Caller/config errors (4xx) never warrant failover.
     if status is not None and 400 <= status < 500:
         return False
-    # Infra-level gateway errors: the load balancer could not reach the node
-    # (e.g. a provider/proxy task cycling during a deploy) — transport failure.
-    if status in (502, 503, 504):
+    if status is not None and status >= 500:
         return True
-    # No/other status: gateway<->proxy transport failure.
+    # No status: gateway<->proxy transport failure, or wrapped errors.
     if exc.error_type == "network_error":
         return True
-    # A bare 5xx is NOT sufficient on its own; require a transport signature.
-    # The provider may have ANSWERED with an application error, which failover
-    # cannot fix.
-    return any(p in message for p in PROVIDER_TRANSPORT_PATTERNS)
+    return any(p in message for p in PROVIDER_FAILURE_PATTERNS)
 
 
 async def _release_new_session_quiet(session_id: str, logger) -> None:
@@ -163,10 +137,18 @@ async def attempt_failover(
     failure_reason: str = "",
 ) -> Optional[str]:
     """
-    Gateway-owned provider failover: mark the dead session FAILED (with a
-    background on-chain close), verify the model has an alternate bid,
-    and route to a fresh session for the same model — the proxy-router's
-    per-bid handshake lands it on a surviving provider.
+    Gateway-owned provider failover: when a model has an ALTERNATE bid, mark
+    the dead session FAILED (with a background on-chain close) and route to a
+    fresh session for the same model — the proxy-router's per-bid handshake
+    lands it on a surviving provider.
+
+    Single-bid guardrail (checked FIRST): if the model has no alternate bid,
+    there is nowhere to fail over to. We do NOT invalidate or early-close the
+    session — that would lock the user's MOR for ~1 day (an early on-chain
+    close pushes the unused stake into userStakesOnHold) and force a fresh,
+    equally-dead session on the next prompt. Instead we leave the session
+    OPEN so it rides to its natural expiry (stake returns, no lock) and
+    surface the original error to the caller — the pre-failover behavior.
 
     Returns the new session id (already assigned to this request), or None
     when failover is not possible (caller surfaces the original error).
@@ -181,12 +163,25 @@ async def attempt_failover(
         model_id=model_id,
         request_id=request_id,
     )
+
+    # 1. Single-bid guardrail FIRST. With no alternate bid there is nothing to
+    #    fail over to, so do nothing destructive: leave the session OPEN to
+    #    expire naturally (no early on-chain close, no MOR lock). Must run
+    #    BEFORE invalidate so single-bid models don't pay the early-close cost.
+    if model_id and not await _has_alternate_bids(model_id, failover_logger):
+        failover_logger.warning(
+            "No alternate bid available; leaving session to expire naturally",
+            failure_reason=failure_reason[:300],
+            event_type="failover_no_alternate_bids")
+        return None
+
     failover_logger.warning("Attempting gateway failover to a new provider",
                             failure_reason=failure_reason[:300],
                             event_type="failover_triggered")
 
-    # 1. Unpin the dead session so no request routes to it again.
-    #    Do this even if we end up unable to retry.
+    # 2. A sibling bid exists and is worth trying. Unpin the dead session so no
+    #    request routes to it again (marks FAILED + best-effort background
+    #    on-chain close).
     try:
         async with get_db() as db:
             await session_routing_service.invalidate_session(
@@ -196,12 +191,6 @@ async def attempt_failover(
         failover_logger.error("Failover invalidation failed",
                               error=str(e),
                               event_type="failover_invalidate_failed")
-        return None
-
-    # 2. Only retry when the model has >1 bid (spec guardrail).
-    if model_id and not await _has_alternate_bids(model_id, failover_logger):
-        failover_logger.warning("No alternate bid available, not retrying",
-                                event_type="failover_no_alternate_bids")
         return None
 
     # 3. Open/route a fresh session by model. The proxy-router tries bids
