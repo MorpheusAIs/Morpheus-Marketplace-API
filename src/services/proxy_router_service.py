@@ -117,6 +117,30 @@ def _is_non_retriable_error(response_text: str) -> bool:
     return any(pattern in text_lower for pattern in NON_RETRIABLE_ERROR_PATTERNS)
 
 
+# On-chain nonce-conflict signatures from the proxy-router signer. Mirror of the
+# proxy-router's internal/lib/nonce_manager.go IsNonceError patterns. A burst of
+# concurrent on-chain txs from the single consumer wallet collides on nonce; the
+# gateway reacts by throttling the wallet (see SessionRoutingService._run_onchain).
+NONCE_ERROR_PATTERNS = [
+    "nonce too low",
+    "nonce too high",
+    "replacement transaction underpriced",
+    "transaction underpriced",
+    "already known",
+    "invalid nonce",
+    "incorrect nonce",
+    "nonce error",
+]
+
+
+def is_nonce_error(message: str) -> bool:
+    """Return True if a proxy-router error indicates an on-chain nonce conflict."""
+    if not message:
+        return False
+    text_lower = message.lower()
+    return any(pattern in text_lower for pattern in NONCE_ERROR_PATTERNS)
+
+
 
 
 async def _execute_request(
@@ -234,7 +258,12 @@ async def _execute_request(
             elif status_code >= 400:
                 error_type = "client_error"
             
-            non_retriable = _is_non_retriable_error(response.text)
+            # Nonce conflicts are non-retriable HERE: re-sending the identical
+            # request never fixes a nonce race. Surfacing it immediately lets the
+            # gateway's adaptive wallet throttle engage and do a serialized retry
+            # (SessionRoutingService._run_onchain) instead of amplifying the
+            # storm with blind backoff retries of a colliding tx.
+            non_retriable = _is_non_retriable_error(response.text) or is_nonce_error(response.text)
             if non_retriable:
                 req_logger.error(
                     "Non-retriable error detected, skipping remaining retries",

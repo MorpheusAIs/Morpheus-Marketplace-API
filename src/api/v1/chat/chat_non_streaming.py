@@ -138,14 +138,13 @@ async def _create_new_session(
                         event_type="session_invalidate_skipped",
                     )
 
-            # Route to a new session
+            # Route to a new session (route_request manages its own DB session)
             new_session_id = await session_routing_service.route_request(
-                db=db,
                 user_id=user.id,
                 requested_model=requested_model,
                 model_type="LLM",
             )
-            
+
             if not new_session_id:
                 logger.error(
                     "Failed to route to new session",

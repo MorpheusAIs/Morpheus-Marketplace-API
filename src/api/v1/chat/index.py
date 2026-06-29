@@ -332,19 +332,17 @@ async def _resolve_session(
     )
     
     try:
-        async with get_db() as db:
-            routed_session_id = await session_routing_service.route_request(
-                db=db,
-                user_id=user.id,
-                requested_model=requested_model,
-                model_type="LLM"
-            )
-            chat_logger.info(
-                "Session routed successfully",
-                session_id=routed_session_id,
-                event_type="session_routing_success",
-            )
-            return routed_session_id
+        routed_session_id = await session_routing_service.route_request(
+            user_id=user.id,
+            requested_model=requested_model,
+            model_type="LLM"
+        )
+        chat_logger.info(
+            "Session routed successfully",
+            session_id=routed_session_id,
+            event_type="session_routing_success",
+        )
+        return routed_session_id
     except NoSessionAvailableError as e:
         raise SessionNotFoundError() from e
     except SessionOpenError as e:
