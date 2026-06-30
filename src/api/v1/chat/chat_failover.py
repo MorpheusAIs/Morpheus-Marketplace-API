@@ -3,10 +3,17 @@ Gateway-owned provider failover.
 
 Failover = open a new session with a DIFFERENT provider. It applies ONLY
 when the provider becomes unavailable during a session (conn refused /
-timeouts / 5xx / provider death). On such a failure the gateway marks the
-dead RoutedSession FAILED, opens a fresh session for the same model (the
-proxy-router's per-bid handshake skips the dead provider), and the caller
-retries the prompt exactly once.
+timeouts / 5xx / provider death) AND the model has an alternate bid to fail
+over to. On such a failure the gateway marks the dead RoutedSession FAILED,
+opens a fresh session for the same model (the proxy-router's per-bid
+handshake skips the dead provider), and the caller retries the prompt
+exactly once.
+
+Single-bid models are left untouched: with no alternate bid there is nothing
+to fail over to, so the session is NOT invalidated or closed early (which
+would lock the user's MOR for ~1 day). It rides to natural expiry and the
+original error is surfaced — the pre-failover behavior. The alternate-bid
+check therefore runs BEFORE any invalidation.
 
 Session expiry ("session expired") is a SEPARATE mechanism — the renewal
 flow in the chat handlers — and is explicitly EXCLUDED here.
@@ -130,10 +137,18 @@ async def attempt_failover(
     failure_reason: str = "",
 ) -> Optional[str]:
     """
-    Gateway-owned provider failover: mark the dead session FAILED (with a
-    background on-chain close), verify the model has an alternate bid,
-    and route to a fresh session for the same model — the proxy-router's
-    per-bid handshake lands it on a surviving provider.
+    Gateway-owned provider failover: when a model has an ALTERNATE bid, mark
+    the dead session FAILED (with a background on-chain close) and route to a
+    fresh session for the same model — the proxy-router's per-bid handshake
+    lands it on a surviving provider.
+
+    Single-bid guardrail (checked FIRST): if the model has no alternate bid,
+    there is nowhere to fail over to. We do NOT invalidate or early-close the
+    session — that would lock the user's MOR for ~1 day (an early on-chain
+    close pushes the unused stake into userStakesOnHold) and force a fresh,
+    equally-dead session on the next prompt. Instead we leave the session
+    OPEN so it rides to its natural expiry (stake returns, no lock) and
+    surface the original error to the caller — the pre-failover behavior.
 
     Returns the new session id (already assigned to this request), or None
     when failover is not possible (caller surfaces the original error).
@@ -148,12 +163,25 @@ async def attempt_failover(
         model_id=model_id,
         request_id=request_id,
     )
+
+    # 1. Single-bid guardrail FIRST. With no alternate bid there is nothing to
+    #    fail over to, so do nothing destructive: leave the session OPEN to
+    #    expire naturally (no early on-chain close, no MOR lock). Must run
+    #    BEFORE invalidate so single-bid models don't pay the early-close cost.
+    if model_id and not await _has_alternate_bids(model_id, failover_logger):
+        failover_logger.warning(
+            "No alternate bid available; leaving session to expire naturally",
+            failure_reason=failure_reason[:300],
+            event_type="failover_no_alternate_bids")
+        return None
+
     failover_logger.warning("Attempting gateway failover to a new provider",
                             failure_reason=failure_reason[:300],
                             event_type="failover_triggered")
 
-    # 1. Unpin the dead session so no request routes to it again.
-    #    Do this even if we end up unable to retry.
+    # 2. A sibling bid exists and is worth trying. Unpin the dead session so no
+    #    request routes to it again (marks FAILED + best-effort background
+    #    on-chain close).
     try:
         async with get_db() as db:
             await session_routing_service.invalidate_session(
@@ -163,12 +191,6 @@ async def attempt_failover(
         failover_logger.error("Failover invalidation failed",
                               error=str(e),
                               event_type="failover_invalidate_failed")
-        return None
-
-    # 2. Only retry when the model has >1 bid (spec guardrail).
-    if model_id and not await _has_alternate_bids(model_id, failover_logger):
-        failover_logger.warning("No alternate bid available, not retrying",
-                                event_type="failover_no_alternate_bids")
         return None
 
     # 3. Open/route a fresh session by model. The proxy-router tries bids
