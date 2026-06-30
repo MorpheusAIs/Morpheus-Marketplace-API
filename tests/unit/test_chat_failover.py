@@ -108,11 +108,14 @@ class TestAttemptFailover:
         failover_mocks["bids"].assert_awaited_once()
         failover_mocks["route"].assert_awaited_once()
 
-    async def test_single_bid_blocks_retry_but_still_invalidates(self, failover_mocks):
+    async def test_single_bid_skips_invalidate_and_retry(self, failover_mocks):
+        # Single-bid: nothing to fail over to. The session must be left OPEN
+        # (NOT invalidated/early-closed) so it rides to natural expiry and the
+        # user's MOR is not locked; no retry is attempted.
         failover_mocks["bids"].return_value = _rated_bids_response(1)
         new_id = await _failover(failover_mocks)
         assert new_id is None
-        failover_mocks["invalidate"].assert_awaited_once()
+        failover_mocks["invalidate"].assert_not_awaited()
         failover_mocks["route"].assert_not_awaited()
 
     async def test_bids_lookup_failure_proceeds_optimistically(self, failover_mocks):
