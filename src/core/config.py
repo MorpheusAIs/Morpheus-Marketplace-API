@@ -190,6 +190,32 @@ class Settings(BaseSettings):
     # (always concurrent). The happy path is never serialized.
     SESSION_ONCHAIN_THROTTLE_COOLDOWN_SECONDS: float = Field(default=float(os.getenv("SESSION_ONCHAIN_THROTTLE_COOLDOWN_SECONDS", "20")))
 
+    # Active-Models Feedback (RUM) — publishes per-bid health observations to the
+    # same S3 bucket the 05-active_models Lambda reads, which narrows the
+    # published active-models list (see docs/active-models-rum-canary.md).
+    # An empty bucket disables the publisher (safe no-op default).
+    ACTIVE_MODELS_FEEDBACK_BUCKET: str = Field(default=os.getenv("ACTIVE_MODELS_FEEDBACK_BUCKET", ""))
+    ACTIVE_MODELS_FEEDBACK_KEY: str = Field(default=os.getenv("ACTIVE_MODELS_FEEDBACK_KEY", "feedback/apigw-bid-health.json"))
+    # How often the publisher aggregates + writes the feedback file (seconds).
+    RUM_FEEDBACK_INTERVAL_SECONDS: int = Field(default=int(os.getenv("RUM_FEEDBACK_INTERVAL_SECONDS", "300")))
+    # Look-back window for per-bid RUM aggregation (hours).
+    RUM_FEEDBACK_WINDOW_HOURS: int = Field(default=int(os.getenv("RUM_FEEDBACK_WINDOW_HOURS", "4")))
+
+    # Canary — forces usage of orphan models (no session opened in the window) by
+    # opening a short 5-min session + tiny prompt, so RUM captures otherwise-cold
+    # models. Purely a usage trigger: it emits NO separate signal, it just makes
+    # models get tried so the RUM publisher above scores them. Natural expiry
+    # (no early close, no MOR lock). See docs/active-models-rum-canary.md.
+    CANARY_ENABLED: bool = Field(default=os.getenv("CANARY_ENABLED", "false").lower() == "true")
+    # Sweep cadence AND the orphan-idle threshold (a model with no session opened
+    # in this window is canaried).
+    CANARY_SWEEP_INTERVAL_HOURS: int = Field(default=int(os.getenv("CANARY_SWEEP_INTERVAL_HOURS", "4")))
+    # Max concurrent in-flight probes (guards the shared wallet's nonce/balance).
+    CANARY_MAX_CONCURRENCY: int = Field(default=int(os.getenv("CANARY_MAX_CONCURRENCY", "3")))
+    # Canary session length. 300s = the SessionStorage.sol MIN_SESSION_DURATION
+    # contract floor, so this is the shortest naturally-expiring session possible.
+    CANARY_SESSION_DURATION_SECONDS: int = Field(default=int(os.getenv("CANARY_SESSION_DURATION_SECONDS", "300")))
+
     # Direct Model Fetching Settings (replaces model sync)
     ACTIVE_MODELS_URL: str = Field(default=os.getenv("ACTIVE_MODELS_URL", "https://active.dev.mor.org/active_models.json"))
     DEFAULT_FALLBACK_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_MODEL", "mistral-31-24b"))
