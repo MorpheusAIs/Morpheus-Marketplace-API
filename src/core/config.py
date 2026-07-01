@@ -201,6 +201,21 @@ class Settings(BaseSettings):
     # Look-back window for per-bid RUM aggregation (hours).
     RUM_FEEDBACK_WINDOW_HOURS: int = Field(default=int(os.getenv("RUM_FEEDBACK_WINDOW_HOURS", "4")))
 
+    # Canary — forces usage of orphan models (no session opened in the window) by
+    # opening a short 5-min session + tiny prompt, so RUM captures otherwise-cold
+    # models. Purely a usage trigger: it emits NO separate signal, it just makes
+    # models get tried so the RUM publisher above scores them. Natural expiry
+    # (no early close, no MOR lock). See docs/active-models-rum-canary.md.
+    CANARY_ENABLED: bool = Field(default=os.getenv("CANARY_ENABLED", "false").lower() == "true")
+    # Sweep cadence AND the orphan-idle threshold (a model with no session opened
+    # in this window is canaried).
+    CANARY_SWEEP_INTERVAL_HOURS: int = Field(default=int(os.getenv("CANARY_SWEEP_INTERVAL_HOURS", "4")))
+    # Max concurrent in-flight probes (guards the shared wallet's nonce/balance).
+    CANARY_MAX_CONCURRENCY: int = Field(default=int(os.getenv("CANARY_MAX_CONCURRENCY", "3")))
+    # Canary session length. 300s = the SessionStorage.sol MIN_SESSION_DURATION
+    # contract floor, so this is the shortest naturally-expiring session possible.
+    CANARY_SESSION_DURATION_SECONDS: int = Field(default=int(os.getenv("CANARY_SESSION_DURATION_SECONDS", "300")))
+
     # Direct Model Fetching Settings (replaces model sync)
     ACTIVE_MODELS_URL: str = Field(default=os.getenv("ACTIVE_MODELS_URL", "https://active.dev.mor.org/active_models.json"))
     DEFAULT_FALLBACK_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_MODEL", "mistral-31-24b"))

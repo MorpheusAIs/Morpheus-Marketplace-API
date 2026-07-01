@@ -8,8 +8,10 @@ Lambda reads. The Lambda uses this to NARROW its ``ping_provider`` universe:
 ping proves a provider's router is reachable, this proves whether the bid's model
 actually answers. See docs/active-models-rum-canary.md.
 
-This publishes RUM only (organic traffic). The canary is a later phase; its
-observations will merge into the same file under a separate ``canary`` key.
+This publishes RUM only. The canary does NOT emit its own signal — it merely
+forces usage of otherwise-cold models (a short session + tiny prompt), so a
+canaried model's outcome shows up here as ordinary RUM. RUM is therefore the
+single source of answerability signal in the feedback file.
 
 Design notes:
 - The gateway publishes OBSERVATIONS + categorized reasons only; it does not

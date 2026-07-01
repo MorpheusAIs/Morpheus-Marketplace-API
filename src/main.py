@@ -46,6 +46,7 @@ APP_VERSION = get_version()
 _staking_sync_task = None
 _hold_reconciliation_task = None
 _rum_feedback_task = None
+_canary_task = None
 
 # Using our production-ready fixed route class
 app = FastAPI(
@@ -389,6 +390,54 @@ async def rum_feedback_loop():
             )
 
 
+async def canary_loop():
+    """
+    Background task that forces usage of orphan models so RUM can score them
+    (see docs/active-models-rum-canary.md). Each sweep opens a short, real
+    session + tiny prompt against every model with no session opened in the
+    window; the outcome is captured as ordinary RUM by rum_feedback_loop. The
+    canary emits no signal of its own.
+
+    Leader-elected so only one replica sweeps per tick. The sweep runs INSIDE
+    the advisory lock (its opens/prompts use their own short-lived connections,
+    so their commits don't release the lock) — this serializes sweeps across
+    replicas and avoids double-canarying the same orphans.
+    """
+    from src.db.database import advisory_xact_lock
+    from src.services.canary_service import canary_service
+    import traceback
+
+    canary_logger = get_core_logger().bind(component="canary")
+    interval = settings.CANARY_SWEEP_INTERVAL_HOURS * 3600
+
+    canary_logger.info(
+        "Starting canary sweep loop",
+        interval_hours=settings.CANARY_SWEEP_INTERVAL_HOURS,
+        session_duration_seconds=settings.CANARY_SESSION_DURATION_SECONDS,
+        max_concurrency=settings.CANARY_MAX_CONCURRENCY,
+        event_type="canary_start",
+    )
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with advisory_xact_lock("canary_sweep") as is_leader:
+                if not is_leader:
+                    canary_logger.debug(
+                        "Skipping canary sweep - another replica holds the leader lock",
+                        event_type="canary_skipped_not_leader",
+                    )
+                    continue
+                await canary_service.sweep()
+        except Exception as e:
+            canary_logger.error(
+                "Error in canary loop",
+                error=str(e),
+                traceback=traceback.format_exc(),
+                event_type="canary_error",
+            )
+
+
 @app.on_event("startup")
 async def startup_event():
     """
@@ -516,6 +565,24 @@ async def startup_event():
         logger.info("RUM feedback publisher disabled (no ACTIVE_MODELS_FEEDBACK_BUCKET)",
                    event_type="rum_feedback_disabled")
 
+    # Start canary sweep (forces usage of orphan models -> RUM). Config-gated.
+    if settings.CANARY_ENABLED:
+        try:
+            global _canary_task
+            _canary_task = asyncio.create_task(canary_loop())
+            logger.info("Started background task for canary sweep",
+                       interval_hours=settings.CANARY_SWEEP_INTERVAL_HOURS,
+                       session_duration_seconds=settings.CANARY_SESSION_DURATION_SECONDS,
+                       event_type="canary_task_start")
+        except Exception as e:
+            logger.error("Failed to start canary task",
+                        error=str(e),
+                        event_type="canary_task_error")
+            logger.warning("Continuing startup without canary sweep")
+    else:
+        logger.info("Canary sweep disabled (CANARY_ENABLED is false)",
+                   event_type="canary_disabled")
+
     # Initialize rate limiting service
     if settings.RATE_LIMIT_ENABLED:
         try:
@@ -574,6 +641,7 @@ async def shutdown_event():
         ("staking_sync", _staking_sync_task),
         ("hold_reconciliation", _hold_reconciliation_task),
         ("rum_feedback", _rum_feedback_task),
+        ("canary", _canary_task),
     ):
         if task is None:
             continue

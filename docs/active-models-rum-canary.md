@@ -1,6 +1,18 @@
 # Active-Models Curation: Per-Bid Attribution, RUM, and Canary
 
-Status: **design / for review** (Alex + team mark-up). Nothing here is built yet.
+Status: **implemented (gateway side), behind flags** — attribution + RUM
+publisher + canary sweep are built in the API service; the `05-active_models`
+Lambda consumer is the remaining piece. RUM publishing is gated on
+`ACTIVE_MODELS_FEEDBACK_BUCKET`; the canary is gated on `CANARY_ENABLED`
+(default `false`).
+
+**Core model (read this first):** there is **one** answerability signal —
+**RUM**. The **canary does not emit its own signal**; it merely *forces usage*
+of models that organic traffic hasn't touched, by opening a short real session
++ tiny prompt. That attempt flows through the exact same session/prompt path as
+organic traffic, so its outcome is captured as **ordinary RUM**. So the canary
+is invisible in the data — it just guarantees every model gets tried at least
+once per sweep so RUM has something to score.
 
 ## Problem
 
@@ -29,53 +41,56 @@ provider reachability, and to surface it with a sane multi-bid rollup.
 **broadest net** — every reachable provider and its on-chain bids. That set is
 the **universe**; it stays the starting point and nothing below replaces it.
 
-Everything we build is **exclusionary evidence layered on top**: it can only
-*remove* reachable-but-non-answering bids from the ping universe, never *add*
-bids ping didn't already surface (you can't route organic traffic — or open a
-canary session — to an unreachable provider, so both signals are strictly a
-subset of ping). The gap we're closing is that ping proves **reachable**, not
-**answerable**. The two new signals:
+The single exclusionary signal is **RUM**: it can only *remove* reachable-but-
+non-answering bids from the ping universe, never *add* bids ping didn't already
+surface (you can't route traffic — organic or canary — to an unreachable
+provider, so RUM is strictly a subset of ping). The gap we're closing is that
+ping proves **reachable**, not **answerable**.
 
-1. **RUM (per-bid attribution).** Tag every organic session with the `bidId`
-   the c-node chose (via `getSession`), so real traffic continuously reports the
-   *answerability* of the bids people actually use. A RUM **failure** is grounds
-   to demote/drop a bid (with a categorized reason); a RUM **success** just
-   confirms a universe member is good — it adds nothing new.
-2. **Canary.** For **models** with no organic traffic ("orphans"), the gateway
-   opens a short synthetic session **by model** + universal prompt, attributing
-   the result to the c-node's chosen bid (same `getSession` lookup). Same
-   subtract-only role: a failure demotes, a success confirms. Hot/expensive
-   models have organic traffic → covered by RUM for free → never canaried.
+- **RUM (per-bid attribution).** Tag every session with the `bidId` the c-node
+  chose (via `getSession`), so traffic continuously reports the *answerability*
+  of the bids actually used. A RUM **failure** is grounds to demote/drop a bid
+  (with a categorized reason); a RUM **success** just confirms a universe member
+  is good — it adds nothing new.
+- **Canary — not a second signal, a coverage mechanism.** RUM only sees models
+  organic traffic exercises, so a cold model stays invisible. The canary fixes
+  that by *forcing usage* of "orphan" models (no session opened in the window):
+  it opens a short real session + tiny prompt, which — being a real session —
+  gets `bid_id` attribution and produces a `routed_sessions` outcome exactly
+  like organic traffic. **That outcome is RUM.** The canary publishes nothing of
+  its own; it just makes sure every model gets tried so RUM can score it. Hot
+  models have organic traffic → RUM covers them free → never canaried.
 
-The gateway publishes both to the **existing S3 bucket**; the Lambda folds them
-in. RUM and canary stay **distinct provenance-tagged signals**, merged only at
-rollup time.
+The gateway publishes **RUM only** to the **existing S3 bucket**; the Lambda
+folds it in.
 
-Pipeline — **start broad, then subtract**:
+Pipeline — **start broad, then subtract** (canary just feeds the middle step):
 
 ```text
-ping_provider universe  ─▶  minus RUM answerability-failures  ─▶  minus canary failures  ─▶  publish
+ping_provider universe  ─▶  minus RUM answerability-failures  ─▶  publish
+                                        ▲
+                            canary forces cold models to be tried,
+                            producing RUM for them (no separate signal)
 ```
 
 ```text
-   organic traffic ─► openSession(model) ─► getSession ─► routed_sessions.bid_id   (RUM, per-bid)
-                                                                 │
-   published active_models.json ─► orphan MODELS ─► canary: openSession(model), 5-min,
-   (gateway already reads this)    (no organic         getSession→bid, expire (per-bid result)
-                                    traffic in window)          │
-                                                                ▼
+   organic traffic ─┐
+                     ├─► openSession(model) ─► getSession ─► routed_sessions{bid_id, ok|FAILED}
+   canary (orphans) ─┘        (5-min, natural expiry for canary)          │
+                                                                          ▼   (RUM, per-bid)
                         gateway writes  feedback/apigw-bid-health.json  ──► S3 (same bucket)
-                                                                │
+                                                                          │
               05-active_models Lambda: starts BROAD (ping + on-chain bids), then
-              NARROWS using the feedback file (RUM + canary + categorized reasons),
+              NARROWS using the RUM feedback file (+ categorized reasons),
               applies hysteresis + multi-bid rollup, republishes
               active_models.json / active_bids.json
 ```
 
-Division of labor: **gateway reports what it observed** (dumb: per-bid counts +
-timestamps + a categorized failure reason). **Lambda owns curation** (start
-broad → narrow, state machine, rollup, publish). Single-writer-per-file
-preserved; no gateway→DB read-back for the Lambda.
+Division of labor: **gateway reports what it observed** (dumb: per-bid RUM counts
++ timestamps + a categorized failure reason) and **forces coverage via the
+canary**. **Lambda owns curation** (start broad → narrow, state machine, rollup,
+publish). Single-writer-per-file preserved; no gateway→DB read-back for the
+Lambda.
 
 ---
 
@@ -119,71 +134,96 @@ universe** used for orphan detection. (No need to pull `active_bids.json`; bids
 are learned per-session from `getSession`, and provider is resolved at rollup.)
 
 From `routed_sessions` (now carrying `bid_id`) + request outcomes, the gateway
-periodically emits a per-bid RUM rollup into the feedback object (schema below),
-tagged `source=rum`. Error outcomes are classified with the failure taxonomy
-below — the **same classifier as failover** (`chat_failover.is_failover_eligible`
-family) so eligibility and health never disagree.
+periodically emits a per-bid RUM rollup into the feedback object (schema below).
+Canary-forced sessions are indistinguishable here — they're just more RUM rows.
+Error outcomes are classified with the failure taxonomy below — the **same
+classifier as failover** (`chat_failover.is_failover_eligible` family) so
+eligibility and health never disagree.
+
+Implemented in `src/services/rum_feedback_service.py` (`RumFeedbackService`) and
+run by the `rum_feedback_loop` background task in `src/main.py`, leader-elected
+via `advisory_xact_lock("rum_feedback_publish")` so exactly one replica writes
+the file per tick.
 
 ---
 
-## Component 3 — Canary
+## Component 3 — Canary (a RUM-coverage forcer, not a signal)
 
-Gateway-owned (the gateway is the source of truth for the canary), running as a
-background sweep in the API service.
+Gateway-owned background sweep. Its **only** job is to make sure every model
+gets exercised at least once per interval so RUM has data on it. It writes
+nothing itself — a canary probe is just a real session whose outcome RUM
+records like any other.
+
+Implemented in `src/services/canary_service.py` (`CanaryService`), run by the
+`canary_loop` background task in `src/main.py`, leader-elected via
+`advisory_xact_lock("canary_sweep")` (the sweep runs inside the lock; its opens
+and prompts use their own short-lived DB connections so their commits don't
+release the lock). Reuses the standard open path via
+`session_routing_service.open_probe_session(...)` (so it inherits the Phase-1
+`bid_id` capture) and records outcomes with `complete_probe_session(...)`.
 
 ### Loop
 
 ```text
 every CANARY_SWEEP_INTERVAL_HOURS:
-  universe = models from published active_models.json
-  orphans  = models in universe where (no organic RUM in the interval) OR never-seen
+  universe = probable models from active_models.json (direct_model_service)
+  seen     = model_ids with a session opened in the window (organic OR prior canary)
+  orphans  = universe − seen
   for model in orphans (bounded by CANARY_MAX_CONCURRENCY):
-     probe = PROBE_REGISTRY[model.modality]       # payload/token/timeout per modality
-     open-by-model: openSession(model_id, {sessionDuration: 300, failover: false})  # 5-min min
-     bid = getSession(session_id).bidID           # attribute result to the chosen bid
-     send probe → record {ok | err_class} for that bid (source=canary)
-     # do NOT wait for the session to expire; it rides to natural expiry
-  write feedback/apigw-bid-health.json to S3 (rum + canary, provenance-tagged)
-  sleep
+     sid = open_probe_session(model, session_duration=300)   # 5-min, by-model, assigned
+     try: send tiny prompt (chat max_tokens=1, or embeddings) with a 30s ceiling
+     complete_probe_session(sid, ok=<answered?>, reason=<categorized on failure>)
+     # ok  → stamp last_used_at  → RUM counts it answerable
+     # fail→ mark FAILED + reason → RUM counts it a failure (NO early close)
+     # the 300s session rides to natural on-chain expiry
 ```
 
 ### Key properties
 
-- **Open-by-model, not by-bid.** The canary uses the same `openSession(model)`
-  path as organic traffic and attributes the result to the c-node's chosen bid
-  via `getSession` — so we probe exactly what a real user would hit and stay
-  fully on the open-by-model path (no `createBidSession`, no ecosystem change).
-  For the single-bid dead legacy models that caused the original pain, "the
-  model" *is* the one bid, so they're covered precisely. For a cold multi-bid
-  model the c-node's best-first handshake lands the probe on a working bid if
-  one exists (a strong "is this model usable" signal); untested siblings stay
-  `unknown` rather than being asserted healthy or down.
+- **The canary produces RUM, not a canary signal.** `open_probe_session` reuses
+  the organic open path (wallet throttle + `getSession` bid capture), and
+  `complete_probe_session` marks the row used-or-FAILED. The RUM publisher then
+  aggregates that row like any other. There is no `canary` provenance anywhere.
+- **Open failure is not recorded.** If the session can't even open, the provider
+  is unreachable/unopenable and `ping_provider` already excludes it upstream —
+  there's nothing for RUM to add. The canary's real value is the
+  reachable-but-not-answering case (open succeeds, prompt fails → FAILED row →
+  RUM `err`), e.g. the dead single-bid "adapter not found" legacy models.
+- **Open-by-model, not by-bid.** Same `openSession(model)` path as organic
+  traffic; the c-node picks the bid and we attribute via `getSession`. For the
+  single-bid dead legacy models that caused the original pain, "the model" *is*
+  the one bid. For a cold multi-bid model the c-node's best-first handshake
+  lands the probe on a working bid if one exists; untested siblings stay
+  `unknown` rather than asserted healthy or down.
 - **Natural expiry, no early close.** `MIN_SESSION_DURATION = 5 minutes` is a
-  hard contract floor (`SessionStorage.sol`); the session is opened for 300s
-  and left to expire on-chain. No early close ⇒ **no 1-day MOR lock**. We pay
-  the provider for the 5 minutes used (accepted — see cost model).
-- **Orphan = idle OR never-seen** so brand-new models get validated on first
-  appearance, not just previously-active ones going quiet.
-- **Don't block on expiry.** Probe → record in seconds → move on; the only
-  sleep is between sweeps.
+  hard contract floor (`SessionStorage.sol`); `CANARY_SESSION_DURATION_SECONDS`
+  defaults to 300 and the session is left to expire on-chain. No early close ⇒
+  **no 1-day MOR lock**. We pay the provider for the 5 minutes used (accepted —
+  see cost model).
+- **Orphan = idle OR never-seen**, keyed off "no session opened in the window,"
+  so brand-new models get validated on first appearance and the canary is
+  self-limiting (a model it just probed counts as "seen" until the window rolls).
+- **Don't block on expiry.** Probe → record in seconds → move on; the only sleep
+  is between sweeps.
 - **No separate canary budget/accounting** (deliberately dropped). Spend is
-  inconsequential vs the wallet (~80k MOR) and existing wallet-balance
-  alerting; if MOR runs low, the same triggers that cover organic traffic fire.
+  inconsequential vs the wallet (~80k MOR) and existing wallet-balance alerting;
+  if MOR runs low, the same triggers that cover organic traffic fire.
 - **Shared prod C-node wallet.** `CANARY_MAX_CONCURRENCY` is the one guardrail
-  kept — it protects the shared wallet's **nonce/balance** from synthetic
-  bursts (the resource the June storm drained), not a spend budget.
+  kept — it protects the shared wallet's **nonce/balance** from synthetic bursts
+  (the resource the June storm drained), not a spend budget.
 
-### Modality probe registry (code constants, not env)
+### Modality probes (code constants, not env)
 
-Different model types need different probes — a chat prompt can't validate an
-embeddings/STT/TTS/image/video model. Hardcode a tiny per-modality registry;
-add an entry when a modality launches.
+A chat prompt can't validate an embeddings/STT/TTS/image/video model, so the
+probe is chosen from the model's modality. v1 supports the two modalities the
+gateway serves today; unsupported modalities are skipped (logged) until a probe
+is added.
 
 | Modality | Endpoint | Probe payload | Success = | Timeout |
 |---|---|---|---|---|
-| `llm` | `/v1/chat/completions` | 1-token completion, trivial prompt | non-error response w/ ≥1 token | short (e.g. 20s) |
-| `embeddings` | `/v1/embeddings` | embed a short string | vector returned | short |
-| `stt` / `tts` / `image` / `video` | TBD | smallest valid request per type | non-error response | per-modality (video longer) |
+| `llm` | `/v1/chat/completions` | `max_tokens=1`, trivial prompt (`"ping"`) | non-error response | 30s (`_CANARY_PROBE_TIMEOUT_SECONDS`) |
+| `embeddings` | `/v1/embeddings` | embed a short string | non-error response | 30s |
+| `stt` / `tts` / `image` / `video` | — | not yet probed (skipped) | — | — |
 
 Each probe: minimal tokens/size, universal/innocuous input, strict timeout,
 **error-trapped and surfaced** (never throws into the sweep loop).
@@ -207,23 +247,22 @@ Curation is **subtractive**, not a vote. The set starts as the full
   dead-but-reachable bids we're trying to drop.
 - **RUM (subtract)** — a universe member returning answerability failures is
   demoted/dropped, carrying its categorized reason. A RUM success only confirms;
-  it never re-adds a bid ping excluded (organic traffic can't reach an
-  unreachable provider ⇒ RUM ⊆ ping).
-- **Canary (subtract)** — for universe members with no RUM, a synthetic failure
-  demotes/drops; a success confirms. Also strictly ⊆ ping.
+  it never re-adds a bid ping excluded (traffic can't reach an unreachable
+  provider ⇒ RUM ⊆ ping). The canary just guarantees *coverage* of this signal
+  for cold models — the Lambda sees only RUM, whether organic or canary-forced.
 
-So the only signals that *change* the published set relative to today are the
-**failures**. A member with no failure evidence yet (reachable, not-yet-verified)
-stays in — same as today — until a canary or organic request verifies or
+So the only signal that *changes* the published set relative to today is a RUM
+**failure**. A member with no failure evidence yet (reachable, not-yet-verified)
+stays in — same as today — until a canary-forced or organic request verifies or
 excludes it.
 
-RUM/canary can **never** re-add a bid ping dropped: a session open + prompt
-traverse the same provider router, so a RUM/canary *success is itself proof of
-reachability* — there is no state where inference works but ping legitimately
-fails. (A ping failing while inference works would be a ping-handler bug to fix,
-not a signal to honor; and if a provider drops between a RUM success and a later
-ping, the fresher ping failure is correct and wins.) The pipeline is strictly
-`ping − failures`, full stop.
+RUM can **never** re-add a bid ping dropped: a session open + prompt traverse the
+same provider router, so a RUM *success is itself proof of reachability* — there
+is no state where inference works but ping legitimately fails. (A ping failing
+while inference works would be a ping-handler bug to fix, not a signal to honor;
+and if a provider drops between a RUM success and a later ping, the fresher ping
+failure is correct and wins.) The pipeline is strictly `ping − RUM failures`,
+full stop.
 
 Mechanism (why reachability is shared): `ping_provider` posts to the consumer
 node's `/proxy/provider/ping` with the provider's **on-chain-registered
@@ -284,8 +323,8 @@ Lambda surfaces the latest reason per bid.
 
 This taxonomy is deliberately the same data that can back a **provider-facing
 status board**: a provider looks up their address and sees each of their bids
-with `health` + `code` + a plain-English hint + `last_seen` + `source`
-(rum/canary). It extends what the Lambda already publishes for the public status
+with `health` + `code` + a plain-English hint + `last_seen`. It extends what the
+Lambda already publishes for the public status
 page (`status/incidents.json`, RSS) rather than inventing a new pipeline. So the
 curation work pulls double duty: it trims the routing list *and* gives providers
 a self-service "check your model/configuration" view.
@@ -324,49 +363,50 @@ and it's non-blocking.
 |---|---|---|
 | `CANARY_ENABLED` | master switch | `false` (opt-in for first rollout) |
 | `CANARY_SWEEP_INTERVAL_HOURS` | sweep cadence **and** orphan-idle threshold | `4` |
-| `CANARY_MAX_CONCURRENCY` | in-flight probe cap (shared-wallet nonce/balance guard) | conservative (e.g. `3`) |
+| `CANARY_MAX_CONCURRENCY` | in-flight probe cap (shared-wallet nonce/balance guard) | `3` |
+| `CANARY_SESSION_DURATION_SECONDS` | probe session length (`MIN_SESSION_DURATION` floor) | `300` |
 
-Probe payload/token/timeout are **code constants** in the modality registry.
+RUM publishing has its own gate/vars: `ACTIVE_MODELS_FEEDBACK_BUCKET` (empty ⇒
+disabled), `ACTIVE_MODELS_FEEDBACK_KEY`, `RUM_FEEDBACK_INTERVAL_SECONDS`,
+`RUM_FEEDBACK_WINDOW_HOURS`. Probe payload/token/timeout are **code constants**.
 Wallet is the existing prod C-node wallet (no var). No budget var.
 
 ---
 
 ## Data contract — `feedback/apigw-bid-health.json`
 
-Gateway is the sole writer; Lambda is the sole reader. Per-bid records,
-provenance-tagged, so the Lambda can weight RUM over canary.
+Gateway is the sole writer; Lambda is the sole reader. Per-bid RUM records —
+**one signal**, no provenance split (canary-forced sessions are just RUM). This
+is exactly what `RumFeedbackService.build_feedback` emits.
 
 ```json
 {
   "generated_at": "2026-07-01T16:00:00Z",
   "window_hours": 4,
+  "source": "apigw",
   "bids": [
     {
       "bid_id": "0x…",
       "model_id": "0x…",
-      "provider": "0x…",
+      "provider": null,
       "modality": "llm",
       "rum": {
         "ok": 42, "err": 1, "last_ok": "…", "last_err": "…",
         "last_error": { "code": "transport_timeout",
-                        "message": "prompt timed out after 20s",
-                        "hint": "model latency/capacity vs probe timeout" },
+                        "message": "the prompt timed out",
+                        "hint": "check model latency/capacity vs the request timeout" },
         "counts": { "transport_timeout": 1 }
-      },
-      "canary": {
-        "ok": 1, "err": 0, "last_probe": "…", "last_ok": "…",
-        "last_error": null, "counts": {}
       }
     }
   ]
 }
 ```
 
-`rum`/`canary` are independent; either may be absent for a given bid. `code`
-values come from the failure taxonomy above; `message`/`hint` are human-facing
-(they feed the status board verbatim). The gateway publishes observations +
-categorized reasons only — the Lambda computes the health verdict + rollup from
-the union.
+`provider` is `null` in the feedback file — the Lambda resolves `bid_id →
+provider` from its on-chain bid data at rollup. `code` values come from the
+failure taxonomy above; `message`/`hint` are human-facing (they feed the status
+board verbatim). The gateway publishes observations + categorized reasons only —
+the Lambda computes the health verdict + rollup.
 
 ---
 
@@ -391,17 +431,21 @@ from the gateway.
 
 ## Rollout phases
 
-1. **Attribution** — `routed_sessions.bid_id` migration + `getSession` capture.
-   Zero behavior change; start collecting per-bid RUM.
-2. **RUM feedback** — gateway writes `feedback/apigw-bid-health.json`
-   (rum only); Lambda reads + rolls up (canary section empty). S3 IAM:
-   gateway task role `PutObject` on the feedback key, Lambda role `GetObject`.
-3. **Canary** — orphan (model) detection + modality probe registry +
-   open-by-model sweep with `getSession` attribution, behind `CANARY_ENABLED`.
-   Start `false`, enable after dry-run validation.
-4. **Status board** — expose per-bid `health` + `code` + hint (extends the
-   Lambda's existing status/incidents publishing) for a provider-facing
-   self-service view.
+1. **Attribution** *(done)* — `routed_sessions.bid_id` migration + `getSession`
+   capture in `session_routing_service`. Zero behavior change; starts collecting
+   per-bid RUM.
+2. **RUM feedback** *(done)* — gateway writes `feedback/apigw-bid-health.json`
+   (`rum_feedback_service` + `rum_feedback_loop`), gated on
+   `ACTIVE_MODELS_FEEDBACK_BUCKET`. S3 IAM still to wire: gateway task role
+   `PutObject` on the feedback key, Lambda role `GetObject`. **Lambda consumer
+   not yet built** (it must read the file + narrow + roll up).
+3. **Canary** *(done)* — orphan detection + modality probes + open-by-model
+   short-session sweep (`canary_service` + `canary_loop`), behind
+   `CANARY_ENABLED` (default `false`). Produces RUM; no separate signal. Enable
+   after dry-run validation.
+4. **Status board** *(future)* — expose per-bid `health` + `code` + hint
+   (extends the Lambda's existing status/incidents publishing) for a
+   provider-facing self-service view.
 
 ---
 
@@ -412,9 +456,13 @@ from the gateway.
   `getSession` fails (request still succeeds).
 - **Orphans:** a model with no organic traffic for the interval appears in the
   orphan set; a model receiving traffic does not. A never-seen model is included.
-- **Canary open + attribution:** the probe opens **by model** (`openSession`),
-  and `getSession` attributes the result to a concrete `bidID` recorded in the
-  feedback file (same lookup as organic RUM).
+- **Canary produces RUM (no separate signal):** a probed orphan opens **by
+  model**, `getSession` attributes a concrete `bidID` onto the `routed_sessions`
+  row, and its ok/FAILED outcome shows up in the RUM feedback file exactly like
+  organic traffic — there is no `canary` key.
+- **Canary open failure is not RUM:** if `open_probe_session` fails, no row is
+  created and nothing is published (the provider is already excluded upstream by
+  `ping_provider`); the sweep just logs `canary_open_failed`.
 - **Canary spend/lock:** a probed session opens for 300s, is **not** closed
   early, expires naturally, and produces **no** `getUserStakesOnHold` entry
   (no 1-day lock); observed spend ≈ `300 × pricePerSecond`.
@@ -428,9 +476,8 @@ from the gateway.
   explainable.
 - **Rollup:** a multi-bid model with one dead bid publishes `degraded` (not
   `down`); all-dead publishes `down`; never-probed publishes `unknown`.
-- **Provenance:** RUM and canary observations remain separable in
-  `feedback/apigw-bid-health.json`; a canary success does not overwrite/erase
-  organic history, and vice versa.
+- **Single signal:** `feedback/apigw-bid-health.json` contains only `rum` (no
+  `canary` key); canary-forced and organic sessions are indistinguishable in it.
 - **Kill switch:** `CANARY_ENABLED=false` stops all synthetic opens; attribution
   + RUM feedback continue.
 
