@@ -45,6 +45,7 @@ APP_VERSION = get_version()
 # Handles to long-lived background tasks so they can be cancelled on shutdown
 _staking_sync_task = None
 _hold_reconciliation_task = None
+_rum_feedback_task = None
 
 # Using our production-ready fixed route class
 app = FastAPI(
@@ -329,6 +330,65 @@ async def hold_reconciliation_loop():
             )
 
 
+async def rum_feedback_loop():
+    """
+    Background task that publishes per-bid RUM health to the active-models S3
+    bucket for the 05-active_models Lambda to consume (see
+    docs/active-models-rum-canary.md).
+
+    Leader-elected so only one replica writes the feedback file per tick. The
+    S3 write runs AFTER the advisory lock is released so no DB transaction is
+    held across the network call.
+    """
+    from src.db.database import AsyncSessionLocal, advisory_xact_lock
+    from src.services.rum_feedback_service import rum_feedback_service
+    import traceback
+
+    rum_logger = get_core_logger().bind(component="rum_feedback")
+    interval = settings.RUM_FEEDBACK_INTERVAL_SECONDS
+
+    rum_logger.info(
+        "Starting RUM feedback publisher loop",
+        interval_seconds=interval,
+        window_hours=settings.RUM_FEEDBACK_WINDOW_HOURS,
+        bucket=settings.ACTIVE_MODELS_FEEDBACK_BUCKET,
+        key=settings.ACTIVE_MODELS_FEEDBACK_KEY,
+        event_type="rum_feedback_start",
+    )
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            payload = None
+            # Leader election: only one replica aggregates + publishes per tick.
+            async with advisory_xact_lock("rum_feedback_publish") as is_leader:
+                if not is_leader:
+                    rum_logger.debug(
+                        "Skipping RUM feedback - another replica holds the leader lock",
+                        event_type="rum_feedback_skipped_not_leader",
+                    )
+                    continue
+                async with AsyncSessionLocal() as db:
+                    payload = await rum_feedback_service.build_feedback(db)
+
+            # Publish outside the advisory lock (no DB txn held across S3 I/O).
+            if payload is not None:
+                await rum_feedback_service.publish(payload)
+                rum_logger.info(
+                    "Published RUM feedback",
+                    bid_count=len(payload.get("bids", [])),
+                    window_hours=payload.get("window_hours"),
+                    event_type="rum_feedback_published",
+                )
+        except Exception as e:
+            rum_logger.error(
+                "Error in RUM feedback loop",
+                error=str(e),
+                traceback=traceback.format_exc(),
+                event_type="rum_feedback_error",
+            )
+
+
 @app.on_event("startup")
 async def startup_event():
     """
@@ -436,7 +496,26 @@ async def startup_event():
                     error=str(e),
                     event_type="hold_reconciliation_task_error")
         logger.warning("Continuing startup without hold reconciliation")
-    
+
+    # Start RUM feedback publisher (per-bid health → active-models S3 bucket).
+    # Only when a feedback bucket is configured (safe no-op otherwise).
+    if settings.ACTIVE_MODELS_FEEDBACK_BUCKET:
+        try:
+            global _rum_feedback_task
+            _rum_feedback_task = asyncio.create_task(rum_feedback_loop())
+            logger.info("Started background task for RUM feedback publisher",
+                       interval_seconds=settings.RUM_FEEDBACK_INTERVAL_SECONDS,
+                       bucket=settings.ACTIVE_MODELS_FEEDBACK_BUCKET,
+                       event_type="rum_feedback_task_start")
+        except Exception as e:
+            logger.error("Failed to start RUM feedback task",
+                        error=str(e),
+                        event_type="rum_feedback_task_error")
+            logger.warning("Continuing startup without RUM feedback publisher")
+    else:
+        logger.info("RUM feedback publisher disabled (no ACTIVE_MODELS_FEEDBACK_BUCKET)",
+                   event_type="rum_feedback_disabled")
+
     # Initialize rate limiting service
     if settings.RATE_LIMIT_ENABLED:
         try:
@@ -494,6 +573,7 @@ async def shutdown_event():
     for task_name, task in (
         ("staking_sync", _staking_sync_task),
         ("hold_reconciliation", _hold_reconciliation_task),
+        ("rum_feedback", _rum_feedback_task),
     ):
         if task is None:
             continue

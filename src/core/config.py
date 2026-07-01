@@ -190,6 +190,17 @@ class Settings(BaseSettings):
     # (always concurrent). The happy path is never serialized.
     SESSION_ONCHAIN_THROTTLE_COOLDOWN_SECONDS: float = Field(default=float(os.getenv("SESSION_ONCHAIN_THROTTLE_COOLDOWN_SECONDS", "20")))
 
+    # Active-Models Feedback (RUM) — publishes per-bid health observations to the
+    # same S3 bucket the 05-active_models Lambda reads, which narrows the
+    # published active-models list (see docs/active-models-rum-canary.md).
+    # An empty bucket disables the publisher (safe no-op default).
+    ACTIVE_MODELS_FEEDBACK_BUCKET: str = Field(default=os.getenv("ACTIVE_MODELS_FEEDBACK_BUCKET", ""))
+    ACTIVE_MODELS_FEEDBACK_KEY: str = Field(default=os.getenv("ACTIVE_MODELS_FEEDBACK_KEY", "feedback/apigw-bid-health.json"))
+    # How often the publisher aggregates + writes the feedback file (seconds).
+    RUM_FEEDBACK_INTERVAL_SECONDS: int = Field(default=int(os.getenv("RUM_FEEDBACK_INTERVAL_SECONDS", "300")))
+    # Look-back window for per-bid RUM aggregation (hours).
+    RUM_FEEDBACK_WINDOW_HOURS: int = Field(default=int(os.getenv("RUM_FEEDBACK_WINDOW_HOURS", "4")))
+
     # Direct Model Fetching Settings (replaces model sync)
     ACTIVE_MODELS_URL: str = Field(default=os.getenv("ACTIVE_MODELS_URL", "https://active.dev.mor.org/active_models.json"))
     DEFAULT_FALLBACK_MODEL: str = Field(default=os.getenv("DEFAULT_FALLBACK_MODEL", "mistral-31-24b"))
