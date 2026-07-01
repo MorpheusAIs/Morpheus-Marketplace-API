@@ -43,6 +43,12 @@ class RoutedSession(Base):
     # Model identification
     model_name = Column(String, nullable=True, index=True)  # Human-readable name (e.g., "llama-3.3-70b")
     model_id = Column(String, nullable=False, index=True)   # Blockchain ID (hex string starting with 0x)
+
+    # Per-bid attribution: the on-chain bid the c-node selected for this session,
+    # read back via getSessionStatus after open. Best-effort / nullable - it must
+    # never block a session open. Feeds per-bid RUM health (see
+    # docs/active-models-rum-canary.md).
+    bid_id = Column(String, nullable=True, index=True)      # Blockchain bid ID (hex string starting with 0x)
     
     # Session state and lifecycle (stored as String, validated via SessionState enum in Python)
     # Note: Rows are only created after successful session open, so default is OPEN
