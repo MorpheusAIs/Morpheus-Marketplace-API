@@ -457,6 +457,20 @@ class SessionRoutingService:
                     model_id=model_id
                 )
 
+            # Per-bid attribution: read back which bid the c-node selected for
+            # this session (one extra on-chain read). Best-effort and NULL-safe -
+            # it must never block or fail the open. Feeds per-bid RUM health
+            # (see docs/active-models-rum-canary.md).
+            bid_id = None
+            try:
+                session_status = await proxy_router_service.getSessionStatus(blockchain_session_id)
+                bid_id = ((session_status or {}).get("session") or {}).get("bidID") or None
+            except Exception as e:
+                open_logger.warning("Could not capture bid_id for session (non-fatal)",
+                                    session_id=blockchain_session_id,
+                                    error=str(e),
+                                    event_type="bid_attribution_failed")
+
             # Create session record only after successful open
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             endpoint = "/v1/chat/completions"
@@ -474,6 +488,7 @@ class SessionRoutingService:
                     id=blockchain_session_id,
                     model_id=model_id,
                     model_name=model_name,
+                    bid_id=bid_id,
                     state=SessionState.OPEN,
                     expires_at=expires_at,
                     active_requests=initial_active_requests,
