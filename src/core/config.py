@@ -184,6 +184,28 @@ class Settings(BaseSettings):
     SESSION_DEFAULT_DURATION_SECONDS: int = Field(default=int(os.getenv("SESSION_DEFAULT_DURATION_SECONDS", "1800")))
     # Comma-separated list of preferred models (keep at least one idle session)
     SESSION_PREFERRED_MODELS: str = Field(default=os.getenv("SESSION_PREFERRED_MODELS", ""))
+
+    # --- Expensive-model session tier ---------------------------------------
+    # The on-chain stake pulled at openSession scales linearly with duration and
+    # is amplified by (total MOR supply / today's emissions budget), so a
+    # high-priced model at the normal duration can stake enough MOR to exhaust
+    # the shared consumer wallet and bounce concurrent opens. This tier gives
+    # models whose lowest rated bid is >= a cutoff a shorter duration (smaller
+    # per-session stake -> more concurrent premium sessions) with their own idle
+    # grace, decoupled from the global session settings above.
+    #
+    # Cutoff is MOR per second (a bid's PricePerSecond / 1e18). 0 DISABLES the
+    # tier entirely (every model uses the global SESSION_* settings) — the
+    # feature ships inert and is turned on per-environment via secrets.
+    SESSION_EXPENSIVE_CUTOFF_MOR_PER_SECOND: float = Field(default=float(os.getenv("SESSION_EXPENSIVE_CUTOFF_MOR_PER_SECOND", "0")))
+    # Session duration (seconds) for expensive models. Kept short to bound the
+    # amplified on-chain stake per session.
+    SESSION_EXPENSIVE_DEFAULT_DURATION_SECONDS: int = Field(default=int(os.getenv("SESSION_EXPENSIVE_DEFAULT_DURATION_SECONDS", "1200")))
+    # Idle grace (seconds) for expensive models, overriding SESSION_IDLE_GRACE_SECONDS.
+    # Keep this >= SESSION_EXPENSIVE_DEFAULT_DURATION_SECONDS so an idle expensive
+    # session rides to its natural on-chain expiry instead of being early-closed —
+    # an early close pushes the unused stake into userStakesOnHold (locked ~1 day).
+    SESSION_EXPENSIVE_IDLE_GRACE_SECONDS: int = Field(default=int(os.getenv("SESSION_EXPENSIVE_IDLE_GRACE_SECONDS", "1440")))
     # Adaptive on-chain wallet throttle: after a nonce conflict is observed on a
     # session open/close, on-chain ops serialize on the wallet lock for this many
     # seconds (sliding; each new conflict re-arms it). 0 disables the throttle
