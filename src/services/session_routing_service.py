@@ -265,73 +265,6 @@ class SessionRoutingService:
                                exc_info=True)
             await db.rollback()
     
-    async def open_probe_session(
-        self,
-        *,
-        model_id: str,
-        model_name: Optional[str],
-        model_type: str,
-        session_duration: int,
-    ) -> str:
-        """
-        Canary entry point: open a short, tracked session for a model so its
-        usage shows up in RUM. Reuses the standard open path (wallet throttle,
-        per-bid attribution, row insert) but with a caller-chosen short duration
-        and created already assigned (active_requests=1) so no organic request
-        claims it mid-probe.
-        """
-        return await self._open_session_for_model(
-            model_id=model_id,
-            model_name=model_name,
-            model_type=model_type,
-            initial_active_requests=1,
-            session_duration=session_duration,
-        )
-
-    async def complete_probe_session(
-        self,
-        db: AsyncSession,
-        session_id: str,
-        *,
-        ok: bool,
-        reason: Optional[str] = None,
-    ) -> None:
-        """
-        Record a canary probe outcome and release its request slot WITHOUT any
-        on-chain early close (the short session expires naturally -> no MOR
-        lock). This is the difference from invalidate_session, which closes
-        on-chain.
-
-        ok=True  -> stamp last_used_at so RUM counts the bid as answerable.
-        ok=False -> mark FAILED + error_reason so RUM counts it as a failure
-                    (this is the whole point of the canary: surfacing a
-                    reachable-but-not-answering bid).
-        """
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        try:
-            if ok:
-                values = {"last_used_at": now, "active_requests": 0, "updated_at": now}
-            else:
-                values = {
-                    "state": SessionState.FAILED.value,
-                    "error_reason": f"canary: {reason}"[:500] if reason else "canary: probe failed",
-                    "active_requests": 0,
-                    "updated_at": now,
-                }
-            await db.execute(
-                update(RoutedSession)
-                .where(RoutedSession.id == session_id)
-                .values(**values)
-            )
-            await db.commit()
-        except Exception as e:
-            logger.error("Error completing canary probe session",
-                         session_id=session_id,
-                         error=str(e),
-                         event_type="canary_complete_error",
-                         exc_info=True)
-            await db.rollback()
-
     async def invalidate_session(
         self,
         db: AsyncSession,
@@ -451,7 +384,6 @@ class SessionRoutingService:
         model_type: str = "LLM",
         user_id: Optional[int] = None,
         initial_active_requests: int = 0,
-        session_duration: Optional[int] = None,
     ) -> str:
         """
         Open a new on-chain session for a model and persist its row.
@@ -476,10 +408,6 @@ class SessionRoutingService:
                 to its caller (never momentarily idle / claimable by another
                 request between insert and use); the automation path passes 0 to
                 create an idle, pre-warmed session.
-            session_duration: On-chain session length in seconds. Defaults to
-                SESSION_DEFAULT_DURATION_SECONDS. The canary passes a short
-                (5-min) duration so its probe session expires naturally with no
-                early close / MOR lock.
 
         Returns:
             str: The blockchain session id of the newly opened session.
@@ -495,7 +423,7 @@ class SessionRoutingService:
         open_logger.info("Opening new session for model",
                         event_type="session_open_start")
 
-        session_duration = session_duration or settings.SESSION_DEFAULT_DURATION_SECONDS
+        session_duration = settings.SESSION_DEFAULT_DURATION_SECONDS
         expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=session_duration)
 
         try:
@@ -529,20 +457,6 @@ class SessionRoutingService:
                     model_id=model_id
                 )
 
-            # Per-bid attribution: read back which bid the c-node selected for
-            # this session (one extra on-chain read). Best-effort and NULL-safe -
-            # it must never block or fail the open. Feeds per-bid RUM health
-            # (see docs/active-models-rum-canary.md).
-            bid_id = None
-            try:
-                session_status = await proxy_router_service.getSessionStatus(blockchain_session_id)
-                bid_id = ((session_status or {}).get("session") or {}).get("bidID") or None
-            except Exception as e:
-                open_logger.warning("Could not capture bid_id for session (non-fatal)",
-                                    session_id=blockchain_session_id,
-                                    error=str(e),
-                                    event_type="bid_attribution_failed")
-
             # Create session record only after successful open
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             endpoint = "/v1/chat/completions"
@@ -560,7 +474,6 @@ class SessionRoutingService:
                     id=blockchain_session_id,
                     model_id=model_id,
                     model_name=model_name,
-                    bid_id=bid_id,
                     state=SessionState.OPEN,
                     expires_at=expires_at,
                     active_requests=initial_active_requests,
