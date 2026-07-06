@@ -454,6 +454,69 @@ class SessionRoutingService:
     # SESSION LIFECYCLE: Open and close sessions
     # =========================================================================
     
+    @staticmethod
+    def _parse_onchain_ends_at(status: Any) -> Optional[int]:
+        """Extract the on-chain endsAt (unix seconds) from a getSessionStatus body.
+
+        The C-Node serialises its Session struct with Go field names (no json
+        tags), so the field is ``EndsAt`` nested under ``session``. Accept a few
+        shapes/casings defensively and return None if absent/invalid so callers
+        can fall back rather than raise.
+        """
+        if not isinstance(status, dict):
+            return None
+        session = status.get("session") or status.get("Session") or status
+        if not isinstance(session, dict):
+            return None
+        raw = session.get("EndsAt", session.get("endsAt"))
+        if raw is None:
+            return None
+        try:
+            ends_at = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return ends_at if ends_at > 0 else None
+
+    async def _resolve_expires_at(
+        self, session_id: str, fallback: datetime, open_logger
+    ) -> datetime:
+        """Return expires_at anchored to the on-chain endsAt (+ configured buffer).
+
+        Reads the freshly-opened session's on-chain endsAt via the proxy router
+        and adds SESSION_EXPIRY_BUFFER_SECONDS so the cleanup sweep closes the
+        session at/after its true end (a "late" close → full stake back to the
+        wallet). Best-effort: any failure returns ``fallback`` (the call-start
+        estimate) so a session open is never blocked on this read.
+        """
+        try:
+            status = await proxy_router_service.getSessionStatus(session_id)
+            ends_at = self._parse_onchain_ends_at(status)
+        except Exception as e:
+            open_logger.warning(
+                "Could not read on-chain endsAt; using estimated expiry",
+                error=str(e),
+                event_type="expires_at_read_error",
+            )
+            return fallback
+
+        if ends_at is None:
+            open_logger.warning(
+                "on-chain endsAt missing/invalid; using estimated expiry",
+                event_type="expires_at_missing",
+            )
+            return fallback
+
+        expires_at = datetime.fromtimestamp(ends_at, tz=timezone.utc).replace(
+            tzinfo=None
+        ) + timedelta(seconds=settings.SESSION_EXPIRY_BUFFER_SECONDS)
+        open_logger.info(
+            "Anchored expires_at to on-chain endsAt",
+            onchain_ends_at=ends_at,
+            buffer_seconds=settings.SESSION_EXPIRY_BUFFER_SECONDS,
+            event_type="expires_at_onchain",
+        )
+        return expires_at
+
     async def _open_session_for_model(
         self,
         model_id: str,
@@ -515,7 +578,18 @@ class SessionRoutingService:
             expensive_tier=is_expensive,
             session_duration=session_duration,
         )
-        expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=session_duration)
+        # Fallback ONLY. The authoritative expiry is the actual on-chain endsAt,
+        # read back after the open (see below). This call-start estimate is used
+        # solely if that read fails, because it is systematically too short: it
+        # ignores how long the open tx takes to mine, so the on-chain
+        # openedAt (== mine time) is later and the true endsAt is later still.
+        # Closing at this estimate lands a few seconds BEFORE endsAt under load,
+        # turning an intended "late" close into an early one — which locks the
+        # elapsed-time stipend in userStakesOnHold and forces housekeeping to
+        # recover it via withdrawUserStakes.
+        estimated_expires_at = (
+            datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=session_duration)
+        )
 
         try:
             # Call proxy router to open session
@@ -547,6 +621,15 @@ class SessionRoutingService:
                     "No session ID returned from proxy router",
                     model_id=model_id
                 )
+
+            # Anchor expires_at to the REAL on-chain endsAt (+ small buffer) so
+            # the cleanup sweep closes the session AT/AFTER endsAt (a "late"
+            # close returns the full stake straight to the wallet). Best-effort:
+            # falls back to the call-start estimate if the read fails, so an
+            # open is never blocked on it.
+            expires_at = await self._resolve_expires_at(
+                blockchain_session_id, estimated_expires_at, open_logger
+            )
 
             # Create session record only after successful open
             now = datetime.now(timezone.utc).replace(tzinfo=None)
