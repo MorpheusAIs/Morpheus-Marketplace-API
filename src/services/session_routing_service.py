@@ -87,7 +87,16 @@ class SessionRoutingService:
         # Strong refs to fire-and-forget close tasks (event loop keeps only
         # weak refs; an unreferenced task can be GC'd before it runs).
         self._background_close_tasks: set = set()
-        
+
+        # Short-lived per-model "is this an expensive model?" cache. The tier
+        # decision needs the model's lowest rated-bid price (an on-chain read
+        # via the proxy-router); cache it so neither the open path nor the
+        # per-tick automation loop hammers that lookup. Keyed by model_id ->
+        # (monotonic_expiry, is_expensive). Per-replica and deterministic from
+        # the cutoff + price, so no cross-replica coordination is needed.
+        self._expensive_tier_cache: Dict[str, tuple] = {}
+        self._expensive_tier_cache_ttl = 300.0
+
         logger.info("SessionRoutingService initialized",
                    event_type="session_routing_service_init")
     
@@ -96,6 +105,70 @@ class SessionRoutingService:
         if not settings.SESSION_PREFERRED_MODELS:
             return set()
         return set(m.strip() for m in settings.SESSION_PREFERRED_MODELS.split(",") if m.strip())
+
+    # =========================================================================
+    # EXPENSIVE-MODEL TIER
+    # =========================================================================
+
+    async def _get_model_min_price_per_second(self, model_id: str) -> Optional[float]:
+        """Lowest rated-bid price for a model in MOR/sec, or None on failure.
+
+        Best-effort: never raises. A price lookup must never block (or fail) a
+        session open — callers treat None as "not expensive" and fall back to
+        the global session settings. Bid PricePerSecond is in wei (1e18 = 1 MOR).
+        """
+        try:
+            response = await proxy_router_service.getRatedBids(model_id)
+            result = response.json()
+            if isinstance(result, dict):
+                bids = result.get("bids", []) or []
+            elif isinstance(result, list):
+                bids = result
+            else:
+                bids = []
+
+            prices: List[float] = []
+            for bid in bids:
+                if not isinstance(bid, dict):
+                    continue
+                pps = bid.get("PricePerSecond")
+                if pps is None:
+                    continue
+                try:
+                    prices.append(int(str(pps)) / 1e18)
+                except (ValueError, TypeError):
+                    continue
+
+            return min(prices) if prices else None
+        except Exception as e:
+            logger.warning("Rated-bid price lookup failed; treating model as non-expensive",
+                           model_id=model_id,
+                           error=str(e),
+                           event_type="expensive_tier_price_lookup_error")
+            return None
+
+    async def _is_expensive_model(self, model_id: str) -> bool:
+        """True if the model's lowest rated bid is >= the expensive cutoff.
+
+        Returns False when the tier is disabled (cutoff <= 0) or the price
+        cannot be determined. Result is cached per model for a short TTL so the
+        on-chain bid read is not repeated on every open / automation tick.
+        """
+        cutoff = settings.SESSION_EXPENSIVE_CUTOFF_MOR_PER_SECOND
+        if cutoff <= 0:
+            return False
+
+        cached = self._expensive_tier_cache.get(model_id)
+        if cached is not None and time.monotonic() < cached[0]:
+            return cached[1]
+
+        price = await self._get_model_min_price_per_second(model_id)
+        is_expensive = price is not None and price >= cutoff
+        self._expensive_tier_cache[model_id] = (
+            time.monotonic() + self._expensive_tier_cache_ttl,
+            is_expensive,
+        )
+        return is_expensive
 
     # =========================================================================
     # ADAPTIVE ON-CHAIN WALLET THROTTLE
@@ -423,7 +496,21 @@ class SessionRoutingService:
         open_logger.info("Opening new session for model",
                         event_type="session_open_start")
 
-        session_duration = settings.SESSION_DEFAULT_DURATION_SECONDS
+        # Expensive models open with a shorter duration so the amplified
+        # on-chain stake pulled per session stays small (more concurrent
+        # premium sessions before the shared wallet is exhausted). Best-effort:
+        # if the tier is disabled or the price can't be read, use the global
+        # default duration.
+        is_expensive = await self._is_expensive_model(model_id)
+        session_duration = (
+            settings.SESSION_EXPENSIVE_DEFAULT_DURATION_SECONDS
+            if is_expensive
+            else settings.SESSION_DEFAULT_DURATION_SECONDS
+        )
+        open_logger = open_logger.bind(
+            expensive_tier=is_expensive,
+            session_duration=session_duration,
+        )
         expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=session_duration)
 
         try:
@@ -855,9 +942,16 @@ class SessionRoutingService:
         utilized = [s for s in sessions if s.is_utilized]
         unutilized = [s for s in sessions if not s.is_utilized]
         
-        # Filter unutilized by idle grace period
+        # Filter unutilized by idle grace period. Expensive models use their own
+        # (longer) grace so an idle session rides to natural on-chain expiry
+        # rather than being early-closed — an early close locks the unused stake
+        # in userStakesOnHold for ~1 day. Falls back to the global grace when the
+        # tier is disabled or the price is unknown.
+        idle_grace_seconds = settings.SESSION_IDLE_GRACE_SECONDS
+        if await self._is_expensive_model(model_id):
+            idle_grace_seconds = settings.SESSION_EXPENSIVE_IDLE_GRACE_SECONDS
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        grace_threshold = now - timedelta(seconds=settings.SESSION_IDLE_GRACE_SECONDS)
+        grace_threshold = now - timedelta(seconds=idle_grace_seconds)
         
         idle_long_enough = [
             s for s in unutilized
