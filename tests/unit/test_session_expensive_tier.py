@@ -45,18 +45,44 @@ PREMIUM_PPS = "10000000000000000"
 CHEAP_PPS = "100000000000000"
 
 
+def _rated(*pps_values):
+    """Build a /bids/rated response envelope (price nested under "Bid").
+
+    Mirrors the real proxy-router shape:
+    {"bids": [{"ID": "0x..", "Bid": {"PricePerSecond": ...}, "Score": ..}]}.
+    """
+    return {
+        "bids": [
+            {
+                "ID": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "Bid": {"Id": "0xbid", "PricePerSecond": pps, "Provider": "0xprov"},
+                "Score": 65.0,
+            }
+            for pps in pps_values
+        ]
+    }
+
+
 # ---------------------------------------------------------------------------
 # _get_model_min_price_per_second: parsing + best-effort failure
 # ---------------------------------------------------------------------------
 
 
 async def test_min_price_picks_lowest_and_converts_wei_to_mor(service):
-    with _patch_rated_bids([{"PricePerSecond": PREMIUM_PPS}, {"PricePerSecond": CHEAP_PPS}]):
+    with _patch_rated_bids(_rated(PREMIUM_PPS, CHEAP_PPS)):
         price = await service._get_model_min_price_per_second("0xmodel")
     assert price == pytest.approx(0.0001)
 
 
-async def test_min_price_supports_dict_bids_envelope(service):
+async def test_min_price_parses_real_rated_envelope(service):
+    """Regression: /bids/rated nests PricePerSecond under "Bid" (not top level)."""
+    with _patch_rated_bids(_rated(PREMIUM_PPS)):
+        price = await service._get_model_min_price_per_second("0xmodel")
+    assert price == pytest.approx(0.01)
+
+
+async def test_min_price_supports_flat_bids_fallback(service):
+    """Older/flat shape (PricePerSecond at the top level) still parses."""
     with _patch_rated_bids({"bids": [{"PricePerSecond": PREMIUM_PPS}]}):
         price = await service._get_model_min_price_per_second("0xmodel")
     assert price == pytest.approx(0.01)
@@ -92,14 +118,14 @@ async def test_disabled_when_cutoff_zero_skips_price_lookup(service):
 
 async def test_expensive_when_price_at_or_above_cutoff(service):
     with patch.object(settings, "SESSION_EXPENSIVE_CUTOFF_MOR_PER_SECOND", 0.001), _patch_rated_bids(
-        [{"PricePerSecond": PREMIUM_PPS}]
+        _rated(PREMIUM_PPS)
     ):
         assert await service._is_expensive_model("0xmodel") is True
 
 
 async def test_not_expensive_when_price_below_cutoff(service):
     with patch.object(settings, "SESSION_EXPENSIVE_CUTOFF_MOR_PER_SECOND", 0.001), _patch_rated_bids(
-        [{"PricePerSecond": CHEAP_PPS}]
+        _rated(CHEAP_PPS)
     ):
         assert await service._is_expensive_model("0xmodel") is False
 
@@ -113,7 +139,7 @@ async def test_decision_is_cached_within_ttl(service):
     with patch.object(settings, "SESSION_EXPENSIVE_CUTOFF_MOR_PER_SECOND", 0.001), patch(
         "src.services.session_routing_service.proxy_router_service.getRatedBids",
         new_callable=AsyncMock,
-        return_value=_bids_response([{"PricePerSecond": PREMIUM_PPS}]),
+        return_value=_bids_response(_rated(PREMIUM_PPS)),
     ) as get_bids:
         assert await service._is_expensive_model("0xmodel") is True
         assert await service._is_expensive_model("0xmodel") is True

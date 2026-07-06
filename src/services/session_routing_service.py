@@ -131,7 +131,11 @@ class SessionRoutingService:
             for bid in bids:
                 if not isinstance(bid, dict):
                     continue
-                pps = bid.get("PricePerSecond")
+                # /bids/rated wraps each entry as {"ID":..., "Bid": {...,
+                # "PricePerSecond": ...}, "Score": ...}. Read the nested Bid,
+                # falling back to the flat shape for robustness.
+                inner = bid.get("Bid") if isinstance(bid.get("Bid"), dict) else bid
+                pps = inner.get("PricePerSecond")
                 if pps is None:
                     continue
                 try:
