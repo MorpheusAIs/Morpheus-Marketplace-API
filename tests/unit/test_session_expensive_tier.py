@@ -9,6 +9,7 @@ the global session settings. The proxy-router bid read is mocked here.
 import os
 import sys
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -162,6 +163,20 @@ def _patch_get_db():
     return patch("src.services.session_routing_service.get_db", _fake_get_db)
 
 
+def _patch_session_status(ends_at=None, side_effect=None):
+    """Patch getSessionStatus to return an on-chain endsAt (Go-style keys)."""
+    kwargs = {}
+    if side_effect is not None:
+        kwargs["side_effect"] = side_effect
+    else:
+        kwargs["return_value"] = {"session": {"Id": "0xnew", "EndsAt": ends_at}}
+    return patch(
+        "src.services.session_routing_service.proxy_router_service.getSessionStatus",
+        new_callable=AsyncMock,
+        **kwargs,
+    )
+
+
 async def test_open_uses_expensive_duration_for_expensive_model(service):
     service._is_expensive_model = AsyncMock(return_value=True)
     open_session = AsyncMock(return_value={"sessionID": "0xnew"})
@@ -171,7 +186,7 @@ async def test_open_uses_expensive_duration_for_expensive_model(service):
     ), patch(
         "src.services.session_routing_service.proxy_router_service.openSession",
         open_session,
-    ):
+    ), _patch_session_status(ends_at=2_000_000_000):
         sid = await service._open_session_for_model(model_id="0xmodel", model_name="m")
 
     assert sid == "0xnew"
@@ -187,8 +202,82 @@ async def test_open_uses_default_duration_for_cheap_model(service):
     ), patch(
         "src.services.session_routing_service.proxy_router_service.openSession",
         open_session,
-    ):
+    ), _patch_session_status(ends_at=2_000_000_000):
         sid = await service._open_session_for_model(model_id="0xmodel", model_name="m")
 
     assert sid == "0xnew"
     assert open_session.call_args.kwargs["session_duration"] == 4200
+
+
+# ---------------------------------------------------------------------------
+# expires_at anchoring: align to the on-chain endsAt (+ buffer), not a
+# call-start estimate, so cleanup closes land AT/AFTER endsAt (late close ->
+# full stake straight to the wallet, no userStakesOnHold / housekeeping).
+# ---------------------------------------------------------------------------
+
+
+def test_parse_onchain_ends_at_go_style_keys(service):
+    assert service._parse_onchain_ends_at({"session": {"EndsAt": 1783364629}}) == 1783364629
+
+
+def test_parse_onchain_ends_at_rejects_zero_and_missing(service):
+    assert service._parse_onchain_ends_at({"session": {"EndsAt": 0}}) is None
+    assert service._parse_onchain_ends_at({"session": {}}) is None
+    assert service._parse_onchain_ends_at({}) is None
+    assert service._parse_onchain_ends_at(None) is None
+
+
+async def test_open_anchors_expires_at_to_onchain_ends_at(service):
+    """expires_at is derived from the on-chain endsAt + buffer, not the estimate."""
+    service._is_expensive_model = AsyncMock(return_value=False)
+    open_session = AsyncMock(return_value={"sessionID": "0xnew"})
+    ends_at = 2_000_000_000  # on-chain endsAt (unix seconds)
+
+    captured = {}
+    db = AsyncMock()
+    db.add = MagicMock(side_effect=lambda row: captured.update(expires_at=row.expires_at))
+
+    @asynccontextmanager
+    async def _fake_get_db():
+        yield db
+
+    with patch("src.services.session_routing_service.get_db", _fake_get_db), patch.object(
+        settings, "SESSION_DEFAULT_DURATION_SECONDS", 4200
+    ), patch.object(settings, "SESSION_EXPIRY_BUFFER_SECONDS", 60), patch(
+        "src.services.session_routing_service.proxy_router_service.openSession",
+        open_session,
+    ), _patch_session_status(ends_at=ends_at):
+        await service._open_session_for_model(model_id="0xmodel", model_name="m")
+
+    expected = datetime.fromtimestamp(ends_at, tz=timezone.utc).replace(tzinfo=None) + timedelta(
+        seconds=60
+    )
+    assert captured["expires_at"] == expected
+
+
+async def test_open_falls_back_to_estimate_when_status_read_fails(service):
+    """A failed endsAt read must not block the open; fall back to the estimate."""
+    service._is_expensive_model = AsyncMock(return_value=False)
+    open_session = AsyncMock(return_value={"sessionID": "0xnew"})
+
+    captured = {}
+    db = AsyncMock()
+    db.add = MagicMock(side_effect=lambda row: captured.update(expires_at=row.expires_at))
+
+    @asynccontextmanager
+    async def _fake_get_db():
+        yield db
+
+    before = datetime.now(timezone.utc).replace(tzinfo=None)
+    with patch("src.services.session_routing_service.get_db", _fake_get_db), patch.object(
+        settings, "SESSION_DEFAULT_DURATION_SECONDS", 4200
+    ), patch(
+        "src.services.session_routing_service.proxy_router_service.openSession",
+        open_session,
+    ), _patch_session_status(side_effect=RuntimeError("proxy down")):
+        sid = await service._open_session_for_model(model_id="0xmodel", model_name="m")
+
+    assert sid == "0xnew"
+    # Fallback estimate ~ now + duration (far below the year-2033 on-chain value).
+    assert captured["expires_at"] >= before + timedelta(seconds=4200)
+    assert captured["expires_at"] < before + timedelta(seconds=4200 + 3600)

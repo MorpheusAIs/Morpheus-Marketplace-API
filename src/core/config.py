@@ -182,6 +182,15 @@ class Settings(BaseSettings):
     SESSION_IDLE_GRACE_SECONDS: int = Field(default=int(os.getenv("SESSION_IDLE_GRACE_SECONDS", "300")))
     # Default session duration when creating new sessions (in seconds)
     SESSION_DEFAULT_DURATION_SECONDS: int = Field(default=int(os.getenv("SESSION_DEFAULT_DURATION_SECONDS", "1800")))
+    # Buffer (seconds) added on top of the ACTUAL on-chain endsAt when setting a
+    # routed session's DB expires_at. The cleanup sweep closes a session once
+    # now >= expires_at; anchoring to the real on-chain endsAt (read back after
+    # open) plus this small buffer guarantees the close lands AT/AFTER endsAt (a
+    # "late" close), so the full stake returns straight to the wallet instead of
+    # a stipend chunk being locked in userStakesOnHold (which then needs the
+    # housekeeping Lambda's withdrawUserStakes to recover). Keep small — just
+    # enough to clear host/chain clock skew and block/mining latency, not slop.
+    SESSION_EXPIRY_BUFFER_SECONDS: int = Field(default=int(os.getenv("SESSION_EXPIRY_BUFFER_SECONDS", "60")))
     # Comma-separated list of preferred models (keep at least one idle session)
     SESSION_PREFERRED_MODELS: str = Field(default=os.getenv("SESSION_PREFERRED_MODELS", ""))
 
