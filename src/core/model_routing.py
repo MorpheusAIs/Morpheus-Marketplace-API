@@ -16,7 +16,15 @@ class ModelRouter:
     """
     Handles routing of model names to blockchain IDs using DirectModelService.
     """
-    
+
+    # Acceptable active_models.json ModelType values per request type. Request
+    # types not listed here (e.g. TTS/STT, which the feed does not type
+    # distinctly yet) skip the compatibility check.
+    COMPATIBLE_MODEL_TYPES = {
+        "LLM": {"LLM"},
+        "EMBEDDINGS": {"EMBEDDING"},
+    }
+
     def __init__(self):
         logger.info("Initialized ModelRouter with DirectModelService",
                    event_type="model_router_init")
@@ -51,6 +59,21 @@ class ModelRouter:
         # Try to resolve using DirectModelService
         try:
             resolved_id = await direct_model_service.resolve_model_id(requested_model)
+
+            # A resolved model must be usable by this endpoint type. Without
+            # this check a chat completion naming an EMBEDDING model opens a
+            # session with the embedding provider, whose backend then rejects
+            # the chat payload ("Router.aembedding() missing ... 'input'").
+            # Treat a mismatch like an unknown model: fall back to the
+            # default model for the requested type.
+            if resolved_id and not await self._is_type_compatible(resolved_id, type):
+                logger.warning("Requested model type is incompatible with endpoint",
+                              requested_model=requested_model,
+                              resolved_id=resolved_id,
+                              requested_type=type,
+                              event_type="model_type_mismatch")
+                resolved_id = None
+
             if resolved_id:
                 logger.info("Found model mapping",
                            requested_model=requested_model,
@@ -88,6 +111,36 @@ class ModelRouter:
                           event_type="default_model_error_fallback")
             return default_id
     
+    async def _is_type_compatible(self, blockchain_id: str, type: Optional[str]) -> bool:
+        """
+        Check whether a resolved model's ModelType is usable for the requested
+        endpoint type ("LLM", "EMBEDDINGS", ...).
+
+        Returns True when the request type has no compatibility rule, or the
+        model's type cannot be determined (fail open - never block routing on
+        missing metadata).
+        """
+        compatible_types = self.COMPATIBLE_MODEL_TYPES.get(type)
+        if not compatible_types:
+            return True
+
+        try:
+            model_name = await direct_model_service.get_model_name_from_id(blockchain_id)
+            if not model_name:
+                return True
+            model_types = await direct_model_service.get_model_mapping_type()
+            model_type = model_types.get(model_name.lower())
+            if not model_type:
+                return True
+            return model_type in compatible_types
+        except Exception as e:
+            logger.error("Error checking model type compatibility - failing open",
+                        blockchain_id=blockchain_id,
+                        requested_type=type,
+                        error=str(e),
+                        event_type="model_type_check_error")
+            return True
+
     async def _get_default_model_id(self, type: Optional[str] = "LLM") -> str:
         """Get the blockchain ID for the default model"""
         try:
