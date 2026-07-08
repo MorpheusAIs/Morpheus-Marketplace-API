@@ -1,9 +1,74 @@
 import pytest
+from unittest.mock import AsyncMock, patch
+
 from src.core.model_routing import ModelRouter
 
 @pytest.fixture
 def model_router():
     return ModelRouter()
+
+
+EMBED_ID = "0x" + "aa" * 32
+LLM_ID = "0x" + "bb" * 32
+DEFAULT_LLM_ID = "0x" + "cc" * 32
+DEFAULT_EMBED_ID = EMBED_ID
+
+
+def _patched_model_service():
+    """Patch direct_model_service with a small fixed catalog."""
+    mapping = {
+        "text-embedding-bge-m3": EMBED_ID,
+        "some-llm": LLM_ID,
+        "mistral-31-24b": DEFAULT_LLM_ID,
+    }
+    id_to_name = {v: k for k, v in mapping.items()}
+    mapping_type = {
+        "text-embedding-bge-m3": "EMBEDDING",
+        "some-llm": "LLM",
+        "mistral-31-24b": "LLM",
+    }
+    service = patch.multiple(
+        "src.core.model_routing.direct_model_service",
+        resolve_model_id=AsyncMock(side_effect=lambda m: mapping.get(m.lower())),
+        get_model_name_from_id=AsyncMock(side_effect=lambda i: id_to_name.get(i)),
+        get_model_mapping_type=AsyncMock(return_value=mapping_type),
+        get_model_mapping=AsyncMock(return_value=mapping),
+        get_blockchain_ids=AsyncMock(return_value=set(mapping.values())),
+    )
+    return service
+
+
+@pytest.mark.asyncio
+async def test_chat_request_for_embedding_model_falls_back_to_default_llm(model_router):
+    # A chat completion (type="LLM") naming an EMBEDDING model must NOT route
+    # to the embedding provider (its backend rejects chat payloads with
+    # "Router.aembedding() missing 1 required positional argument: 'input'").
+    with _patched_model_service():
+        result = await model_router.get_target_model("text-embedding-bge-m3", type="LLM")
+    assert result == DEFAULT_LLM_ID
+
+
+@pytest.mark.asyncio
+async def test_embeddings_request_for_llm_model_falls_back_to_default_embeddings(model_router):
+    with _patched_model_service():
+        result = await model_router.get_target_model("some-llm", type="EMBEDDINGS")
+    assert result == DEFAULT_EMBED_ID
+
+
+@pytest.mark.asyncio
+async def test_matching_types_resolve_normally(model_router):
+    with _patched_model_service():
+        assert await model_router.get_target_model("some-llm", type="LLM") == LLM_ID
+        assert await model_router.get_target_model(
+            "text-embedding-bge-m3", type="EMBEDDINGS"
+        ) == EMBED_ID
+
+
+@pytest.mark.asyncio
+async def test_unlisted_request_type_skips_compatibility_check(model_router):
+    # TTS/STT are not typed distinctly in active_models.json - no rule, no block.
+    with _patched_model_service():
+        assert await model_router.get_target_model("some-llm", type="TTS") == LLM_ID
 
 @pytest.mark.asyncio
 async def test_get_target_model_valid_name(model_router):
