@@ -31,6 +31,29 @@ class TestIsFailoverEligible:
         assert chat_failover.is_failover_eligible(exc) is True
 
     @pytest.mark.parametrize("exc", [
+        # Impaired provider: model backend rate-limited / out of capacity.
+        # Newer proxy-routers propagate the real upstream status (429/503).
+        _err('HTTP 429: {"providerModelError":{"error":{"message":"Rate limit exceeded","code":"rate_limit_exceeded"}},"upstreamStatusCode":429}', 429, "rate_limit_error"),
+        _err('HTTP 503: {"providerModelError":{"error":{"message":"Model is currently overloaded"}},"upstreamStatusCode":503}', 503, "server_error"),
+        # Older proxy-routers collapse backend errors into HTTP 400 with a
+        # providerModelError body; the pattern fallback must catch these.
+        _err('HTTP 400: {"providerModelError":{"error":{"message":"Rate limit exceeded, please try again later"}}}', 400, "client_error"),
+        _err('HTTP 400: {"providerModelError":{"error":{"message":"Too Many Requests"}}}', 400, "client_error"),
+        _err('HTTP 400: {"providerModelError":{"error":{"message":"The model is at capacity"}}}', 400, "client_error"),
+        _err('HTTP 400: {"providerModelError":{"error":{"message":"model unavailable"}}}', 400, "client_error"),
+        # Newer provider behind an older consumer node: upstreamStatusCode is
+        # embedded in the body even though the HTTP status is still 400.
+        _err('HTTP 400: {"providerModelError":{"error":"busy"},"upstreamStatusCode":429}', 400, "client_error"),
+        # Provider-backend config failure (e.g. provider's Venice key is bad):
+        # the gateway remaps 401/403/404 + providerModelError to 502
+        # provider_error, which is failover-eligible — another bid may be
+        # configured correctly.
+        _err('HTTP 502: {"providerModelError":{"error":"Authentication failed"},"upstreamStatusCode":401}', 502, "provider_error"),
+    ])
+    def test_impaired_provider_is_eligible(self, exc):
+        assert chat_failover.is_failover_eligible(exc) is True
+
+    @pytest.mark.parametrize("exc", [
         # Session-state errors belong to the SEPARATE renewal mechanism —
         # failover must NOT trigger even though they arrive as 500.
         _err('HTTP 500: {"error":"session expired"}', 500, "server_error"),
@@ -42,6 +65,12 @@ class TestIsFailoverEligible:
         _err('HTTP 500: {"error":"llm tee verification failed"}', 500, "server_error"),
         _err('HTTP 500: {"error":"request cancelled while waiting in queue: context canceled"}', 500, "server_error"),
         _err("something odd with no status and no known pattern", None, "unknown"),
+        # Genuine provider-side client errors (backend reached, request/config
+        # bad) must NOT fail over even though they carry providerModelError.
+        _err('HTTP 400: {"providerModelError":{"error":"Authentication failed"}}', 400, "client_error"),
+        _err('HTTP 400: {"providerModelError":{"error":{"message":"invalid request body"}}}', 400, "client_error"),
+        # Capacity-like words WITHOUT a providerModelError body stay ineligible.
+        _err('HTTP 400: {"error":"rate limit exceeded"}', 400, "client_error"),
     ])
     def test_not_eligible(self, exc):
         assert chat_failover.is_failover_eligible(exc) is False
@@ -65,6 +94,15 @@ def mock_user():
     return user
 
 
+FAILED_PROVIDER = "0xAbC1234567890abcdef1234567890abcdef12345"
+
+
+def _session_row(provider_address=FAILED_PROVIDER):
+    row = MagicMock()
+    row.provider_address = provider_address
+    return row
+
+
 @pytest.fixture
 def failover_mocks(mock_user):
     """Patch DB, routing service and bids lookup used by attempt_failover."""
@@ -77,6 +115,8 @@ def failover_mocks(mock_user):
             return False
 
     with patch.object(chat_failover, "get_db", lambda: FakeGetDb()), \
+         patch.object(chat_failover.session_routing_service, "get_session_info",
+                      new_callable=AsyncMock, return_value=_session_row()) as session_info, \
          patch.object(chat_failover.session_routing_service, "invalidate_session",
                       new_callable=AsyncMock, return_value=True) as invalidate, \
          patch.object(chat_failover.session_routing_service, "route_request",
@@ -84,7 +124,8 @@ def failover_mocks(mock_user):
          patch.object(chat_failover.proxy_router_service, "getRatedBids",
                       new_callable=AsyncMock, return_value=_rated_bids_response(2)) as bids, \
          patch.object(chat_failover.asyncio, "sleep", new_callable=AsyncMock):
-        yield {"invalidate": invalidate, "route": route, "bids": bids, "user": mock_user}
+        yield {"session_info": session_info, "invalidate": invalidate,
+               "route": route, "bids": bids, "user": mock_user}
 
 
 def _failover(mocks, **overrides):
@@ -107,6 +148,25 @@ class TestAttemptFailover:
         failover_mocks["invalidate"].assert_awaited_once()
         failover_mocks["bids"].assert_awaited_once()
         failover_mocks["route"].assert_awaited_once()
+
+    async def test_reroute_excludes_failed_provider(self, failover_mocks):
+        """The failed session's provider is passed as omit_provider so the
+        retry can't land on the same impaired (but reachable) provider."""
+        await _failover(failover_mocks)
+        assert failover_mocks["route"].await_args.kwargs["omit_provider"] == FAILED_PROVIDER
+
+    async def test_unknown_provider_reroutes_without_exclusion(self, failover_mocks):
+        """Legacy rows without a stored provider still fail over (omit=None)."""
+        failover_mocks["session_info"].return_value = _session_row(provider_address=None)
+        new_id = await _failover(failover_mocks)
+        assert new_id == "0xnew"
+        assert failover_mocks["route"].await_args.kwargs["omit_provider"] is None
+
+    async def test_missing_session_row_reroutes_without_exclusion(self, failover_mocks):
+        failover_mocks["session_info"].return_value = None
+        new_id = await _failover(failover_mocks)
+        assert new_id == "0xnew"
+        assert failover_mocks["route"].await_args.kwargs["omit_provider"] is None
 
     async def test_single_bid_skips_invalidate_and_retry(self, failover_mocks):
         # Single-bid: nothing to fail over to. The session must be left OPEN

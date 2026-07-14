@@ -60,13 +60,48 @@ PROVIDER_FAILURE_PATTERNS = [
     "failed to create chat completions stream",
 ]
 
+# Impaired-provider signatures inside a providerModelError body: the provider
+# is reachable but its model backend (Venice etc.) is rate-limited or out of
+# capacity. Newer proxy-routers surface these with the real upstream status
+# (429/503); older ones collapse them into HTTP 400, so these patterns are
+# the fallback for recognizing them in the embedded error text.
+IMPAIRED_PROVIDER_PATTERNS = [
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "capacity",
+    "overloaded",
+    "model unavailable",
+    "model is unavailable",
+    "service unavailable",
+    # upstreamStatusCode emitted by newer providers but collapsed to HTTP 400
+    # by an older consumer node in between.
+    '"upstreamstatuscode":429',
+    '"upstreamstatuscode": 429',
+    '"upstreamstatuscode":503',
+    '"upstreamstatuscode": 503',
+]
+
+
+def _is_impaired_provider_error(message: str) -> bool:
+    """True for providerModelError bodies that signal rate-limit/capacity.
+
+    Only applies to provider model errors (backend reached, backend degraded);
+    other 4xx bodies (auth failed, malformed request) stay ineligible.
+    """
+    if "providermodelerror" not in message:
+        return False
+    return any(p in message for p in IMPAIRED_PROVIDER_PATTERNS)
+
 
 def is_failover_eligible(exc: proxy_router_service.ProxyRouterServiceError) -> bool:
-    """Decide whether a proxy error means the provider is unavailable.
+    """Decide whether a proxy error means the provider is unavailable/impaired.
 
-    Eligible: provider unreachable / 5xx / timeouts / transport failures.
+    Eligible: provider unreachable / 5xx / timeouts / transport failures /
+    rate-limited or out-of-capacity model backends (429, or capacity patterns
+    inside a providerModelError body).
     Not eligible: session expired/not found (separate renewal mechanism),
-    user/4xx errors, TEE failures, client-cancelled requests.
+    genuine user/4xx errors, TEE failures, client-cancelled requests.
     """
     if not settings.CHAT_FAILOVER_ENABLED:
         return False
@@ -76,8 +111,13 @@ def is_failover_eligible(exc: proxy_router_service.ProxyRouterServiceError) -> b
         return False
 
     status = exc.status_code
+    if status == 429:
+        # Provider's model backend is rate-limited — treat as impaired.
+        return True
     if status is not None and 400 <= status < 500:
-        return False
+        # Older proxy-routers collapse backend 429/503 into HTTP 400 with a
+        # providerModelError body; recognize those by pattern as a fallback.
+        return _is_impaired_provider_error(message)
     if status is not None and status >= 500:
         return True
     # No status: gateway<->proxy transport failure, or wrapped errors.
@@ -179,11 +219,18 @@ async def attempt_failover(
                             failure_reason=failure_reason[:300],
                             event_type="failover_triggered")
 
-    # 2. A sibling bid exists and is worth trying. Unpin the dead session so no
-    #    request routes to it again (marks FAILED + best-effort background
-    #    on-chain close).
+    # 2. A sibling bid exists and is worth trying. Look up which provider
+    #    served the dead session (so the reroute can exclude it), then unpin
+    #    the session so no request routes to it again (marks FAILED +
+    #    best-effort background on-chain close).
+    failed_provider: Optional[str] = None
     try:
         async with get_db() as db:
+            session_row = await session_routing_service.get_session_info(
+                db, original_session_id
+            )
+            if session_row is not None:
+                failed_provider = session_row.provider_address
             await session_routing_service.invalidate_session(
                 db, original_session_id, failure_reason[:300]
             )
@@ -193,14 +240,18 @@ async def attempt_failover(
                               event_type="failover_invalidate_failed")
         return None
 
-    # 3. Open/route a fresh session by model. The proxy-router tries bids
-    #    best-first with a provider handshake per bid, so the dead
-    #    provider is skipped automatically.
+    # 3. Open/route a fresh session by model, excluding the failed provider
+    #    (omitProvider in the proxy-router's bid selection + skipping its
+    #    sibling idle sessions). Crucial for IMPAIRED providers: they pass the
+    #    session-open handshake (TCP is fine, only the backend is broken), so
+    #    without the exclusion the top-rated — broken — bid would be picked
+    #    again. Transport-dead providers were already skipped by the handshake.
     try:
         new_session_id = await session_routing_service.route_request(
             user_id=user.id,
             requested_model=requested_model,
             model_type="LLM",
+            omit_provider=failed_provider,
         )
     except Exception as e:
         failover_logger.error("Failover rerouting failed",

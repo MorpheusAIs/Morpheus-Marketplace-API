@@ -94,6 +94,8 @@ class ProxyRouterServiceError(Exception):
             "validation_error": 400,
             "not_found_error": 404,
             "client_error": 400,
+            "rate_limit_error": 429,
+            "provider_error": 502,
             "server_error": 503,
             "network_error": 503,
             "timeout_error": 504,
@@ -139,6 +141,30 @@ def is_nonce_error(message: str) -> bool:
         return False
     text_lower = message.lower()
     return any(pattern in text_lower for pattern in NONCE_ERROR_PATTERNS)
+
+
+# Backend statuses inside a providerModelError that mean the PROVIDER is
+# misconfigured or broken (its own credentials/model config for the backend),
+# not the gateway client. Surfacing them as-is would mislead clients — e.g. a
+# passed-through 401 makes an OpenAI SDK believe its own gateway API key is
+# invalid — so they are remapped to 502 Bad Gateway (upstream failure), which
+# also makes them failover-eligible like any other impaired-provider error.
+PROVIDER_CONFIG_ERROR_STATUSES = {401, 403, 404}
+
+
+def remap_provider_upstream_error(status_code: int, response_text: str):
+    """Remap provider-backend config failures to (502, "provider_error").
+
+    Applies only to providerModelError bodies (the provider reached its model
+    backend and the backend rejected the PROVIDER'S request). Other statuses,
+    including 429 (propagated as-is for client backoff) and 400/422 (the
+    client's request may genuinely be malformed), are left untouched.
+
+    Returns (status_code, error_type) or None when no remap applies.
+    """
+    if status_code in PROVIDER_CONFIG_ERROR_STATUSES and "providermodelerror" in response_text.lower():
+        return 502, "provider_error"
+    return None
 
 
 
@@ -255,8 +281,25 @@ async def _execute_request(
             error_type = "http_error"
             if status_code >= 500:
                 error_type = "server_error"
+            elif status_code == 429:
+                # Provider's model backend rate-limited the request; keep it
+                # distinguishable from genuine client errors so failover logic
+                # and clients can react appropriately.
+                error_type = "rate_limit_error"
             elif status_code >= 400:
                 error_type = "client_error"
+
+            # Provider-side backend config failures (401/403/404 with a
+            # providerModelError body) are the provider's fault, not the
+            # client's — surface them as 502 so clients don't mistake them
+            # for their own auth/request errors. The original status stays
+            # visible in the message body (upstreamStatusCode).
+            remapped = remap_provider_upstream_error(status_code, response.text)
+            if remapped:
+                req_logger.warning("Remapping provider upstream config error to 502",
+                              original_status_code=status_code,
+                              event_type="provider_upstream_error_remap")
+                status_code, error_type = remapped
             
             # Nonce conflicts are non-retriable HERE: re-sending the identical
             # request never fixes a nonce race. Surfacing it immediately lets the
@@ -337,6 +380,7 @@ async def openSession(
     session_duration: int = 3600,
     failover: bool = False,
     direct_payment: bool = False,
+    omit_provider: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Open a new session with the proxy router.
@@ -347,6 +391,10 @@ async def openSession(
         user_id: User ID for logging
         failover: Whether to enable failover
         direct_payment: Whether to use direct payment
+        omit_provider: Provider address (0x hex) to exclude from bid
+            selection — used by failover to avoid reopening on the provider
+            that just failed. Requires a proxy-router that supports the
+            omitProvider field (older ones ignore unknown JSON fields).
         
     Returns:
         Dict containing session information including sessionID
@@ -356,6 +404,7 @@ async def openSession(
     """
     logger.info("Opening proxy router session",
                target_model=target_model,
+               omit_provider=omit_provider,
                event_type="session_open_start")
     
     # Validate model format
@@ -371,6 +420,8 @@ async def openSession(
         "failover": failover,
         "directPayment": direct_payment
     }
+    if omit_provider:
+        session_data["omitProvider"] = omit_provider
     
     headers = {"Content-Type": "application/json"}
     
@@ -804,10 +855,22 @@ async def chatCompletionsStream(
                     # Read the error response body to get detailed error information
                     error_body = await response.aread()
                     error_text = error_body.decode("utf-8", errors="replace")
-                    error_type = "server_error" if response.status_code >= 500 else "client_error"
+                    status_code = response.status_code
+                    if status_code >= 500:
+                        error_type = "server_error"
+                    elif status_code == 429:
+                        error_type = "rate_limit_error"
+                    else:
+                        error_type = "client_error"
+                    remapped = remap_provider_upstream_error(status_code, error_text)
+                    if remapped:
+                        req_logger.warning("Remapping provider upstream config error to 502",
+                                      original_status_code=status_code,
+                                      event_type="provider_upstream_error_remap")
+                        status_code, error_type = remapped
                     raise ProxyRouterServiceError(
-                        sanitize_error_message(f"HTTP {response.status_code}: {error_text}"),
-                        status_code=response.status_code,
+                        sanitize_error_message(f"HTTP {status_code}: {error_text}"),
+                        status_code=status_code,
                         error_type=error_type
                     )
                 yield response

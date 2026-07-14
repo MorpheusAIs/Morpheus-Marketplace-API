@@ -72,7 +72,7 @@ async def test_fast_path_returns_claimed_session_without_open(service, mock_db):
         session_id = await service.route_request(user_id=1, requested_model="m")
 
     assert session_id == "0xidle"
-    service._claim_idle_session.assert_awaited_once_with(mock_db, "0xmodel")
+    service._claim_idle_session.assert_awaited_once_with(mock_db, "0xmodel", omit_provider=None)
     service._open_session_for_model.assert_not_awaited()
 
 
