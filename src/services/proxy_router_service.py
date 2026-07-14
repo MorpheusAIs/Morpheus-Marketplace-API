@@ -293,7 +293,7 @@ async def _execute_request(
             # providerModelError body) are the provider's fault, not the
             # client's — surface them as 502 so clients don't mistake them
             # for their own auth/request errors. The original status stays
-            # visible in the message body (upstreamStatusCode).
+            # visible in the message body (statusCode).
             remapped = remap_provider_upstream_error(status_code, response.text)
             if remapped:
                 req_logger.warning("Remapping provider upstream config error to 502",

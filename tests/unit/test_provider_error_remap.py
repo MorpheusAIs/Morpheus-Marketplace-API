@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from src.services.proxy_router_service import remap_provider_upstream_error
 
-PROVIDER_AUTH_BODY = '{"providerModelError":{"error":"Authentication failed"},"upstreamStatusCode":401}'
+PROVIDER_AUTH_BODY = '{"providerModelError":{"error":"Authentication failed"},"statusCode":401}'
 
 
 @pytest.mark.parametrize("status", [401, 403, 404])
@@ -24,12 +24,12 @@ def test_provider_config_statuses_remap_to_502(status):
 
 @pytest.mark.parametrize("status,body", [
     # 429 must pass through untouched so clients back off properly.
-    (429, '{"providerModelError":{"error":{"message":"Rate limit exceeded"}},"upstreamStatusCode":429}'),
+    (429, '{"providerModelError":{"error":{"message":"Rate limit exceeded"}},"statusCode":429}'),
     # 400/422: the client's request may genuinely be malformed.
     (400, '{"providerModelError":{"error":{"message":"invalid request body"}}}'),
     (422, '{"providerModelError":{"error":{"message":"unsupported parameter"}}}'),
     # 5xx already surfaces as server_error / failover.
-    (503, '{"providerModelError":{"error":"overloaded"},"upstreamStatusCode":503}'),
+    (503, '{"providerModelError":{"error":"overloaded"},"statusCode":503}'),
     # 401 WITHOUT a providerModelError body is a real auth error between the
     # gateway and the proxy-router — must not be masked.
     (401, '{"error":"unauthorized"}'),

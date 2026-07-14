@@ -74,12 +74,12 @@ IMPAIRED_PROVIDER_PATTERNS = [
     "model unavailable",
     "model is unavailable",
     "service unavailable",
-    # upstreamStatusCode emitted by newer providers but collapsed to HTTP 400
-    # by an older consumer node in between.
-    '"upstreamstatuscode":429',
-    '"upstreamstatuscode": 429',
-    '"upstreamstatuscode":503',
-    '"upstreamstatuscode": 503',
+    # statusCode emitted by newer providers (proxy-router AiEngineErrorResponse)
+    # but collapsed to HTTP 400 by an older consumer node in between.
+    '"statuscode":429',
+    '"statuscode": 429',
+    '"statuscode":503',
+    '"statuscode": 503',
 ]
 
 

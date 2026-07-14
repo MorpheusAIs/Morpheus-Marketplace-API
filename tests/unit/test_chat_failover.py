@@ -33,22 +33,22 @@ class TestIsFailoverEligible:
     @pytest.mark.parametrize("exc", [
         # Impaired provider: model backend rate-limited / out of capacity.
         # Newer proxy-routers propagate the real upstream status (429/503).
-        _err('HTTP 429: {"providerModelError":{"error":{"message":"Rate limit exceeded","code":"rate_limit_exceeded"}},"upstreamStatusCode":429}', 429, "rate_limit_error"),
-        _err('HTTP 503: {"providerModelError":{"error":{"message":"Model is currently overloaded"}},"upstreamStatusCode":503}', 503, "server_error"),
+        _err('HTTP 429: {"providerModelError":{"error":{"message":"Rate limit exceeded","code":"rate_limit_exceeded"}},"statusCode":429}', 429, "rate_limit_error"),
+        _err('HTTP 503: {"providerModelError":{"error":{"message":"Model is currently overloaded"}},"statusCode":503}', 503, "server_error"),
         # Older proxy-routers collapse backend errors into HTTP 400 with a
         # providerModelError body; the pattern fallback must catch these.
         _err('HTTP 400: {"providerModelError":{"error":{"message":"Rate limit exceeded, please try again later"}}}', 400, "client_error"),
         _err('HTTP 400: {"providerModelError":{"error":{"message":"Too Many Requests"}}}', 400, "client_error"),
         _err('HTTP 400: {"providerModelError":{"error":{"message":"The model is at capacity"}}}', 400, "client_error"),
         _err('HTTP 400: {"providerModelError":{"error":{"message":"model unavailable"}}}', 400, "client_error"),
-        # Newer provider behind an older consumer node: upstreamStatusCode is
+        # Newer provider behind an older consumer node: statusCode is
         # embedded in the body even though the HTTP status is still 400.
-        _err('HTTP 400: {"providerModelError":{"error":"busy"},"upstreamStatusCode":429}', 400, "client_error"),
+        _err('HTTP 400: {"providerModelError":{"error":"busy"},"statusCode":429}', 400, "client_error"),
         # Provider-backend config failure (e.g. provider's Venice key is bad):
         # the gateway remaps 401/403/404 + providerModelError to 502
         # provider_error, which is failover-eligible — another bid may be
         # configured correctly.
-        _err('HTTP 502: {"providerModelError":{"error":"Authentication failed"},"upstreamStatusCode":401}', 502, "provider_error"),
+        _err('HTTP 502: {"providerModelError":{"error":"Authentication failed"},"statusCode":401}', 502, "provider_error"),
     ])
     def test_impaired_provider_is_eligible(self, exc):
         assert chat_failover.is_failover_eligible(exc) is True

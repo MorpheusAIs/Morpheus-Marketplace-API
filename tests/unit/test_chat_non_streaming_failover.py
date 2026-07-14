@@ -33,7 +33,7 @@ USER_ERROR = ProxyRouterServiceError(
 )
 # Impaired provider: backend returned 429, propagated by newer proxy-routers.
 PROVIDER_RATE_LIMITED = ProxyRouterServiceError(
-    'HTTP 429: {"providerModelError":{"error":{"message":"Rate limit exceeded"}},"upstreamStatusCode":429}',
+    'HTTP 429: {"providerModelError":{"error":{"message":"Rate limit exceeded"}},"statusCode":429}',
     status_code=429,
     error_type="rate_limit_error",
 )
@@ -46,7 +46,7 @@ PROVIDER_RATE_LIMITED_LEGACY = ProxyRouterServiceError(
 # Provider's own backend credentials are broken (upstream 401): the service
 # layer remaps this to 502/provider_error before it reaches the handler.
 PROVIDER_AUTH_BROKEN = ProxyRouterServiceError(
-    'HTTP 502: {"providerModelError":{"error":"Authentication failed"},"upstreamStatusCode":401}',
+    'HTTP 502: {"providerModelError":{"error":"Authentication failed"},"statusCode":401}',
     status_code=502,
     error_type="provider_error",
 )
