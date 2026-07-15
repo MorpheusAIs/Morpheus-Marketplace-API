@@ -31,6 +31,25 @@ SESSION_EXPIRED = ProxyRouterServiceError(
 USER_ERROR = ProxyRouterServiceError(
     'HTTP 400: {"error":"invalid request"}', status_code=400, error_type="client_error",
 )
+# Impaired provider: backend returned 429, propagated by newer proxy-routers.
+PROVIDER_RATE_LIMITED = ProxyRouterServiceError(
+    'HTTP 429: {"providerModelError":{"error":{"message":"Rate limit exceeded"}},"statusCode":429}',
+    status_code=429,
+    error_type="rate_limit_error",
+)
+# Same condition through an older proxy-router that collapses it into 400.
+PROVIDER_RATE_LIMITED_LEGACY = ProxyRouterServiceError(
+    'HTTP 400: {"providerModelError":{"error":{"message":"Rate limit exceeded, please try again later"}}}',
+    status_code=400,
+    error_type="client_error",
+)
+# Provider's own backend credentials are broken (upstream 401): the service
+# layer remaps this to 502/provider_error before it reaches the handler.
+PROVIDER_AUTH_BROKEN = ProxyRouterServiceError(
+    'HTTP 502: {"providerModelError":{"error":"Authentication failed"},"statusCode":401}',
+    status_code=502,
+    error_type="provider_error",
+)
 
 
 def _fake_get_db():
@@ -115,6 +134,52 @@ async def test_session_expired_triggers_renewal_not_failover(mock_user):
     # Renewal session released exactly once; original NOT released here.
     release.assert_awaited_once()
     assert release.await_args.args[1] == "0xrenewed"
+
+
+@pytest.mark.parametrize("impaired_error", [PROVIDER_RATE_LIMITED, PROVIDER_RATE_LIMITED_LEGACY, PROVIDER_AUTH_BROKEN])
+async def test_impaired_provider_triggers_failover_retry(mock_user, impaired_error):
+    """A rate-limited/out-of-capacity backend fails over like a dead provider."""
+    with patch.object(chat_non_streaming.proxy_router_service, "chatCompletions",
+                      new_callable=AsyncMock, side_effect=[impaired_error, _success_response()]) as chat, \
+         patch.object(chat_non_streaming.chat_failover, "attempt_failover",
+                      new_callable=AsyncMock, return_value="0xnew") as failover, \
+         patch.object(chat_non_streaming.session_routing_service, "release_session",
+                      new_callable=AsyncMock) as release, \
+         patch.object(chat_non_streaming, "get_db", _fake_get_db()):
+        response = await _call(mock_user)
+
+    assert response.status_code == 200
+    assert chat.await_count == 2
+    assert chat.await_args_list[1].kwargs["session_id"] == "0xnew"
+    failover.assert_awaited_once()
+    release.assert_awaited_once()
+    assert release.await_args.args[1] == "0xnew"
+
+
+async def test_impaired_provider_without_alternate_surfaces_429(mock_user):
+    """Single-bid model: no failover possible, real 429 reaches the client."""
+    with patch.object(chat_non_streaming.proxy_router_service, "chatCompletions",
+                      new_callable=AsyncMock, side_effect=[PROVIDER_RATE_LIMITED]), \
+         patch.object(chat_non_streaming.chat_failover, "attempt_failover",
+                      new_callable=AsyncMock, return_value=None):
+        response = await _call(mock_user)
+
+    assert response.status_code == 429
+    payload = json.loads(response.body)
+    assert payload["error"]["type"] == "rate_limit_error"
+
+
+async def test_provider_auth_failure_without_alternate_surfaces_502(mock_user):
+    """Broken provider backend creds: client sees 502 provider_error, NOT 401."""
+    with patch.object(chat_non_streaming.proxy_router_service, "chatCompletions",
+                      new_callable=AsyncMock, side_effect=[PROVIDER_AUTH_BROKEN]), \
+         patch.object(chat_non_streaming.chat_failover, "attempt_failover",
+                      new_callable=AsyncMock, return_value=None):
+        response = await _call(mock_user)
+
+    assert response.status_code == 502
+    payload = json.loads(response.body)
+    assert payload["error"]["type"] == "provider_error"
 
 
 async def test_user_error_is_not_retried(mock_user):

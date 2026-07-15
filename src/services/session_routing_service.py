@@ -240,7 +240,8 @@ class SessionRoutingService:
         self,
         user_id: int,
         requested_model: Optional[str] = None,
-        model_type: str = "LLM"
+        model_type: str = "LLM",
+        omit_provider: Optional[str] = None,
     ) -> str:
         """
         Route an authorized request to an appropriate session.
@@ -254,6 +255,12 @@ class SessionRoutingService:
         This means any number of concurrent requests can queue for an open
         without pinning the DB pool (the wallet lock itself is the queue).
 
+        Args:
+            omit_provider: Provider address (0x hex) to avoid — set by
+                failover after a prompt failure. Idle sessions on that
+                provider are skipped and a newly opened session excludes it
+                from the proxy-router's bid selection.
+
         Returns:
             str: Session ID to use for the request
 
@@ -264,7 +271,8 @@ class SessionRoutingService:
         route_logger = logger.bind(
             user_id=user_id,
             requested_model=requested_model,
-            model_type=model_type
+            model_type=model_type,
+            omit_provider=omit_provider,
         )
 
         # Resolve model to blockchain ID
@@ -280,7 +288,7 @@ class SessionRoutingService:
         # a session to exactly one request, correct across replicas, and the
         # connection is released immediately (never held across the open below).
         async with get_db() as db:
-            claimed_id = await self._claim_idle_session(db, model_id)
+            claimed_id = await self._claim_idle_session(db, model_id, omit_provider=omit_provider)
         if claimed_id is not None:
             route_logger.info("Routed to idle session (atomic claim)",
                              session_id=claimed_id,
@@ -303,6 +311,7 @@ class SessionRoutingService:
             model_type=model_type,
             user_id=user_id,
             initial_active_requests=1,
+            omit_provider=omit_provider,
         )
 
     async def release_session(self, db: AsyncSession, session_id: str) -> None:
@@ -477,27 +486,51 @@ class SessionRoutingService:
             return None
         return ends_at if ends_at > 0 else None
 
-    async def _resolve_expires_at(
-        self, session_id: str, fallback: datetime, open_logger
+    @staticmethod
+    def _parse_provider_address(status: Any) -> Optional[str]:
+        """Extract the provider address (0x hex) from a getSessionStatus body.
+
+        Same defensive shape handling as _parse_onchain_ends_at. Returns None
+        when absent/invalid — provider tracking is best-effort and must never
+        block a session open.
+        """
+        if not isinstance(status, dict):
+            return None
+        session = status.get("session") or status.get("Session") or status
+        if not isinstance(session, dict):
+            return None
+        raw = session.get("Provider", session.get("provider"))
+        if not isinstance(raw, str):
+            return None
+        raw = raw.strip()
+        if len(raw) == 42 and raw.startswith("0x"):
+            return raw
+        return None
+
+    async def _fetch_session_status(self, session_id: str, open_logger) -> Optional[Any]:
+        """Best-effort read of the freshly-opened session's on-chain status."""
+        try:
+            return await proxy_router_service.getSessionStatus(session_id)
+        except Exception as e:
+            open_logger.warning(
+                "Could not read session status from proxy router",
+                error=str(e),
+                event_type="expires_at_read_error",
+            )
+            return None
+
+    def _resolve_expires_at(
+        self, status: Any, fallback: datetime, open_logger
     ) -> datetime:
         """Return expires_at anchored to the on-chain endsAt (+ configured buffer).
 
-        Reads the freshly-opened session's on-chain endsAt via the proxy router
-        and adds SESSION_EXPIRY_BUFFER_SECONDS so the cleanup sweep closes the
+        Parses the session's on-chain endsAt from ``status`` and adds
+        SESSION_EXPIRY_BUFFER_SECONDS so the cleanup sweep closes the
         session at/after its true end (a "late" close → full stake back to the
         wallet). Best-effort: any failure returns ``fallback`` (the call-start
         estimate) so a session open is never blocked on this read.
         """
-        try:
-            status = await proxy_router_service.getSessionStatus(session_id)
-            ends_at = self._parse_onchain_ends_at(status)
-        except Exception as e:
-            open_logger.warning(
-                "Could not read on-chain endsAt; using estimated expiry",
-                error=str(e),
-                event_type="expires_at_read_error",
-            )
-            return fallback
+        ends_at = self._parse_onchain_ends_at(status)
 
         if ends_at is None:
             open_logger.warning(
@@ -524,6 +557,7 @@ class SessionRoutingService:
         model_type: str = "LLM",
         user_id: Optional[int] = None,
         initial_active_requests: int = 0,
+        omit_provider: Optional[str] = None,
     ) -> str:
         """
         Open a new on-chain session for a model and persist its row.
@@ -548,6 +582,8 @@ class SessionRoutingService:
                 to its caller (never momentarily idle / claimable by another
                 request between insert and use); the automation path passes 0 to
                 create an idle, pre-warmed session.
+            omit_provider: Provider address to exclude from the proxy-router's
+                bid selection (failover away from an impaired provider).
 
         Returns:
             str: The blockchain session id of the newly opened session.
@@ -609,6 +645,7 @@ class SessionRoutingService:
                     session_duration=session_duration,
                     failover=False,
                     direct_payment=False,
+                    omit_provider=omit_provider,
                 ),
                 op_name="openSession",
                 op_logger=open_logger,
@@ -622,14 +659,23 @@ class SessionRoutingService:
                     model_id=model_id
                 )
 
+            # Read the session's on-chain status once and use it for both the
+            # authoritative expiry and the provider address. Best-effort: any
+            # failure falls back to the call-start expiry estimate and a NULL
+            # provider, so an open is never blocked on this read.
+            status = await self._fetch_session_status(blockchain_session_id, open_logger)
+
             # Anchor expires_at to the REAL on-chain endsAt (+ small buffer) so
             # the cleanup sweep closes the session AT/AFTER endsAt (a "late"
-            # close returns the full stake straight to the wallet). Best-effort:
-            # falls back to the call-start estimate if the read fails, so an
-            # open is never blocked on it.
-            expires_at = await self._resolve_expires_at(
-                blockchain_session_id, estimated_expires_at, open_logger
+            # close returns the full stake straight to the wallet).
+            expires_at = self._resolve_expires_at(
+                status, estimated_expires_at, open_logger
             )
+
+            # Provider serving this session — lets failover exclude it later
+            # (omitProvider) instead of possibly reopening on the same
+            # impaired provider.
+            provider_address = self._parse_provider_address(status)
 
             # Create session record only after successful open
             now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -653,7 +699,8 @@ class SessionRoutingService:
                     active_requests=initial_active_requests,
                     created_at=now,
                     updated_at=now,
-                    endpoint=endpoint
+                    endpoint=endpoint,
+                    provider_address=provider_address
                 )
                 db.add(session)
                 await db.commit()
@@ -766,7 +813,8 @@ class SessionRoutingService:
     async def _claim_idle_session(
         self,
         db: AsyncSession,
-        model_id: str
+        model_id: str,
+        omit_provider: Optional[str] = None,
     ) -> Optional[str]:
         """
         Atomically claim one idle (active_requests == 0), OPEN, non-expired
@@ -786,6 +834,11 @@ class SessionRoutingService:
         - routing the common case costs one statement served by
           idx_routed_sessions_model_state, with no lock held across I/O.
 
+        When ``omit_provider`` is set (failover), idle sessions known to belong
+        to that provider are skipped so the retry doesn't land on a sibling
+        session of the same impaired provider. Rows with an unknown (NULL)
+        provider stay claimable — optimistic, matches pre-tracking behavior.
+
         Returns the claimed session id, or None when no idle session exists.
         """
         now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -801,6 +854,11 @@ class SessionRoutingService:
                   AND state = :open_state
                   AND active_requests = 0
                   AND expires_at > :now
+                  AND (
+                        CAST(:omit_provider AS VARCHAR) IS NULL
+                        OR provider_address IS NULL
+                        OR lower(provider_address) != lower(:omit_provider)
+                      )
                 ORDER BY last_used_at ASC NULLS FIRST
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
@@ -815,6 +873,7 @@ class SessionRoutingService:
                     "now": now,
                     "model_id": model_id,
                     "open_state": SessionState.OPEN.value,
+                    "omit_provider": omit_provider,
                 },
             )
             claimed_id = result.scalar_one_or_none()
