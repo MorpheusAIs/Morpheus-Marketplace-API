@@ -65,6 +65,9 @@ class RoutedSession(Base):
     # Optional tracking
     endpoint = Column(String, nullable=True)  # e.g., "/v1/chat/completions"
     error_reason = Column(String, nullable=True)
+    # On-chain provider address serving this session (0x hex). Used by
+    # failover to exclude the failed provider when opening the retry session.
+    provider_address = Column(String(42), nullable=True)
     
     # Indexes for efficient queries
     __table_args__ = (

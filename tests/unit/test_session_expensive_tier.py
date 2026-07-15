@@ -163,13 +163,16 @@ def _patch_get_db():
     return patch("src.services.session_routing_service.get_db", _fake_get_db)
 
 
-def _patch_session_status(ends_at=None, side_effect=None):
+PROVIDER_ADDR = "0xAbC1234567890abcdef1234567890abcdef12345"
+
+
+def _patch_session_status(ends_at=None, side_effect=None, provider=PROVIDER_ADDR):
     """Patch getSessionStatus to return an on-chain endsAt (Go-style keys)."""
     kwargs = {}
     if side_effect is not None:
         kwargs["side_effect"] = side_effect
     else:
-        kwargs["return_value"] = {"session": {"Id": "0xnew", "EndsAt": ends_at}}
+        kwargs["return_value"] = {"session": {"Id": "0xnew", "EndsAt": ends_at, "Provider": provider}}
     return patch(
         "src.services.session_routing_service.proxy_router_service.getSessionStatus",
         new_callable=AsyncMock,
@@ -225,6 +228,58 @@ def test_parse_onchain_ends_at_rejects_zero_and_missing(service):
     assert service._parse_onchain_ends_at({"session": {}}) is None
     assert service._parse_onchain_ends_at({}) is None
     assert service._parse_onchain_ends_at(None) is None
+
+
+def test_parse_provider_address_go_style_keys(service):
+    assert service._parse_provider_address(
+        {"session": {"Provider": PROVIDER_ADDR}}
+    ) == PROVIDER_ADDR
+
+
+def test_parse_provider_address_rejects_invalid(service):
+    assert service._parse_provider_address({"session": {"Provider": "not-an-addr"}}) is None
+    assert service._parse_provider_address({"session": {"Provider": 123}}) is None
+    assert service._parse_provider_address({"session": {}}) is None
+    assert service._parse_provider_address({}) is None
+    assert service._parse_provider_address(None) is None
+
+
+async def test_open_stores_provider_address(service):
+    """The provider serving the new session is persisted for later failover."""
+    service._is_expensive_model = AsyncMock(return_value=False)
+    open_session = AsyncMock(return_value={"sessionID": "0xnew"})
+
+    captured = {}
+    db = AsyncMock()
+    db.add = MagicMock(side_effect=lambda row: captured.update(provider=row.provider_address))
+
+    @asynccontextmanager
+    async def _fake_get_db():
+        yield db
+
+    with patch("src.services.session_routing_service.get_db", _fake_get_db), patch(
+        "src.services.session_routing_service.proxy_router_service.openSession",
+        open_session,
+    ), _patch_session_status(ends_at=2_000_000_000):
+        await service._open_session_for_model(model_id="0xmodel", model_name="m")
+
+    assert captured["provider"] == PROVIDER_ADDR
+
+
+async def test_open_passes_omit_provider_to_proxy(service):
+    """omit_provider flows through to the proxy-router openSession call."""
+    service._is_expensive_model = AsyncMock(return_value=False)
+    open_session = AsyncMock(return_value={"sessionID": "0xnew"})
+
+    with _patch_get_db(), patch(
+        "src.services.session_routing_service.proxy_router_service.openSession",
+        open_session,
+    ), _patch_session_status(ends_at=2_000_000_000):
+        await service._open_session_for_model(
+            model_id="0xmodel", model_name="m", omit_provider=PROVIDER_ADDR
+        )
+
+    assert open_session.call_args.kwargs["omit_provider"] == PROVIDER_ADDR
 
 
 async def test_open_anchors_expires_at_to_onchain_ends_at(service):
