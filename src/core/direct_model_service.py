@@ -3,16 +3,51 @@ Direct model fetching service with in-memory cache and hash optimization.
 Replaces the complex model sync system with a simple, efficient approach.
 """
 
-import json
 import hashlib
-from typing import Dict, List, Optional
+import re
+from collections import defaultdict
 from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Set
+
 import httpx
 
 from src.core.config import settings
 from src.core.logging_config import get_models_logger
 
 logger = get_models_logger()
+
+
+def catalog_name_slug(name: str) -> str:
+    """Deterministic kebab slug of a catalog Name (spaces/underscores → '-').
+
+    Keeps dots and feature suffixes like ':web'. Not fuzzy — just a
+    predictable form of the on-chain/display name for API clients.
+    """
+    s = str(name or "").strip().lower()
+    if not s:
+        return ""
+    s = re.sub(r"[\s_]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s)
+    return s.strip("-")
+
+
+def _alias_candidates(model_name: str, enrichment: Optional[dict]) -> Set[str]:
+    """Extra lowercase resolve keys for a catalog model (excluding the name itself)."""
+    aliases: Set[str] = set()
+    name_key = model_name.lower()
+
+    slug = catalog_name_slug(model_name)
+    if slug and slug != name_key:
+        aliases.add(slug)
+
+    venice_id = (enrichment or {}).get("veniceId") or (enrichment or {}).get("venice_id")
+    if isinstance(venice_id, str):
+        vid = venice_id.strip().lower()
+        if vid and vid != name_key:
+            aliases.add(vid)
+
+    return aliases
+
 
 class DirectModelService:
     """
@@ -198,26 +233,62 @@ class DirectModelService:
                 raise
     
     def _update_cache(self, models: List[Dict], content_hash: str, etag: Optional[str]):
-        """Update the internal cache with new model data."""
-        new_mapping = {}
-        new_id_to_name = {}
-        new_mapping_type = {}
-        new_blockchain_ids = set()
-        
+        """Update the internal cache with new model data.
+
+        Resolve keys (all lowercase):
+          1. Catalog Name (authoritative — never overwritten)
+          2. enrichment.veniceId when unique
+          3. kebab slug of catalog Name when unique and distinct from (1)
+        Colliding aliases are skipped so we never guess between two models.
+        """
+        new_mapping: Dict[str, str] = {}
+        new_id_to_name: Dict[str, str] = {}
+        new_mapping_type: Dict[str, str] = {}
+        new_blockchain_ids: set = set()
+        alias_claims: Dict[str, Set[str]] = defaultdict(set)
+
         for model in models:
             if model.get("IsDeleted", False):
                 continue
-                
+
             model_name = model.get("Name")
             blockchain_id = model.get("Id")
             model_type = model.get("ModelType")
-            
-            if model_name and blockchain_id:
-                new_mapping[model_name.lower()] = blockchain_id
-                new_id_to_name[blockchain_id] = model_name
-                new_mapping_type[model_name.lower()] = model_type
-                new_blockchain_ids.add(blockchain_id)
-        
+
+            if not model_name or not blockchain_id:
+                continue
+
+            name_key = model_name.lower()
+            new_mapping[name_key] = blockchain_id
+            new_id_to_name[blockchain_id] = model_name
+            new_mapping_type[name_key] = model_type
+            new_blockchain_ids.add(blockchain_id)
+
+            for alias in _alias_candidates(model_name, model.get("enrichment")):
+                if alias in new_mapping:
+                    # Catalog name (or earlier authoritative key) wins — never override.
+                    continue
+                alias_claims[alias].add(blockchain_id)
+
+        aliases_added = 0
+        aliases_skipped_collision = 0
+        for alias, ids in alias_claims.items():
+            if alias in new_mapping:
+                continue
+            if len(ids) != 1:
+                aliases_skipped_collision += 1
+                logger.info(
+                    "Skipping ambiguous model alias",
+                    alias=alias,
+                    claimant_count=len(ids),
+                    event_type="model_alias_collision",
+                )
+                continue
+            blockchain_id = next(iter(ids))
+            new_mapping[alias] = blockchain_id
+            # Type lookups for aliases use id→catalog name; no type entry needed.
+            aliases_added += 1
+
         self._model_mapping = new_mapping
         self._id_to_name = new_id_to_name
         self._model_mapping_type = new_mapping_type
@@ -226,8 +297,15 @@ class DirectModelService:
         self._last_hash = content_hash
         self._last_etag = etag
         self._cache_expiry = datetime.now() + timedelta(seconds=self.cache_duration)
-        
-        logger.info(f"Cache updated: {len(new_mapping)} model mappings, {len(new_blockchain_ids)} blockchain IDs")
+
+        logger.info(
+            "Cache updated",
+            model_mappings=len(new_mapping),
+            blockchain_ids=len(new_blockchain_ids),
+            aliases_added=aliases_added,
+            aliases_skipped_collision=aliases_skipped_collision,
+            event_type="model_cache_updated",
+        )
     
     def _extend_cache(self):
         """Extend the current cache expiry without changing data."""
