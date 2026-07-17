@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 
+from src.core.model_errors import ModelNearMissError, ModelTypeMismatchError
 from src.core.model_routing import ModelRouter
 
 @pytest.fixture
@@ -12,6 +13,7 @@ EMBED_ID = "0x" + "aa" * 32
 LLM_ID = "0x" + "bb" * 32
 DEFAULT_LLM_ID = "0x" + "cc" * 32
 DEFAULT_EMBED_ID = EMBED_ID
+QWEN_ID = "0x" + "dd" * 32
 
 
 def _patched_model_service():
@@ -20,13 +22,21 @@ def _patched_model_service():
         "text-embedding-bge-m3": EMBED_ID,
         "some-llm": LLM_ID,
         "mistral-31-24b": DEFAULT_LLM_ID,
+        "qwen3-coder-480b-a35b-instruct": QWEN_ID,
     }
     id_to_name = {v: k for k, v in mapping.items()}
     mapping_type = {
         "text-embedding-bge-m3": "EMBEDDING",
         "some-llm": "LLM",
         "mistral-31-24b": "LLM",
+        "qwen3-coder-480b-a35b-instruct": "LLM",
     }
+
+    async def _suggest(requested, limit=5):
+        if "turbo" in (requested or "").lower():
+            return ["qwen3-coder-480b-a35b-instruct"]
+        return []
+
     service = patch.multiple(
         "src.core.model_routing.direct_model_service",
         resolve_model_id=AsyncMock(side_effect=lambda m: mapping.get(m.lower())),
@@ -34,25 +44,41 @@ def _patched_model_service():
         get_model_mapping_type=AsyncMock(return_value=mapping_type),
         get_model_mapping=AsyncMock(return_value=mapping),
         get_blockchain_ids=AsyncMock(return_value=set(mapping.values())),
+        suggest_models=AsyncMock(side_effect=_suggest),
     )
     return service
 
 
 @pytest.mark.asyncio
-async def test_chat_request_for_embedding_model_falls_back_to_default_llm(model_router):
-    # A chat completion (type="LLM") naming an EMBEDDING model must NOT route
-    # to the embedding provider (its backend rejects chat payloads with
-    # "Router.aembedding() missing 1 required positional argument: 'input'").
+async def test_chat_request_for_embedding_model_hard_fails(model_router):
+    # A chat completion (type="LLM") naming an EMBEDDING model must NOT silently
+    # fall back to Gemma — agents need a clear 400 / model_type_mismatch.
     with _patched_model_service():
-        result = await model_router.get_target_model("text-embedding-bge-m3", type="LLM")
-    assert result == DEFAULT_LLM_ID
+        with pytest.raises(ModelTypeMismatchError) as exc:
+            await model_router.get_target_model("text-embedding-bge-m3", type="LLM")
+    assert exc.value.code == "model_type_mismatch"
+    assert exc.value.model_type == "EMBEDDING"
+    assert exc.value.requested_type == "LLM"
 
 
 @pytest.mark.asyncio
-async def test_embeddings_request_for_llm_model_falls_back_to_default_embeddings(model_router):
+async def test_embeddings_request_for_llm_model_hard_fails(model_router):
     with _patched_model_service():
-        result = await model_router.get_target_model("some-llm", type="EMBEDDINGS")
-    assert result == DEFAULT_EMBED_ID
+        with pytest.raises(ModelTypeMismatchError) as exc:
+            await model_router.get_target_model("some-llm", type="EMBEDDINGS")
+    assert exc.value.code == "model_type_mismatch"
+    assert exc.value.model_type == "LLM"
+
+
+@pytest.mark.asyncio
+async def test_near_miss_turbo_suffix_returns_suggestions(model_router):
+    with _patched_model_service():
+        with pytest.raises(ModelNearMissError) as exc:
+            await model_router.get_target_model(
+                "qwen3-coder-480b-a35b-instruct-turbo", type="LLM"
+            )
+    assert exc.value.code == "model_not_found_near_miss"
+    assert "qwen3-coder-480b-a35b-instruct" in exc.value.suggestions
 
 
 @pytest.mark.asyncio
@@ -88,17 +114,20 @@ async def test_get_target_model_valid_blockchain_id(model_router):
 
 @pytest.mark.asyncio
 async def test_get_target_model_invalid_name(model_router):
-    # Test graceful handling of invalid model name by returning default
-    result = await model_router.get_target_model("invalid-model")
-    # Should return default model blockchain ID instead of raising error
-    assert result.startswith("0x")  # Should be a valid blockchain ID
+    # Unknown names soft-fallback; near-misses hard-fail with suggestions.
+    name = "zz-definitely-not-a-real-model-xyzzy-99999"
+    try:
+        result = await model_router.get_target_model(name)
+        assert result.startswith("0x")
+    except ModelNearMissError as exc:
+        assert exc.code == "model_not_found_near_miss"
+        assert exc.suggestions
 
 @pytest.mark.asyncio
 async def test_get_target_model_invalid_blockchain_id(model_router):
-    # Test graceful handling of invalid blockchain ID by returning default
+    # Invalid hex id is not a near-miss of a catalog name — soft fallback.
     result = await model_router.get_target_model("0xinvalid")
-    # Should return default model blockchain ID instead of raising error
-    assert result.startswith("0x")  # Should be a valid blockchain ID
+    assert result.startswith("0x")
 
 @pytest.mark.asyncio
 async def test_get_target_model_empty_input(model_router):

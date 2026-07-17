@@ -51,7 +51,9 @@ from .chat_exceptions import (
     GatewayError,
     RateLimitError,
     handle_chat_error,
+    model_routing_chat_error,
 )
+from src.core.model_errors import ModelRoutingError
 
 router = APIRouter(tags=["Chat"])
 
@@ -414,7 +416,9 @@ async def _create_billing_hold(
         )
         
         return ledger_entry_id, model_id, token_estimate, real_model_name
-        
+
+    except ModelRoutingError as e:
+        raise model_routing_chat_error(e) from e
     except ChatError:
         raise
     except Exception as e:

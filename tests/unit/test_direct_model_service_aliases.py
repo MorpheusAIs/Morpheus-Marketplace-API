@@ -6,6 +6,7 @@ from src.core.direct_model_service import (
     DirectModelService,
     _alias_candidates,
     catalog_name_slug,
+    suggest_near_miss_models,
 )
 
 
@@ -28,6 +29,7 @@ class TestCatalogNameSlug:
         assert catalog_name_slug("Claude Sonnet 5") == "claude-sonnet-5"
         assert catalog_name_slug("Claude Opus 4.5") == "claude-opus-4.5"
         assert catalog_name_slug("GPT-5.6 Luna") == "gpt-5.6-luna"
+        assert catalog_name_slug("Llama 3.2 3B") == "llama-3.2-3b"
 
     def test_already_kebab(self):
         assert catalog_name_slug("glm-5.1") == "glm-5.1"
@@ -133,3 +135,37 @@ async def test_ambiguous_slug_not_registered_when_catalog_twin_exists():
 
     # Ambiguous veniceId claimed by both → not used as override (kebab catalog kept)
     assert await svc.resolve_model_id("deepseek-v4-flash") == DEEPSEEK_KEBAB_ID
+
+
+LLAMA_KEBAB_ID = "0x" + "77" * 32
+QWEN_ID = "0x" + "88" * 32
+
+
+@pytest.mark.asyncio
+async def test_request_side_slug_resolves_spaced_title_case_to_kebab_catalog():
+    """Clients send 'Llama 3.2 3B'; catalog Name is already kebab."""
+    svc = _svc_with_models(
+        [
+            {
+                "Name": "llama-3.2-3b",
+                "Id": LLAMA_KEBAB_ID,
+                "ModelType": "LLM",
+                "enrichment": {"veniceId": "llama-3.2-3b"},
+            },
+        ]
+    )
+    assert await svc.resolve_model_id("Llama 3.2 3B") == LLAMA_KEBAB_ID
+    assert await svc.resolve_model_id("llama 3.2 3b") == LLAMA_KEBAB_ID
+    assert await svc.resolve_model_id("llama-3.2-3b") == LLAMA_KEBAB_ID
+
+
+def test_suggest_near_miss_strips_turbo_suffix():
+    mapping = {"qwen3-coder-480b-a35b-instruct": QWEN_ID}
+    id_to_name = {QWEN_ID: "qwen3-coder-480b-a35b-instruct"}
+    suggestions = suggest_near_miss_models(
+        "qwen3-coder-480b-a35b-instruct-turbo",
+        set(mapping.keys()),
+        id_to_name,
+        mapping,
+    )
+    assert suggestions == ["qwen3-coder-480b-a35b-instruct"]

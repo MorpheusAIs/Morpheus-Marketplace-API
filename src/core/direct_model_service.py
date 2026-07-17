@@ -7,6 +7,7 @@ import hashlib
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta
+from difflib import get_close_matches
 from typing import Dict, List, Optional, Set
 
 import httpx
@@ -15,6 +16,13 @@ from src.core.config import settings
 from src.core.logging_config import get_models_logger
 
 logger = get_models_logger()
+
+# Client suffixes that often appear on otherwise-valid catalog names.
+# Stripped only when looking for near-miss suggestions (not for exact resolve).
+_NEAR_MISS_STRIP_SUFFIXES = (
+    "-turbo",
+    "-instruct-turbo",
+)
 
 
 def catalog_name_slug(name: str) -> str:
@@ -47,6 +55,70 @@ def _alias_candidates(model_name: str, enrichment: Optional[dict]) -> Set[str]:
             aliases.add(vid)
 
     return aliases
+
+
+def _strip_near_miss_suffixes(slug: str) -> List[str]:
+    """Return progressively stripped variants of a request slug."""
+    out: List[str] = []
+    current = slug
+    changed = True
+    while changed:
+        changed = False
+        for suffix in _NEAR_MISS_STRIP_SUFFIXES:
+            if current.endswith(suffix) and len(current) > len(suffix):
+                current = current[: -len(suffix)]
+                out.append(current)
+                changed = True
+                break
+    return out
+
+
+def suggest_near_miss_models(
+    requested: str,
+    catalog_keys: Set[str],
+    id_to_name: Dict[str, str],
+    model_mapping: Dict[str, str],
+    *,
+    limit: int = 5,
+) -> List[str]:
+    """Suggest active catalog Names for a near-miss client string.
+
+    Strategies (in order):
+      1. Exact hit after stripping known junk suffixes (e.g. ``-turbo``)
+      2. difflib close matches against resolve keys (slug/spaced/venice)
+    Returns unique catalog display Names (not alias keys).
+    """
+    if not requested or not catalog_keys:
+        return []
+
+    def _display_name(resolve_key: str) -> Optional[str]:
+        blockchain_id = model_mapping.get(resolve_key)
+        if not blockchain_id:
+            return None
+        return id_to_name.get(blockchain_id)
+
+    slug = catalog_name_slug(requested)
+    candidates: List[str] = []
+
+    for variant in _strip_near_miss_suffixes(slug):
+        name = _display_name(variant)
+        if name and name not in candidates:
+            candidates.append(name)
+
+    if len(candidates) >= limit:
+        return candidates[:limit]
+
+    pool = sorted(catalog_keys)
+    needles = [slug, requested.lower(), *_strip_near_miss_suffixes(slug)]
+    for needle in dict.fromkeys(n for n in needles if n):
+        for hit in get_close_matches(needle, pool, n=limit, cutoff=0.72):
+            name = _display_name(hit)
+            if name and name not in candidates:
+                candidates.append(name)
+            if len(candidates) >= limit:
+                return candidates[:limit]
+
+    return candidates[:limit]
 
 
 class DirectModelService:
@@ -136,8 +208,30 @@ class DirectModelService:
         # Check if it's already a blockchain ID
         if model_identifier in self._blockchain_ids:
             return model_identifier
-        
-        return self._model_mapping.get(model_identifier.lower())
+
+        key = model_identifier.lower()
+        hit = self._model_mapping.get(key)
+        if hit:
+            return hit
+
+        # Request-side slug: clients often send spaced Title Case
+        # ("Llama 3.2 3B") for kebab catalog names ("llama-3.2-3b").
+        # Cache-time aliases only go catalog→slug; this is the reverse.
+        slug = catalog_name_slug(model_identifier)
+        if slug and slug != key:
+            return self._model_mapping.get(slug)
+        return None
+
+    async def suggest_models(self, requested: str, *, limit: int = 5) -> List[str]:
+        """Return near-miss catalog Names for a requested model string."""
+        await self._ensure_fresh_cache()
+        return suggest_near_miss_models(
+            requested,
+            set(self._model_mapping.keys()),
+            self._id_to_name,
+            self._model_mapping,
+            limit=limit,
+        )
     
     async def get_model_name_from_id(self, blockchain_id: str) -> Optional[str]:
         """
