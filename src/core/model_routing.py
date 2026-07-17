@@ -1,7 +1,9 @@
 from typing import Dict, Optional
+
 from .direct_model_service import direct_model_service
 from .config import settings
 from .logging_config import get_models_logger
+from .model_errors import ModelNearMissError, ModelTypeMismatchError
 
 # Configure logger
 logger = get_models_logger()
@@ -39,6 +41,10 @@ class ModelRouter:
             
         Returns:
             str: The blockchain ID to use
+
+        Raises:
+            ModelTypeMismatchError: Model exists but is wrong type for the endpoint
+            ModelNearMissError: Name not found, but close catalog matches exist
         """
         # return "0xe086adc275c99e32bb10b0aff5e8bfc391aad18cbb184727a75b2569149425c6"
         logger.info("Getting target model for requested model",
@@ -63,16 +69,27 @@ class ModelRouter:
             # A resolved model must be usable by this endpoint type. Without
             # this check a chat completion naming an EMBEDDING model opens a
             # session with the embedding provider, whose backend then rejects
-            # the chat payload ("Router.aembedding() missing ... 'input'").
-            # Treat a mismatch like an unknown model: fall back to the
-            # default model for the requested type.
+            # the chat payload. Hard-fail so agents don't silently get Gemma.
             if resolved_id and not await self._is_type_compatible(resolved_id, type):
+                model_name = await direct_model_service.get_model_name_from_id(resolved_id)
+                model_types = await direct_model_service.get_model_mapping_type()
+                actual_type = (
+                    model_types.get(model_name.lower()) if model_name else None
+                )
                 logger.warning("Requested model type is incompatible with endpoint",
                               requested_model=requested_model,
                               resolved_id=resolved_id,
+                              resolved_model=model_name,
                               requested_type=type,
+                              model_type=actual_type,
                               event_type="model_type_mismatch")
-                resolved_id = None
+                raise ModelTypeMismatchError(
+                    requested_model=requested_model,
+                    resolved_model=model_name,
+                    resolved_id=resolved_id,
+                    requested_type=type,
+                    model_type=actual_type,
+                )
 
             if resolved_id:
                 logger.info("Found model mapping",
@@ -80,24 +97,39 @@ class ModelRouter:
                            resolved_id=resolved_id,
                            event_type="model_resolved")
                 return resolved_id
-            else:
-                # Model not found, use default
-                logger.warning("Model not found in active models",
+
+            # Not found — if we have close matches, hard-fail with suggestions
+            # so agents stop / alert instead of continuing on the default model.
+            # True unknowns (no near miss) still soft-fallback for operability.
+            logger.warning("Model not found in active models",
+                          requested_model=requested_model,
+                          event_type="model_not_found")
+            suggestions = await direct_model_service.suggest_models(requested_model)
+            if suggestions:
+                logger.warning("Near-miss model name; returning suggestions",
                               requested_model=requested_model,
-                              event_type="model_not_found")
-                model_mapping = await direct_model_service.get_model_mapping()
-                blockchain_ids = await direct_model_service.get_blockchain_ids()
-                logger.info("Available models for debugging",
-                           available_models=sorted(list(model_mapping.keys())),
-                           available_blockchain_ids=sorted(list(blockchain_ids)),
-                           requested_model=requested_model)
-                
-                default_id = await self._get_default_model_id(type)
-                logger.warning("Using default model fallback",
-                              requested_model=requested_model,
-                              default_model_id=default_id,
-                              event_type="default_model_fallback")
-                return default_id
+                              suggestions=suggestions,
+                              event_type="model_not_found_near_miss")
+                raise ModelNearMissError(
+                    requested_model=requested_model,
+                    suggestions=suggestions,
+                )
+
+            model_mapping = await direct_model_service.get_model_mapping()
+            blockchain_ids = await direct_model_service.get_blockchain_ids()
+            logger.info("Available models for debugging",
+                       available_models=sorted(list(model_mapping.keys())),
+                       available_blockchain_ids=sorted(list(blockchain_ids)),
+                       requested_model=requested_model)
+
+            default_id = await self._get_default_model_id(type)
+            logger.warning("Using default model fallback",
+                          requested_model=requested_model,
+                          default_model_id=default_id,
+                          event_type="default_model_fallback")
+            return default_id
+        except (ModelTypeMismatchError, ModelNearMissError):
+            raise
         except Exception as e:
             logger.error("Error resolving model - using default fallback",
                         requested_model=requested_model,
@@ -255,4 +287,4 @@ class ModelRouter:
 model_router = ModelRouter()
 
 # Create an async alias for backward compatibility
-async_model_router = model_router 
+async_model_router = model_router
