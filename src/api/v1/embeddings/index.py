@@ -15,6 +15,7 @@ import uuid
 
 from ....schemas.billing import UsageHoldRequest, UsageFinalizeRequest, UsageVoidRequest
 from ....core.model_routing import model_router
+from ....core.model_errors import ModelRoutingError
 from ....services import session_routing_service, NoSessionAvailableError, SessionOpenError
 from ....services import proxy_router_service
 from ....services.billing_service import billing_service
@@ -25,6 +26,14 @@ from ....dependencies import get_api_key_user, get_current_api_key
 from ....db.models import User, APIKey
 from ....utils.error_sanitizer import sanitize_error_message
 from ....core.logging_config import get_api_logger
+
+
+def _model_routing_response(exc: ModelRoutingError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.to_error_body(),
+        headers={"X-Morpheus-Error": exc.code},
+    )
 
 router = APIRouter(tags=["Embeddings"])
 
@@ -106,6 +115,16 @@ async def create_embeddings(
                         request_id=request_id,
                         session_id=session_id,
                         event_type="session_routing_success")
+        except ModelRoutingError as e:
+            embeddings_logger.warning(
+                "Model routing rejected embeddings session route",
+                request_id=request_id,
+                error=e.message,
+                error_type=e.error_type,
+                event_type="model_routing_error",
+            )
+            await _void_billing_hold(user.id, ledger_entry_id, e.code, e.message, embeddings_logger)
+            return _model_routing_response(e)
         except NoSessionAvailableError as e:
             embeddings_logger.error("No session available",
                             request_id=request_id,
@@ -236,6 +255,15 @@ async def create_embeddings(
                                              error=str(release_err),
                                              event_type="session_release_error")
     
+    except ModelRoutingError as e:
+        embeddings_logger.warning(
+            "Model routing rejected embeddings request",
+            error=e.message,
+            error_type=e.error_type,
+            model=request_data.model,
+            event_type="model_routing_error",
+        )
+        return _model_routing_response(e)
     except HTTPException:
         raise
     except Exception as e:
@@ -426,7 +454,9 @@ async def _create_billing_hold(
         )
         
         return ledger_entry_id, model_id, real_model_name
-        
+
+    except ModelRoutingError:
+        raise
     except HTTPException:
         raise
     except Exception as e:

@@ -223,6 +223,53 @@ class RateLimitError(ChatError):
         return JSONResponse(status_code=self.status_code, content=content, headers=headers)
 
 
+@dataclass
+class ModelRoutingChatError(ChatError):
+    """Client-facing model resolution failure (type mismatch or near-miss).
+
+    Adds ``X-Morpheus-Error`` so agents that only inspect status/headers
+    can stop or alert without parsing the body.
+    """
+
+    message: str = "Model routing error"
+    status_code: int = status.HTTP_400_BAD_REQUEST
+    error_type: str = "model_routing_error"
+    code: str = "model_routing_error"
+
+    def __post_init__(self):
+        self.details = {**self.details, "code": self.code}
+        super().__post_init__()
+
+    def to_response(self) -> JSONResponse:
+        content = {
+            "error": {
+                "message": sanitize_error_message(self.message),
+                "type": self.error_type,
+                **self.details,
+            }
+        }
+        return JSONResponse(
+            status_code=self.status_code,
+            content=content,
+            headers={"X-Morpheus-Error": self.code},
+        )
+
+
+def model_routing_chat_error(exc: "ModelRoutingError") -> ModelRoutingChatError:
+    """Convert a core ModelRoutingError into a ChatError response type."""
+    from src.core.model_errors import ModelRoutingError as _MRE
+
+    if not isinstance(exc, _MRE):
+        raise TypeError(exc)
+    return ModelRoutingChatError(
+        message=exc.message,
+        status_code=exc.status_code,
+        error_type=exc.error_type,
+        code=exc.code,
+        details=dict(exc.details),
+    )
+
+
 def handle_chat_error(error: ChatError, logger, request_id: str) -> JSONResponse:
     """
     Handle a ChatError by logging and converting to response.
@@ -258,6 +305,8 @@ __all__ = [
     "GatewayError",
     "RequestParseError",
     "RateLimitError",
+    "ModelRoutingChatError",
+    "model_routing_chat_error",
     "handle_chat_error",
 ]
 
