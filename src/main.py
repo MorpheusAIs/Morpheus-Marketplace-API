@@ -18,6 +18,7 @@ import platform
 
 from src.api.v1 import models, chat, auth, chat_history, embeddings, audio, billing, billing_admin, webhooks, wallet
 from src.api.v1.chat.chat_exceptions import ChatError
+from src.core.model_errors import ModelRoutingError
 from src.services import session_routing_service
 from src.utils.error_sanitizer import sanitize_error_message
 from src.services.staking_service import staking_service
@@ -180,6 +181,16 @@ async def enforce_https(request: Request, call_next):
 async def chat_error_handler(request: Request, exc: ChatError):
     """Handle ChatError exceptions with structured responses."""
     return exc.to_response()
+
+
+@app.exception_handler(ModelRoutingError)
+async def model_routing_error_handler(request: Request, exc: ModelRoutingError):
+    """Hard model-resolution failures (type mismatch / near-miss) for all routes."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.to_error_body(),
+        headers={"X-Morpheus-Error": exc.code},
+    )
 
 
 # Error handler for OpenAI-compatible error responses
