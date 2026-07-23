@@ -89,7 +89,7 @@ class SessionRoutingService:
         self._background_close_tasks: set = set()
 
         # Short-lived per-model "is this an expensive model?" cache. The tier
-        # decision needs the model's lowest rated-bid price (an on-chain read
+        # decision needs the model's highest rated-bid price (an on-chain read
         # via the proxy-router); cache it so neither the open path nor the
         # per-tick automation loop hammers that lookup. Keyed by model_id ->
         # (monotonic_expiry, is_expensive). Per-replica and deterministic from
@@ -110,8 +110,13 @@ class SessionRoutingService:
     # EXPENSIVE-MODEL TIER
     # =========================================================================
 
-    async def _get_model_min_price_per_second(self, model_id: str) -> Optional[float]:
-        """Lowest rated-bid price for a model in MOR/sec, or None on failure.
+    async def _get_model_max_price_per_second(self, model_id: str) -> Optional[float]:
+        """Highest rated-bid price for a model in MOR/sec, or None on failure.
+
+        The MAX (not min) matters: sessions can fail over between the model's
+        providers, so the stake exposure is bounded by the priciest peer, not
+        the cheapest. A cheap underbidder must not demote a model whose other
+        bids are premium-priced.
 
         Best-effort: never raises. A price lookup must never block (or fail) a
         session open — callers treat None as "not expensive" and fall back to
@@ -143,7 +148,7 @@ class SessionRoutingService:
                 except (ValueError, TypeError):
                     continue
 
-            return min(prices) if prices else None
+            return max(prices) if prices else None
         except Exception as e:
             logger.warning("Rated-bid price lookup failed; treating model as non-expensive",
                            model_id=model_id,
@@ -152,7 +157,8 @@ class SessionRoutingService:
             return None
 
     async def _is_expensive_model(self, model_id: str) -> bool:
-        """True if the model's lowest rated bid is >= the expensive cutoff.
+        """True if ANY of the model's rated bids is >= the expensive cutoff,
+        i.e. max(bid.PricePerSecond) >= cutoff.
 
         Returns False when the tier is disabled (cutoff <= 0) or the price
         cannot be determined. Result is cached per model for a short TTL so the
@@ -166,7 +172,7 @@ class SessionRoutingService:
         if cached is not None and time.monotonic() < cached[0]:
             return cached[1]
 
-        price = await self._get_model_min_price_per_second(model_id)
+        price = await self._get_model_max_price_per_second(model_id)
         is_expensive = price is not None and price >= cutoff
         self._expensive_tier_cache[model_id] = (
             time.monotonic() + self._expensive_tier_cache_ttl,
