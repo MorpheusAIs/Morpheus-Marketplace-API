@@ -199,9 +199,12 @@ class Settings(BaseSettings):
     # is amplified by (total MOR supply / today's emissions budget), so a
     # high-priced model at the normal duration can stake enough MOR to exhaust
     # the shared consumer wallet and bounce concurrent opens. This tier gives
-    # models whose lowest rated bid is >= a cutoff a shorter duration (smaller
-    # per-session stake -> more concurrent premium sessions) with their own idle
-    # grace, decoupled from the global session settings above.
+    # models with ANY rated bid >= a cutoff (max(bid.PricePerSecond) >= cutoff)
+    # a shorter duration (smaller per-session stake -> more concurrent premium
+    # sessions) with their own idle grace, decoupled from the global session
+    # settings above. Classifying on the HIGHEST bid — not the lowest — matters
+    # because HA failover can re-land a session on the model's priciest peer:
+    # a cheap underbidder must not earn the model the long (70 min) stake.
     #
     # Cutoff is MOR per second (a bid's PricePerSecond / 1e18). 0 DISABLES the
     # tier entirely (every model uses the global SESSION_* settings) — the
