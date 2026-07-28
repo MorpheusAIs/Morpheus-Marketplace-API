@@ -2,6 +2,7 @@
 Coinbase Business Payment Link billing endpoints.
 Authenticated user endpoints for creating payment links and checking status.
 """
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from ....db.models import User
@@ -79,10 +80,49 @@ async def get_payment_link(
 ):
     """
     Get a specific Coinbase Business Payment Link by ID.
+
+    The lookup is scoped to the authenticated caller: the link's
+    ``metadata.user_id`` (stamped at creation) must match the caller's
+    Cognito user id. Requests for links the caller does not own return 404,
+    identical to a link that does not exist, so ownership cannot be probed
+    by enumerating ids.
     """
     try:
         result = await coinbase_payment_link_service.get_payment_link(payment_link_id)
+
+        owner_id = (result.get("metadata") or {}).get("user_id")
+        if owner_id != current_user.cognito_user_id:
+            logger.warning(
+                "Blocked cross-user payment link access",
+                payment_link_id=payment_link_id,
+                requester_user_id=current_user.id,
+                event_type="coinbase_payment_link_forbidden",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Payment link not found",
+            )
+
         return result
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as e:
+        if e.response is not None and e.response.status_code == status.HTTP_404_NOT_FOUND:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Payment link not found",
+            )
+        logger.error(
+            "Upstream error getting payment link",
+            payment_link_id=payment_link_id,
+            status_code=e.response.status_code if e.response is not None else None,
+            error_type=type(e).__name__,
+            event_type="coinbase_payment_link_get_error",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Error getting payment link",
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -98,7 +138,7 @@ async def get_payment_link(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error getting payment link: {str(e)}",
+            detail="Error getting payment link",
         )
 
 
