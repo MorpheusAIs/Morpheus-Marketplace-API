@@ -1,10 +1,14 @@
 """
-Coinbase Business Payment Link API service.
+Coinbase Business Checkout API service.
 
 Provides CRUD operations for creating, listing, retrieving, and deactivating
-payment links via the Coinbase Business REST API.
+payment records via the Coinbase Business REST API. This targets the Checkouts
+API (`/api/v1/checkouts`), which superseded the Payment Link API
+(`/api/v1/payment-links`). Request/response schemas are identical between the
+two — only the URL path changed — so this is a base-path swap.
 
-API Reference: https://docs.cdp.coinbase.com/api-reference/business-api/rest-api/payment-links/introduction
+API Reference: https://docs.cdp.coinbase.com/api-reference/business-api/rest-api/checkouts/introduction
+Migration:     https://docs.cdp.coinbase.com/coinbase-business/checkout-apis/migrate/overview
 """
 from typing import Optional, Dict, Any
 
@@ -15,8 +19,9 @@ from src.core.logging_config import get_core_logger
 
 logger = get_core_logger()
 
-# Payment Link API base path (includes /sandbox prefix when CDP_SANDBOX=true)
-PAYMENT_LINKS_PATH = f"{CDP_PATH_PREFIX}/api/v1/payment-links"
+# Checkouts API base path (includes /sandbox prefix when CDP_SANDBOX=true).
+# Name kept as PAYMENT_LINKS_PATH to avoid churn; value migrated to /checkouts.
+PAYMENT_LINKS_PATH = f"{CDP_PATH_PREFIX}/api/v1/checkouts"
 
 # Default timeout for API calls (seconds)
 DEFAULT_TIMEOUT = 30.0
