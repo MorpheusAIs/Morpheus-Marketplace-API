@@ -269,14 +269,14 @@ async def _handle_payment_link_webhook(
         coinbase_status=payload.get("status"),
     )
 
-    if event_type == coinbase_webhook_service.EVENT_TYPE_PL_PAYMENT_SUCCESS:
+    if event_type in coinbase_webhook_service.PAYMENT_SUCCESS_EVENT_TYPES:
         success, message = await coinbase_webhook_service.handle_payment_success(
             db=db,
             payload=payload,
         )
         if not success:
             logger.error(
-                "Failed to process payment_link.payment.success",
+                "Failed to process checkout.payment.success",
                 coinbase_payment_link_id=payment_link_id,
                 error=message,
             )
@@ -285,26 +285,26 @@ async def _handle_payment_link_webhook(
                 detail=f"Failed to process event: {message}",
             )
 
-    elif event_type == coinbase_webhook_service.EVENT_TYPE_PL_PAYMENT_FAILED:
+    elif event_type in coinbase_webhook_service.PAYMENT_FAILED_EVENT_TYPES:
         success, message = await coinbase_webhook_service.handle_payment_failed(
             db=db,
             payload=payload,
         )
         if not success:
             logger.warning(
-                "Error logging payment_link.payment.failed",
+                "Error logging checkout.payment.failed",
                 coinbase_payment_link_id=payment_link_id,
                 error=message,
             )
 
-    elif event_type == coinbase_webhook_service.EVENT_TYPE_PL_PAYMENT_EXPIRED:
+    elif event_type in coinbase_webhook_service.PAYMENT_EXPIRED_EVENT_TYPES:
         success, message = await coinbase_webhook_service.handle_payment_expired(
             db=db,
             payload=payload,
         )
         if not success:
             logger.warning(
-                "Error logging payment_link.payment.expired",
+                "Error logging checkout.payment.expired",
                 coinbase_payment_link_id=payment_link_id,
                 error=message,
             )
@@ -406,15 +406,16 @@ async def handle_coinbase_webhook(
     """
     Handle incoming Coinbase webhook events.
 
-    Supports both Payment Link API (new) and legacy Commerce Charge API formats.
-    Auto-detects the format based on the signature header:
-    - X-Hook0-Signature  → Payment Link API (payment_link.payment.*)
+    Supports the Coinbase Business Checkout/Payment-Link API and the legacy
+    Commerce Charge API. Auto-detects the format based on the signature header:
+    - X-Hook0-Signature  → Checkout API (checkout.payment.* / legacy payment_link.payment.*)
     - X-CC-Webhook-Signature → Legacy Commerce (charge:*)
 
-    Payment Link event types:
-    - payment_link.payment.success: Payment completed successfully
-    - payment_link.payment.failed: Payment failed
-    - payment_link.payment.expired: Payment link expired
+    Checkout event types:
+    - checkout.payment.success: Payment completed successfully
+    - checkout.payment.failed: Payment failed
+    - checkout.payment.expired: Checkout expired without payment
+    (Legacy payment_link.payment.* names are still accepted during migration.)
 
     Legacy event types (deprecated):
     - charge:confirmed: Payment confirmed
