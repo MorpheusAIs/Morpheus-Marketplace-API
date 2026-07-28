@@ -32,10 +32,32 @@ class CoinbaseWebhookService:
 
     SOURCE_NAME = "coinbase"
 
-    # ── Payment Link API Event Types (New) ───────────────────────────────
+    # ── Checkout API Event Types (current) ───────────────────────────────
+    EVENT_TYPE_CHECKOUT_PAYMENT_SUCCESS = "checkout.payment.success"
+    EVENT_TYPE_CHECKOUT_PAYMENT_FAILED = "checkout.payment.failed"
+    EVENT_TYPE_CHECKOUT_PAYMENT_EXPIRED = "checkout.payment.expired"
+
+    # ── Legacy Payment Link API Event Types ──────────────────────────────
+    # Still recognized so an old `payment_link.*` subscription left running in
+    # parallel during the Checkouts migration doesn't drop payments. Safe to
+    # remove once the legacy subscription is deleted.
     EVENT_TYPE_PL_PAYMENT_SUCCESS = "payment_link.payment.success"
     EVENT_TYPE_PL_PAYMENT_FAILED = "payment_link.payment.failed"
     EVENT_TYPE_PL_PAYMENT_EXPIRED = "payment_link.payment.expired"
+
+    # Grouped by action so handlers accept either the Checkout or legacy name.
+    PAYMENT_SUCCESS_EVENT_TYPES = {
+        EVENT_TYPE_CHECKOUT_PAYMENT_SUCCESS,
+        EVENT_TYPE_PL_PAYMENT_SUCCESS,
+    }
+    PAYMENT_FAILED_EVENT_TYPES = {
+        EVENT_TYPE_CHECKOUT_PAYMENT_FAILED,
+        EVENT_TYPE_PL_PAYMENT_FAILED,
+    }
+    PAYMENT_EXPIRED_EVENT_TYPES = {
+        EVENT_TYPE_CHECKOUT_PAYMENT_EXPIRED,
+        EVENT_TYPE_PL_PAYMENT_EXPIRED,
+    }
 
     # ── Legacy Commerce Charge API Event Types (Deprecated) ──────────────
     EVENT_TYPE_CHARGE_CONFIRMED = "charge:confirmed"
