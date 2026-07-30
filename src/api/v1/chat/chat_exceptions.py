@@ -112,6 +112,48 @@ class SessionCreationError(SessionError):
 
 
 @dataclass
+class ModelBusyError(ChatError):
+    """Raised when the model session pool is at soft cap with no idle slot."""
+
+    retry_after: int = 15
+    model_id: Optional[str] = None
+    soft_cap: int = 0
+    open_count: int = 0
+    message: str = "Model is busy"
+    status_code: int = status.HTTP_429_TOO_MANY_REQUESTS
+    error_type: str = "model_busy"
+
+    def __post_init__(self):
+        if not self.message or self.message == "Model is busy":
+            self.message = (
+                f"Model session pool is at capacity. "
+                f"Please retry after {self.retry_after} seconds."
+            )
+        self.details = {
+            "retry_after": self.retry_after,
+            "code": "model_busy",
+        }
+        if self.model_id:
+            self.details["model_id"] = self.model_id
+        if self.soft_cap:
+            self.details["soft_cap"] = self.soft_cap
+            self.details["open_count"] = self.open_count
+        super().__post_init__()
+
+    def to_response(self) -> JSONResponse:
+        content = {
+            "error": {
+                "message": sanitize_error_message(self.message),
+                "type": self.error_type,
+                "param": None,
+                "code": "model_busy",
+            }
+        }
+        headers = {"Retry-After": str(self.retry_after)}
+        return JSONResponse(status_code=self.status_code, content=content, headers=headers)
+
+
+@dataclass
 class ProxyError(ChatError):
     """Raised when proxy router communication fails."""
     
@@ -301,6 +343,7 @@ __all__ = [
     "SessionNotFoundError",
     "SessionExpiredError",
     "SessionCreationError",
+    "ModelBusyError",
     "ProxyError",
     "GatewayError",
     "RequestParseError",

@@ -16,6 +16,7 @@ from .session_routing_service import (
     SessionRoutingError,
     NoSessionAvailableError,
     SessionOpenError,
+    SessionPoolBusyError,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "SessionRoutingError",
     "NoSessionAvailableError",
     "SessionOpenError",
+    "SessionPoolBusyError",
 ]

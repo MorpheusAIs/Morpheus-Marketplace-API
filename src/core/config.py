@@ -178,21 +178,40 @@ class Settings(BaseSettings):
     # Session Routing Service Configuration
     # Interval in seconds for automated activity loop (session scaling)
     SESSION_AUTOMATION_INTERVAL_SECONDS: int = Field(default=int(os.getenv("SESSION_AUTOMATION_INTERVAL_SECONDS", "30")))
-    # Grace period before closing idle sessions (prevents thrashing)
+    # Grace period before closing idle sessions (prevents thrashing). Keep this
+    # LESS than SESSION_DEFAULT_DURATION_SECONDS so idle sessions are early-closed
+    # rather than riding to natural expiry. Under SessionRouter day-lock, unused
+    # stake returns on close; used (wall-clock) stipend goes to userStakesOnHold
+    # until the next UTC day — so shorter idle lifetime reduces day-locked MOR.
     SESSION_IDLE_GRACE_SECONDS: int = Field(default=int(os.getenv("SESSION_IDLE_GRACE_SECONDS", "300")))
     # Default session duration when creating new sessions (in seconds)
     SESSION_DEFAULT_DURATION_SECONDS: int = Field(default=int(os.getenv("SESSION_DEFAULT_DURATION_SECONDS", "1800")))
     # Buffer (seconds) added on top of the ACTUAL on-chain endsAt when setting a
     # routed session's DB expires_at. The cleanup sweep closes a session once
     # now >= expires_at; anchoring to the real on-chain endsAt (read back after
-    # open) plus this small buffer guarantees the close lands AT/AFTER endsAt (a
-    # "late" close), so the full stake returns straight to the wallet instead of
-    # a stipend chunk being locked in userStakesOnHold (which then needs the
-    # housekeeping Lambda's withdrawUserStakes to recover). Keep small — just
-    # enough to clear host/chain clock skew and block/mining latency, not slop.
+    # open) plus this small buffer avoids closing a few seconds BEFORE endsAt
+    # when a session rides to natural expiry. Keep small — just enough to clear
+    # host/chain clock skew and block/mining latency. (Day-lock: unused stake
+    # still returns on close; used stipend is held until the next UTC day
+    # regardless of early vs late close.)
     SESSION_EXPIRY_BUFFER_SECONDS: int = Field(default=int(os.getenv("SESSION_EXPIRY_BUFFER_SECONDS", "60")))
-    # Comma-separated list of preferred models (keep at least one idle session)
+    # Comma-separated list of preferred (warm-pool) model IDs. Automation keeps
+    # at least one OPEN session for each; soft-cap uses SESSION_SOFT_CAP_WARM.
     SESSION_PREFERRED_MODELS: str = Field(default=os.getenv("SESSION_PREFERRED_MODELS", ""))
+
+    # --- Per-model OPEN-session soft caps ------------------------------------
+    # Caps concurrent OPEN sessions per model so the shared consumer wallet
+    # cannot be exhausted by unbounded scale-up. When at cap with no idle
+    # session to claim, route_request raises SessionPoolBusyError (HTTP 429).
+    # 0 DISABLES that cap (unlimited) — ships inert; turn on per-env via secrets.
+    # Warm (preferred) models use SESSION_SOFT_CAP_WARM; everything else uses
+    # SESSION_SOFT_CAP_DEFAULT.
+    SESSION_SOFT_CAP_WARM: int = Field(default=int(os.getenv("SESSION_SOFT_CAP_WARM", "0")))
+    SESSION_SOFT_CAP_DEFAULT: int = Field(default=int(os.getenv("SESSION_SOFT_CAP_DEFAULT", "0")))
+    # Retry-After hint (seconds) returned with SessionPoolBusyError / HTTP 429.
+    SESSION_SOFT_CAP_RETRY_AFTER_SECONDS: int = Field(
+        default=int(os.getenv("SESSION_SOFT_CAP_RETRY_AFTER_SECONDS", "15"))
+    )
 
     # --- Expensive-model session tier ---------------------------------------
     # The on-chain stake pulled at openSession scales linearly with duration and
@@ -204,7 +223,7 @@ class Settings(BaseSettings):
     # sessions) with their own idle grace, decoupled from the global session
     # settings above. Classifying on the HIGHEST bid — not the lowest — matters
     # because HA failover can re-land a session on the model's priciest peer:
-    # a cheap underbidder must not earn the model the long (70 min) stake.
+    # a cheap underbidder must not earn the model the long default stake.
     #
     # Cutoff is MOR per second (a bid's PricePerSecond / 1e18). 0 DISABLES the
     # tier entirely (every model uses the global SESSION_* settings) — the
@@ -214,10 +233,10 @@ class Settings(BaseSettings):
     # amplified on-chain stake per session.
     SESSION_EXPENSIVE_DEFAULT_DURATION_SECONDS: int = Field(default=int(os.getenv("SESSION_EXPENSIVE_DEFAULT_DURATION_SECONDS", "1200")))
     # Idle grace (seconds) for expensive models, overriding SESSION_IDLE_GRACE_SECONDS.
-    # Keep this >= SESSION_EXPENSIVE_DEFAULT_DURATION_SECONDS so an idle expensive
-    # session rides to its natural on-chain expiry instead of being early-closed —
-    # an early close pushes the unused stake into userStakesOnHold (locked ~1 day).
-    SESSION_EXPENSIVE_IDLE_GRACE_SECONDS: int = Field(default=int(os.getenv("SESSION_EXPENSIVE_IDLE_GRACE_SECONDS", "1440")))
+    # Keep this LESS than SESSION_EXPENSIVE_DEFAULT_DURATION_SECONDS so idle
+    # expensive sessions early-close (day-lock: unused returns; used stipend is
+    # held until next UTC day — shorter lifetime reduces day-locked MOR).
+    SESSION_EXPENSIVE_IDLE_GRACE_SECONDS: int = Field(default=int(os.getenv("SESSION_EXPENSIVE_IDLE_GRACE_SECONDS", "300")))
     # Adaptive on-chain wallet throttle: after a nonce conflict is observed on a
     # session open/close, on-chain ops serialize on the wallet lock for this many
     # seconds (sliding; each new conflict re-arms it). 0 disables the throttle
