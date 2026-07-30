@@ -1205,6 +1205,34 @@ async def getRatedBids(model_id: str) -> httpx.Response:
         raise ProxyRouterServiceError(f"Failed to get rated bids for model {model_id}: {str(e)}")
 
 
+async def getBlockchainBalance() -> httpx.Response:
+    """
+    Get ETH and MOR balance of the proxy-router's configured wallet.
+
+    GET /blockchain/balance — returns ``{"mor": "<wei string>", "eth": "..."}``.
+
+    Raises:
+        ProxyRouterServiceError: If the request fails
+    """
+    logger.info("Getting blockchain wallet balance",
+               event_type="get_blockchain_balance_start")
+    try:
+        response = await _execute_request(
+            "GET",
+            "blockchain/balance",
+            timeout=10.0,
+            max_retries=2,
+        )
+        return response
+    except Exception as e:
+        logger.error("Error getting blockchain wallet balance",
+                    error=str(e),
+                    event_type="get_blockchain_balance_error")
+        if isinstance(e, ProxyRouterServiceError):
+            raise
+        raise ProxyRouterServiceError(f"Failed to get blockchain balance: {str(e)}")
+
+
 async def approveSpending(
     *,
     spender: str,

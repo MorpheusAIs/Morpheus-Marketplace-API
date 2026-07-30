@@ -21,6 +21,7 @@ from ....services import (
     NoSessionAvailableError,
     SessionOpenError,
     SessionPoolBusyError,
+    SessionMorReservedError,
 )
 from ....services import proxy_router_service
 from ....services.billing_service import billing_service
@@ -153,6 +154,18 @@ async def create_embeddings(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=e.message,
                 headers={"Retry-After": str(e.retry_after)},
+            )
+        except SessionMorReservedError as e:
+            embeddings_logger.warning(
+                "Model unavailable (MOR low-water reserve)",
+                request_id=request_id,
+                error=str(e),
+                event_type="session_mor_reserved",
+            )
+            await _void_billing_hold(user.id, ledger_entry_id, "model_unavailable", str(e), embeddings_logger)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=e.message,
             )
         except SessionOpenError as e:
             embeddings_logger.error("Failed to open session",

@@ -20,6 +20,7 @@ from ....services import (
     NoSessionAvailableError,
     SessionOpenError,
     SessionPoolBusyError,
+    SessionMorReservedError,
 )
 from ....services import proxy_router_service
 from ....db.database import get_db
@@ -143,6 +144,17 @@ async def create_audio_transcription(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail=e.message,
                     headers={"Retry-After": str(e.retry_after)},
+                )
+            except SessionMorReservedError as e:
+                transcription_logger.warning(
+                    "Model unavailable (MOR low-water reserve)",
+                    request_id=request_id,
+                    error=str(e),
+                    event_type="session_mor_reserved",
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=e.message,
                 )
             except SessionOpenError as e:
                 transcription_logger.error(
@@ -410,6 +422,17 @@ async def create_audio_speech(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail=e.message,
                     headers={"Retry-After": str(e.retry_after)},
+                )
+            except SessionMorReservedError as e:
+                speech_logger.warning(
+                    "Model unavailable (MOR low-water reserve)",
+                    request_id=request_id,
+                    error=str(e),
+                    event_type="session_mor_reserved",
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=e.message,
                 )
             except SessionOpenError as e:
                 speech_logger.error(

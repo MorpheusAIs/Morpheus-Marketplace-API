@@ -70,6 +70,21 @@ class SessionPoolBusyError(SessionRoutingError):
         self.open_count = open_count
 
 
+class SessionMorReservedError(SessionRoutingError):
+    """Raised when liquid wallet MOR is at/below the warm-model low-water mark."""
+
+    def __init__(
+        self,
+        message: str,
+        model_id: Optional[str] = None,
+        balance_mor: Optional[float] = None,
+        low_water_mark_mor: float = 0,
+    ):
+        super().__init__(message, model_id=model_id)
+        self.balance_mor = balance_mor
+        self.low_water_mark_mor = low_water_mark_mor
+
+
 class SessionRoutingService:
     """
     Service for routing requests to sessions and managing session lifecycle.
@@ -114,6 +129,10 @@ class SessionRoutingService:
         self._expensive_tier_cache: Dict[str, tuple] = {}
         self._expensive_tier_cache_ttl = 300.0
 
+        # Short-lived liquid MOR balance cache for the low-water mark gate.
+        # (monotonic_expiry, balance_mor). Per-replica; fail-open on miss/error.
+        self._mor_balance_cache: Optional[tuple] = None
+
         logger.info("SessionRoutingService initialized",
                    event_type="session_routing_service_init")
     
@@ -123,9 +142,13 @@ class SessionRoutingService:
             return set()
         return set(m.strip() for m in settings.SESSION_PREFERRED_MODELS.split(",") if m.strip())
 
+    def _is_warm_model(self, model_id: str) -> bool:
+        """True if model_id is in SESSION_PREFERRED_MODELS (warm pool)."""
+        return model_id in self._get_preferred_models()
+
     def _soft_cap_for_model(self, model_id: str) -> int:
         """Per-model OPEN soft cap. 0 means unlimited (cap disabled)."""
-        if model_id in self._get_preferred_models():
+        if self._is_warm_model(model_id):
             return max(0, int(settings.SESSION_SOFT_CAP_WARM))
         return max(0, int(settings.SESSION_SOFT_CAP_DEFAULT))
 
@@ -171,6 +194,90 @@ class SessionRoutingService:
                 retry_after=retry_after,
                 soft_cap=soft_cap,
                 open_count=open_count,
+            )
+
+    @staticmethod
+    def _parse_mor_balance_wei(raw) -> Optional[float]:
+        """Parse proxy-router ``mor`` field (wei string/int) to MOR float."""
+        if raw is None:
+            return None
+        try:
+            wei = int(str(raw).strip().strip('"'))
+            return wei / 1e18
+        except (ValueError, TypeError):
+            return None
+
+    async def _get_liquid_mor_balance(self) -> Optional[float]:
+        """Liquid consumer-wallet MOR, or None on failure (callers fail-open).
+
+        Uses a short per-replica TTL cache so open bursts don't hammer
+        GET /blockchain/balance.
+        """
+        now = time.monotonic()
+        cached = self._mor_balance_cache
+        if cached is not None:
+            expiry, balance = cached
+            if now < expiry:
+                return balance
+
+        try:
+            response = await proxy_router_service.getBlockchainBalance()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                logger.warning(
+                    "Unexpected blockchain balance payload; fail-open",
+                    event_type="mor_balance_parse_error",
+                )
+                return None
+            balance = self._parse_mor_balance_wei(payload.get("mor"))
+            if balance is None:
+                logger.warning(
+                    "Could not parse mor field from blockchain balance; fail-open",
+                    mor_raw=payload.get("mor"),
+                    event_type="mor_balance_parse_error",
+                )
+                return None
+            ttl = max(0.0, float(settings.SESSION_MOR_BALANCE_CACHE_SECONDS))
+            self._mor_balance_cache = (now + ttl, balance)
+            return balance
+        except Exception as e:
+            logger.warning(
+                "Failed to read blockchain MOR balance; fail-open",
+                error=str(e),
+                event_type="mor_balance_read_error",
+            )
+            return None
+
+    async def _ensure_mor_low_water_allows_open(self, model_id: str) -> None:
+        """Raise SessionMorReservedError for non-warm opens at/below the MOR floor.
+
+        Warm (preferred) models skip this gate. Watermark 0 disables it.
+        Balance read failure fails open (allow the open).
+        """
+        watermark = float(settings.SESSION_MOR_LOW_WATER_MARK_MOR or 0)
+        if watermark <= 0:
+            return
+        if self._is_warm_model(model_id):
+            return
+
+        balance = await self._get_liquid_mor_balance()
+        if balance is None:
+            return
+
+        if balance <= watermark:
+            logger.warning(
+                "MOR low-water mark reached; refusing non-warm open",
+                model_id=model_id,
+                balance_mor=balance,
+                low_water_mark_mor=watermark,
+                event_type="session_mor_low_water_reserved",
+            )
+            raise SessionMorReservedError(
+                "This model is temporarily unavailable; "
+                "capacity is reserved for priority models.",
+                model_id=model_id,
+                balance_mor=balance,
+                low_water_mark_mor=watermark,
             )
 
     # =========================================================================
@@ -341,6 +448,7 @@ class SessionRoutingService:
             NoSessionAvailableError: If no session could be acquired
             SessionOpenError: If session opening failed
             SessionPoolBusyError: If OPEN soft cap is reached with no idle session
+            SessionMorReservedError: If non-warm open is blocked by MOR low-water mark
         """
         route_logger = logger.bind(
             user_id=user_id,
@@ -370,12 +478,13 @@ class SessionRoutingService:
             return claimed_id
 
         # OPEN PATH: no idle session -> open a new paid on-chain session, unless
-        # the per-model OPEN soft cap is already saturated (then 429 / busy).
-        # Soft-cap check runs before the wallet-serialized open so we don't
-        # burn a nonce on a session we refuse to keep. The session is created
+        # soft-capped (429) or MOR low-water reserves capacity for warm models
+        # (503). Checks run before the wallet-serialized open so we don't burn
+        # a nonce on a session we refuse to keep. The session is created
         # already assigned (active_requests=1), so it is never momentarily
         # visible as idle between insert and use.
         await self._ensure_soft_cap_allows_open(model_id)
+        await self._ensure_mor_low_water_allows_open(model_id)
 
         route_logger.info("No idle session for model, opening a new one",
                          event_type="no_idle_session")
@@ -665,6 +774,7 @@ class SessionRoutingService:
         Raises:
             SessionOpenError: If session opening fails
             SessionPoolBusyError: If OPEN soft cap is reached
+            SessionMorReservedError: If non-warm open is blocked by MOR low-water
         """
         open_logger = logger.bind(
             model_id=model_id,
@@ -674,9 +784,11 @@ class SessionRoutingService:
         open_logger.info("Opening new session for model",
                         event_type="session_open_start")
 
-        # Soft-cap gate (request path also checks before calling here;
-        # automation / preferred scale-up enters directly). Cap 0 = unlimited.
+        # Soft-cap + MOR low-water gates (request path also checks before
+        # calling here; automation / preferred scale-up enters directly).
+        # Cap/watermark 0 = disabled. Warm models skip the MOR gate.
         await self._ensure_soft_cap_allows_open(model_id)
+        await self._ensure_mor_low_water_allows_open(model_id)
 
         # Expensive models open with a shorter duration so the amplified
         # on-chain stake pulled per session stays small (more concurrent
