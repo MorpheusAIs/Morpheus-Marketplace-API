@@ -16,7 +16,12 @@ import uuid
 from ....schemas.billing import UsageHoldRequest, UsageFinalizeRequest, UsageVoidRequest
 from ....core.model_routing import model_router
 from ....core.model_errors import ModelRoutingError
-from ....services import session_routing_service, NoSessionAvailableError, SessionOpenError
+from ....services import (
+    session_routing_service,
+    NoSessionAvailableError,
+    SessionOpenError,
+    SessionPoolBusyError,
+)
 from ....services import proxy_router_service
 from ....services.billing_service import billing_service
 from ....services.token_estimation_service import token_estimation_service
@@ -134,6 +139,20 @@ async def create_embeddings(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No session available for embeddings request"
+            )
+        except SessionPoolBusyError as e:
+            embeddings_logger.warning(
+                "Model session pool busy",
+                request_id=request_id,
+                error=str(e),
+                retry_after=e.retry_after,
+                event_type="session_pool_busy",
+            )
+            await _void_billing_hold(user.id, ledger_entry_id, "model_busy", str(e), embeddings_logger)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=e.message,
+                headers={"Retry-After": str(e.retry_after)},
             )
         except SessionOpenError as e:
             embeddings_logger.error("Failed to open session",
