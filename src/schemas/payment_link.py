@@ -33,10 +33,8 @@ class PaymentLinkResponse(BaseModel):
 
 
 class PaymentLinkListResponse(BaseModel):
-    """Paginated list of payment records (Checkouts API)."""
-    # Coinbase renamed the list key from `paymentLinks` to `checkouts` in the
-    # Checkouts API. `populate_by_name=True` still accepts the Python field name.
-    payment_links: List[Dict[str, Any]] = Field(default_factory=list, alias="checkouts")
+    """Paginated list of payment links."""
+    payment_links: List[Dict[str, Any]] = Field(default_factory=list, alias="paymentLinks")
     next_page_token: Optional[str] = Field(None, alias="nextPageToken")
 
     model_config = {"populate_by_name": True}
