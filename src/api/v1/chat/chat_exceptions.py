@@ -154,6 +154,36 @@ class ModelBusyError(ChatError):
 
 
 @dataclass
+class ModelUnavailableError(ChatError):
+    """Raised when a non-warm model open is blocked by the MOR low-water mark."""
+
+    model_id: Optional[str] = None
+    message: str = (
+        "This model is temporarily unavailable; "
+        "capacity is reserved for priority models."
+    )
+    status_code: int = status.HTTP_503_SERVICE_UNAVAILABLE
+    error_type: str = "model_unavailable"
+
+    def __post_init__(self):
+        self.details = {"code": "model_unavailable"}
+        if self.model_id:
+            self.details["model_id"] = self.model_id
+        super().__post_init__()
+
+    def to_response(self) -> JSONResponse:
+        content = {
+            "error": {
+                "message": sanitize_error_message(self.message),
+                "type": self.error_type,
+                "param": None,
+                "code": "model_unavailable",
+            }
+        }
+        return JSONResponse(status_code=self.status_code, content=content)
+
+
+@dataclass
 class ProxyError(ChatError):
     """Raised when proxy router communication fails."""
     
@@ -344,6 +374,7 @@ __all__ = [
     "SessionExpiredError",
     "SessionCreationError",
     "ModelBusyError",
+    "ModelUnavailableError",
     "ProxyError",
     "GatewayError",
     "RequestParseError",

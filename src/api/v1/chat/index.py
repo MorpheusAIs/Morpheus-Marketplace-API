@@ -28,6 +28,7 @@ from ....services import (
     NoSessionAvailableError,
     SessionOpenError,
     SessionPoolBusyError,
+    SessionMorReservedError,
 )
 from ....services.billing_service import billing_service
 from ....services.token_estimation_service import token_estimation_service
@@ -54,6 +55,7 @@ from .chat_exceptions import (
     SessionNotFoundError,
     SessionCreationError,
     ModelBusyError,
+    ModelUnavailableError,
     GatewayError,
     RateLimitError,
     handle_chat_error,
@@ -359,6 +361,11 @@ async def _resolve_session(
             model_id=e.model_id,
             soft_cap=e.soft_cap,
             open_count=e.open_count,
+            message=e.message,
+        ) from e
+    except SessionMorReservedError as e:
+        raise ModelUnavailableError(
+            model_id=e.model_id,
             message=e.message,
         ) from e
     except SessionOpenError as e:

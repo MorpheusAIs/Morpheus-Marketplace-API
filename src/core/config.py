@@ -213,6 +213,21 @@ class Settings(BaseSettings):
         default=int(os.getenv("SESSION_SOFT_CAP_RETRY_AFTER_SECONDS", "15"))
     )
 
+    # --- Warm-model MOR low-water mark ---------------------------------------
+    # Liquid consumer-wallet MOR floor reserved for warm (preferred) session
+    # opens. When balance <= this value, non-warm models cannot open new
+    # on-chain sessions (idle claims still succeed). Warm models skip the gate.
+    # 0 DISABLES the check — ships inert; turn on per-env via secrets
+    # (prod target ~30000 MOR). Distinct from soft caps (session count vs MOR).
+    SESSION_MOR_LOW_WATER_MARK_MOR: float = Field(
+        default=float(os.getenv("SESSION_MOR_LOW_WATER_MARK_MOR", "0"))
+    )
+    # Short TTL for /blockchain/balance reads so open bursts don't hammer the
+    # C-Node. Per-replica only.
+    SESSION_MOR_BALANCE_CACHE_SECONDS: float = Field(
+        default=float(os.getenv("SESSION_MOR_BALANCE_CACHE_SECONDS", "15"))
+    )
+
     # --- Expensive-model session tier ---------------------------------------
     # The on-chain stake pulled at openSession scales linearly with duration and
     # is amplified by (total MOR supply / today's emissions budget), so a
