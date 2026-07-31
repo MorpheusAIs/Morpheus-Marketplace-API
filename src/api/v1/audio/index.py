@@ -15,7 +15,13 @@ from datetime import datetime, timezone
 from ....schemas import openai as openai_schemas
 from ....crud import api_key as api_key_crud
 from ....core.config import settings
-from ....services import session_routing_service, NoSessionAvailableError, SessionOpenError
+from ....services import (
+    session_routing_service,
+    NoSessionAvailableError,
+    SessionOpenError,
+    SessionPoolBusyError,
+    SessionMorReservedError,
+)
 from ....services import proxy_router_service
 from ....db.database import get_db
 from ....dependencies import get_api_key_user, get_current_api_key
@@ -125,6 +131,30 @@ async def create_audio_transcription(
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="No session available for transcription request"
+                )
+            except SessionPoolBusyError as e:
+                transcription_logger.warning(
+                    "Model session pool busy",
+                    request_id=request_id,
+                    error=str(e),
+                    retry_after=e.retry_after,
+                    event_type="session_pool_busy",
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=e.message,
+                    headers={"Retry-After": str(e.retry_after)},
+                )
+            except SessionMorReservedError as e:
+                transcription_logger.warning(
+                    "Model unavailable (MOR low-water reserve)",
+                    request_id=request_id,
+                    error=str(e),
+                    event_type="session_mor_reserved",
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=e.message,
                 )
             except SessionOpenError as e:
                 transcription_logger.error(
@@ -379,6 +409,30 @@ async def create_audio_speech(
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="No session available for speech request"
+                )
+            except SessionPoolBusyError as e:
+                speech_logger.warning(
+                    "Model session pool busy",
+                    request_id=request_id,
+                    error=str(e),
+                    retry_after=e.retry_after,
+                    event_type="session_pool_busy",
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=e.message,
+                    headers={"Retry-After": str(e.retry_after)},
+                )
+            except SessionMorReservedError as e:
+                speech_logger.warning(
+                    "Model unavailable (MOR low-water reserve)",
+                    request_id=request_id,
+                    error=str(e),
+                    event_type="session_mor_reserved",
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=e.message,
                 )
             except SessionOpenError as e:
                 speech_logger.error(

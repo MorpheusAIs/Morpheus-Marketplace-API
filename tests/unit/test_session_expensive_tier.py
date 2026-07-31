@@ -1,7 +1,10 @@
 """Tests for the expensive-model session tier in SessionRoutingService.
 
-Expensive models (lowest rated bid >= a MOR/sec cutoff) open with a shorter
-duration to bound the amplified on-chain stake, and use their own idle grace.
+Expensive models (ANY rated bid >= a MOR/sec cutoff, i.e. max(bid.price) >=
+cutoff) open with a shorter duration to bound the amplified on-chain stake, and
+use their own idle grace. Classification uses the HIGHEST bid because HA
+failover can land a session on the model's priciest peer — a cheap underbidder
+must not earn the model the long-duration stake.
 The tier is disabled by default (cutoff <= 0) and every decision is best-effort:
 a failed / missing price lookup must never block an open, so it falls back to
 the global session settings. The proxy-router bid read is mocked here.
@@ -65,42 +68,43 @@ def _rated(*pps_values):
 
 
 # ---------------------------------------------------------------------------
-# _get_model_min_price_per_second: parsing + best-effort failure
+# _get_model_max_price_per_second: parsing + best-effort failure
 # ---------------------------------------------------------------------------
 
 
-async def test_min_price_picks_lowest_and_converts_wei_to_mor(service):
+async def test_max_price_picks_highest_and_converts_wei_to_mor(service):
+    """A cheap underbid must not mask the premium bid: max wins."""
     with _patch_rated_bids(_rated(PREMIUM_PPS, CHEAP_PPS)):
-        price = await service._get_model_min_price_per_second("0xmodel")
-    assert price == pytest.approx(0.0001)
+        price = await service._get_model_max_price_per_second("0xmodel")
+    assert price == pytest.approx(0.01)
 
 
-async def test_min_price_parses_real_rated_envelope(service):
+async def test_max_price_parses_real_rated_envelope(service):
     """Regression: /bids/rated nests PricePerSecond under "Bid" (not top level)."""
     with _patch_rated_bids(_rated(PREMIUM_PPS)):
-        price = await service._get_model_min_price_per_second("0xmodel")
+        price = await service._get_model_max_price_per_second("0xmodel")
     assert price == pytest.approx(0.01)
 
 
-async def test_min_price_supports_flat_bids_fallback(service):
+async def test_max_price_supports_flat_bids_fallback(service):
     """Older/flat shape (PricePerSecond at the top level) still parses."""
     with _patch_rated_bids({"bids": [{"PricePerSecond": PREMIUM_PPS}]}):
-        price = await service._get_model_min_price_per_second("0xmodel")
+        price = await service._get_model_max_price_per_second("0xmodel")
     assert price == pytest.approx(0.01)
 
 
-async def test_min_price_none_when_no_bids(service):
+async def test_max_price_none_when_no_bids(service):
     with _patch_rated_bids([]):
-        assert await service._get_model_min_price_per_second("0xmodel") is None
+        assert await service._get_model_max_price_per_second("0xmodel") is None
 
 
-async def test_min_price_none_on_lookup_error(service):
+async def test_max_price_none_on_lookup_error(service):
     with patch(
         "src.services.session_routing_service.proxy_router_service.getRatedBids",
         new_callable=AsyncMock,
         side_effect=RuntimeError("proxy down"),
     ):
-        assert await service._get_model_min_price_per_second("0xmodel") is None
+        assert await service._get_model_max_price_per_second("0xmodel") is None
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +133,16 @@ async def test_not_expensive_when_price_below_cutoff(service):
         _rated(CHEAP_PPS)
     ):
         assert await service._is_expensive_model("0xmodel") is False
+
+
+async def test_expensive_despite_cheap_underbid(service):
+    """Acceptance: any premium-tier bid makes the model expensive even when a
+    cheap underbidder exists — HA failover could land on the pricey peer, so
+    the stake must be bounded by the shorter (20 min) duration."""
+    with patch.object(settings, "SESSION_EXPENSIVE_CUTOFF_MOR_PER_SECOND", 0.001), _patch_rated_bids(
+        _rated(CHEAP_PPS, PREMIUM_PPS)
+    ):
+        assert await service._is_expensive_model("0xmodel") is True
 
 
 async def test_not_expensive_when_price_unknown(service):

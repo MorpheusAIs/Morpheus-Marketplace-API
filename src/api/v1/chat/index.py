@@ -23,7 +23,13 @@ from ....dependencies import get_api_key_user, get_current_api_key
 from ....db.database import get_db
 from ....db.models import User, APIKey
 from ....core.model_routing import model_router
-from ....services import session_routing_service, NoSessionAvailableError, SessionOpenError
+from ....services import (
+    session_routing_service,
+    NoSessionAvailableError,
+    SessionOpenError,
+    SessionPoolBusyError,
+    SessionMorReservedError,
+)
 from ....services.billing_service import billing_service
 from ....services.token_estimation_service import token_estimation_service
 from ....services.rate_limiting import (
@@ -48,6 +54,8 @@ from .chat_exceptions import (
     BillingError,
     SessionNotFoundError,
     SessionCreationError,
+    ModelBusyError,
+    ModelUnavailableError,
     GatewayError,
     RateLimitError,
     handle_chat_error,
@@ -347,6 +355,19 @@ async def _resolve_session(
         return routed_session_id
     except NoSessionAvailableError as e:
         raise SessionNotFoundError() from e
+    except SessionPoolBusyError as e:
+        raise ModelBusyError(
+            retry_after=e.retry_after,
+            model_id=e.model_id,
+            soft_cap=e.soft_cap,
+            open_count=e.open_count,
+            message=e.message,
+        ) from e
+    except SessionMorReservedError as e:
+        raise ModelUnavailableError(
+            model_id=e.model_id,
+            message=e.message,
+        ) from e
     except SessionOpenError as e:
         raise SessionCreationError(
             message=f"Error opening session: {e.message}",

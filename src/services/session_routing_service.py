@@ -53,6 +53,38 @@ class SessionOpenError(SessionRoutingError):
     pass
 
 
+class SessionPoolBusyError(SessionRoutingError):
+    """Raised when the per-model OPEN soft cap is reached and no idle session exists."""
+
+    def __init__(
+        self,
+        message: str,
+        model_id: Optional[str] = None,
+        retry_after: int = 15,
+        soft_cap: int = 0,
+        open_count: int = 0,
+    ):
+        super().__init__(message, model_id=model_id)
+        self.retry_after = retry_after
+        self.soft_cap = soft_cap
+        self.open_count = open_count
+
+
+class SessionMorReservedError(SessionRoutingError):
+    """Raised when liquid wallet MOR is at/below the warm-model low-water mark."""
+
+    def __init__(
+        self,
+        message: str,
+        model_id: Optional[str] = None,
+        balance_mor: Optional[float] = None,
+        low_water_mark_mor: float = 0,
+    ):
+        super().__init__(message, model_id=model_id)
+        self.balance_mor = balance_mor
+        self.low_water_mark_mor = low_water_mark_mor
+
+
 class SessionRoutingService:
     """
     Service for routing requests to sessions and managing session lifecycle.
@@ -89,13 +121,17 @@ class SessionRoutingService:
         self._background_close_tasks: set = set()
 
         # Short-lived per-model "is this an expensive model?" cache. The tier
-        # decision needs the model's lowest rated-bid price (an on-chain read
+        # decision needs the model's highest rated-bid price (an on-chain read
         # via the proxy-router); cache it so neither the open path nor the
         # per-tick automation loop hammers that lookup. Keyed by model_id ->
         # (monotonic_expiry, is_expensive). Per-replica and deterministic from
         # the cutoff + price, so no cross-replica coordination is needed.
         self._expensive_tier_cache: Dict[str, tuple] = {}
         self._expensive_tier_cache_ttl = 300.0
+
+        # Short-lived liquid MOR balance cache for the low-water mark gate.
+        # (monotonic_expiry, balance_mor). Per-replica; fail-open on miss/error.
+        self._mor_balance_cache: Optional[tuple] = None
 
         logger.info("SessionRoutingService initialized",
                    event_type="session_routing_service_init")
@@ -106,12 +142,155 @@ class SessionRoutingService:
             return set()
         return set(m.strip() for m in settings.SESSION_PREFERRED_MODELS.split(",") if m.strip())
 
+    def _is_warm_model(self, model_id: str) -> bool:
+        """True if model_id is in SESSION_PREFERRED_MODELS (warm pool)."""
+        return model_id in self._get_preferred_models()
+
+    def _soft_cap_for_model(self, model_id: str) -> int:
+        """Per-model OPEN soft cap. 0 means unlimited (cap disabled)."""
+        if self._is_warm_model(model_id):
+            return max(0, int(settings.SESSION_SOFT_CAP_WARM))
+        return max(0, int(settings.SESSION_SOFT_CAP_DEFAULT))
+
+    async def _count_open_sessions(self, db: AsyncSession, model_id: str) -> int:
+        """Count OPEN sessions for a model (utilized + idle)."""
+        result = await db.execute(
+            select(func.count())
+            .select_from(RoutedSession)
+            .where(
+                RoutedSession.model_id == model_id,
+                RoutedSession.state == SessionState.OPEN,
+            )
+        )
+        return int(result.scalar_one() or 0)
+
+    async def _ensure_soft_cap_allows_open(self, model_id: str) -> None:
+        """Raise SessionPoolBusyError when OPEN count is at/above the soft cap.
+
+        Soft by design: checked just before open; multi-replica races may briefly
+        overshoot. Cap 0 disables the check entirely.
+        """
+        soft_cap = self._soft_cap_for_model(model_id)
+        if soft_cap <= 0:
+            return
+
+        async with get_db() as db:
+            open_count = await self._count_open_sessions(db, model_id)
+
+        if open_count >= soft_cap:
+            retry_after = max(1, int(settings.SESSION_SOFT_CAP_RETRY_AFTER_SECONDS))
+            logger.warning(
+                "Session soft cap reached; refusing open",
+                model_id=model_id,
+                open_count=open_count,
+                soft_cap=soft_cap,
+                retry_after=retry_after,
+                event_type="session_soft_cap_busy",
+            )
+            raise SessionPoolBusyError(
+                f"Model session pool is at capacity ({open_count}/{soft_cap} open). "
+                f"Retry after {retry_after} seconds.",
+                model_id=model_id,
+                retry_after=retry_after,
+                soft_cap=soft_cap,
+                open_count=open_count,
+            )
+
+    @staticmethod
+    def _parse_mor_balance_wei(raw) -> Optional[float]:
+        """Parse proxy-router ``mor`` field (wei string/int) to MOR float."""
+        if raw is None:
+            return None
+        try:
+            wei = int(str(raw).strip().strip('"'))
+            return wei / 1e18
+        except (ValueError, TypeError):
+            return None
+
+    async def _get_liquid_mor_balance(self) -> Optional[float]:
+        """Liquid consumer-wallet MOR, or None on failure (callers fail-open).
+
+        Uses a short per-replica TTL cache so open bursts don't hammer
+        GET /blockchain/balance.
+        """
+        now = time.monotonic()
+        cached = self._mor_balance_cache
+        if cached is not None:
+            expiry, balance = cached
+            if now < expiry:
+                return balance
+
+        try:
+            response = await proxy_router_service.getBlockchainBalance()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                logger.warning(
+                    "Unexpected blockchain balance payload; fail-open",
+                    event_type="mor_balance_parse_error",
+                )
+                return None
+            balance = self._parse_mor_balance_wei(payload.get("mor"))
+            if balance is None:
+                logger.warning(
+                    "Could not parse mor field from blockchain balance; fail-open",
+                    mor_raw=payload.get("mor"),
+                    event_type="mor_balance_parse_error",
+                )
+                return None
+            ttl = max(0.0, float(settings.SESSION_MOR_BALANCE_CACHE_SECONDS))
+            self._mor_balance_cache = (now + ttl, balance)
+            return balance
+        except Exception as e:
+            logger.warning(
+                "Failed to read blockchain MOR balance; fail-open",
+                error=str(e),
+                event_type="mor_balance_read_error",
+            )
+            return None
+
+    async def _ensure_mor_low_water_allows_open(self, model_id: str) -> None:
+        """Raise SessionMorReservedError for non-warm opens at/below the MOR floor.
+
+        Warm (preferred) models skip this gate. Watermark 0 disables it.
+        Balance read failure fails open (allow the open).
+        """
+        watermark = float(settings.SESSION_MOR_LOW_WATER_MARK_MOR or 0)
+        if watermark <= 0:
+            return
+        if self._is_warm_model(model_id):
+            return
+
+        balance = await self._get_liquid_mor_balance()
+        if balance is None:
+            return
+
+        if balance <= watermark:
+            logger.warning(
+                "MOR low-water mark reached; refusing non-warm open",
+                model_id=model_id,
+                balance_mor=balance,
+                low_water_mark_mor=watermark,
+                event_type="session_mor_low_water_reserved",
+            )
+            raise SessionMorReservedError(
+                "This model is temporarily unavailable; "
+                "capacity is reserved for priority models.",
+                model_id=model_id,
+                balance_mor=balance,
+                low_water_mark_mor=watermark,
+            )
+
     # =========================================================================
     # EXPENSIVE-MODEL TIER
     # =========================================================================
 
-    async def _get_model_min_price_per_second(self, model_id: str) -> Optional[float]:
-        """Lowest rated-bid price for a model in MOR/sec, or None on failure.
+    async def _get_model_max_price_per_second(self, model_id: str) -> Optional[float]:
+        """Highest rated-bid price for a model in MOR/sec, or None on failure.
+
+        The MAX (not min) matters: sessions can fail over between the model's
+        providers, so the stake exposure is bounded by the priciest peer, not
+        the cheapest. A cheap underbidder must not demote a model whose other
+        bids are premium-priced.
 
         Best-effort: never raises. A price lookup must never block (or fail) a
         session open — callers treat None as "not expensive" and fall back to
@@ -143,7 +322,7 @@ class SessionRoutingService:
                 except (ValueError, TypeError):
                     continue
 
-            return min(prices) if prices else None
+            return max(prices) if prices else None
         except Exception as e:
             logger.warning("Rated-bid price lookup failed; treating model as non-expensive",
                            model_id=model_id,
@@ -152,7 +331,8 @@ class SessionRoutingService:
             return None
 
     async def _is_expensive_model(self, model_id: str) -> bool:
-        """True if the model's lowest rated bid is >= the expensive cutoff.
+        """True if ANY of the model's rated bids is >= the expensive cutoff,
+        i.e. max(bid.PricePerSecond) >= cutoff.
 
         Returns False when the tier is disabled (cutoff <= 0) or the price
         cannot be determined. Result is cached per model for a short TTL so the
@@ -166,7 +346,7 @@ class SessionRoutingService:
         if cached is not None and time.monotonic() < cached[0]:
             return cached[1]
 
-        price = await self._get_model_min_price_per_second(model_id)
+        price = await self._get_model_max_price_per_second(model_id)
         is_expensive = price is not None and price >= cutoff
         self._expensive_tier_cache[model_id] = (
             time.monotonic() + self._expensive_tier_cache_ttl,
@@ -267,6 +447,8 @@ class SessionRoutingService:
         Raises:
             NoSessionAvailableError: If no session could be acquired
             SessionOpenError: If session opening failed
+            SessionPoolBusyError: If OPEN soft cap is reached with no idle session
+            SessionMorReservedError: If non-warm open is blocked by MOR low-water mark
         """
         route_logger = logger.bind(
             user_id=user_id,
@@ -295,14 +477,15 @@ class SessionRoutingService:
                              event_type="route_to_unutilized")
             return claimed_id
 
-        # OPEN PATH: no idle session -> open a new paid on-chain session. The tx
-        # is serialized on the wallet lock inside _open_session_for_model (one
-        # consumer wallet -> one nonce sequence). NO DB connection is held while
-        # waiting on that lock, so any number of concurrent openers may queue
-        # without exhausting the DB pool. The session is created already assigned
-        # to this request (active_requests=1), so it is never momentarily visible
-        # as idle - and thus claimable by another request - between insert and
-        # use.
+        # OPEN PATH: no idle session -> open a new paid on-chain session, unless
+        # soft-capped (429) or MOR low-water reserves capacity for warm models
+        # (503). Checks run before the wallet-serialized open so we don't burn
+        # a nonce on a session we refuse to keep. The session is created
+        # already assigned (active_requests=1), so it is never momentarily
+        # visible as idle between insert and use.
+        await self._ensure_soft_cap_allows_open(model_id)
+        await self._ensure_mor_low_water_allows_open(model_id)
+
         route_logger.info("No idle session for model, opening a new one",
                          event_type="no_idle_session")
         return await self._open_session_for_model(
@@ -525,9 +708,9 @@ class SessionRoutingService:
         """Return expires_at anchored to the on-chain endsAt (+ configured buffer).
 
         Parses the session's on-chain endsAt from ``status`` and adds
-        SESSION_EXPIRY_BUFFER_SECONDS so the cleanup sweep closes the
-        session at/after its true end (a "late" close → full stake back to the
-        wallet). Best-effort: any failure returns ``fallback`` (the call-start
+        SESSION_EXPIRY_BUFFER_SECONDS so the cleanup sweep does not close a
+        few seconds BEFORE endsAt when a session rides to natural expiry.
+        Best-effort: any failure returns ``fallback`` (the call-start
         estimate) so a session open is never blocked on this read.
         """
         ends_at = self._parse_onchain_ends_at(status)
@@ -590,6 +773,8 @@ class SessionRoutingService:
 
         Raises:
             SessionOpenError: If session opening fails
+            SessionPoolBusyError: If OPEN soft cap is reached
+            SessionMorReservedError: If non-warm open is blocked by MOR low-water
         """
         open_logger = logger.bind(
             model_id=model_id,
@@ -598,6 +783,12 @@ class SessionRoutingService:
 
         open_logger.info("Opening new session for model",
                         event_type="session_open_start")
+
+        # Soft-cap + MOR low-water gates (request path also checks before
+        # calling here; automation / preferred scale-up enters directly).
+        # Cap/watermark 0 = disabled. Warm models skip the MOR gate.
+        await self._ensure_soft_cap_allows_open(model_id)
+        await self._ensure_mor_low_water_allows_open(model_id)
 
         # Expensive models open with a shorter duration so the amplified
         # on-chain stake pulled per session stays small (more concurrent
@@ -619,10 +810,8 @@ class SessionRoutingService:
         # solely if that read fails, because it is systematically too short: it
         # ignores how long the open tx takes to mine, so the on-chain
         # openedAt (== mine time) is later and the true endsAt is later still.
-        # Closing at this estimate lands a few seconds BEFORE endsAt under load,
-        # turning an intended "late" close into an early one — which locks the
-        # elapsed-time stipend in userStakesOnHold and forces housekeeping to
-        # recover it via withdrawUserStakes.
+        # Closing at this estimate can land a few seconds BEFORE endsAt under
+        # load. Prefer the on-chain endsAt below when available.
         estimated_expires_at = (
             datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=session_duration)
         )
@@ -666,8 +855,7 @@ class SessionRoutingService:
             status = await self._fetch_session_status(blockchain_session_id, open_logger)
 
             # Anchor expires_at to the REAL on-chain endsAt (+ small buffer) so
-            # the cleanup sweep closes the session AT/AFTER endsAt (a "late"
-            # close returns the full stake straight to the wallet).
+            # natural-expiry cleanup does not close a few seconds early.
             expires_at = self._resolve_expires_at(
                 status, estimated_expires_at, open_logger
             )
@@ -1054,6 +1242,14 @@ class SessionRoutingService:
                     auto_logger.info("Opened session for preferred model",
                                    model_id=model_id,
                                    event_type="preferred_model_session_opened")
+                except SessionPoolBusyError as e:
+                    auto_logger.info(
+                        "Preferred model at soft cap; skipping bootstrap open",
+                        model_id=model_id,
+                        soft_cap=e.soft_cap,
+                        open_count=e.open_count,
+                        event_type="preferred_model_soft_cap",
+                    )
                 except Exception as e:
                     auto_logger.error("Failed to open session for preferred model",
                                     model_id=model_id,
@@ -1089,10 +1285,11 @@ class SessionRoutingService:
         unutilized = [s for s in sessions if not s.is_utilized]
         
         # Filter unutilized by idle grace period. Expensive models use their own
-        # (longer) grace so an idle session rides to natural on-chain expiry
-        # rather than being early-closed — an early close locks the unused stake
-        # in userStakesOnHold for ~1 day. Falls back to the global grace when the
-        # tier is disabled or the price is unknown.
+        # grace (typically also short). Under SessionRouter day-lock, unused
+        # stake returns on close; used (wall-clock) stipend is held until the
+        # next UTC day — so prefer grace < duration and early-close idle
+        # sessions. Falls back to the global grace when the tier is disabled
+        # or the price is unknown.
         idle_grace_seconds = settings.SESSION_IDLE_GRACE_SECONDS
         if await self._is_expensive_model(model_id):
             idle_grace_seconds = settings.SESSION_EXPENSIVE_IDLE_GRACE_SECONDS
@@ -1113,7 +1310,7 @@ class SessionRoutingService:
         if is_preferred:
             # Preferred model logic
             if len(unutilized) == 0:
-                # All utilized - scale up by opening another session
+                # All utilized - scale up by opening another session (soft-capped)
                 process_logger.info("All sessions utilized for preferred model, opening another",
                                   event_type="preferred_all_utilized")
                 try:
@@ -1126,6 +1323,14 @@ class SessionRoutingService:
                     process_logger.info("Opened additional session for preferred model",
                                       model_id=model_id,
                                       event_type="preferred_model_scaled_up")
+                except SessionPoolBusyError as e:
+                    process_logger.info(
+                        "Preferred model at soft cap; not scaling up",
+                        model_id=model_id,
+                        soft_cap=e.soft_cap,
+                        open_count=e.open_count,
+                        event_type="preferred_model_soft_cap",
+                    )
                 except Exception as e:
                     process_logger.error("Failed to open additional session for preferred model",
                                        model_id=model_id,
