@@ -4,6 +4,7 @@ JSON-file-backed pricing provider implementation.
 Loads model pricing from environment-specific JSON files in the models/ directory.
 """
 
+import re
 from typing import Optional, List, Dict, TYPE_CHECKING
 from decimal import Decimal
 from datetime import datetime
@@ -16,6 +17,26 @@ from .provider import PricingProvider
 from src.core.config_loader import load_model_prices
 
 
+def _slugify_model_name(model_name: str) -> str:
+    """Kebab-slug for pricing lookup (aligned with catalog_name_slug).
+
+    Spaces/underscores → '-', strip vendor prefixes (org/model), keep ':web'.
+    Deliberately not difflib — wrong price match is worse than default.
+    """
+    normalized = (model_name or "").lower().strip()
+    if not normalized:
+        return ""
+    # org/model → model (moonshotai/kimi-k3)
+    if "/" in normalized:
+        normalized = normalized.rsplit("/", 1)[-1]
+    normalized = re.sub(r"[\s_]+", "-", normalized)
+    normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
+    for suffix in ["-instruct", "-chat", "-base"]:
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)]
+    return normalized
+
+
 class HardcodedPricingProvider(PricingProvider):
     """
     Pricing provider backed by JSON config files.
@@ -26,8 +47,8 @@ class HardcodedPricingProvider(PricingProvider):
 
     def __init__(self):
         self._pricing_cache: Dict[str, ModelPricing] = {}
-        self._default_input_price: Decimal = Decimal("0.50")
-        self._default_output_price: Decimal = Decimal("2.00")
+        self._default_input_price: Decimal = Decimal("2.00")
+        self._default_output_price: Decimal = Decimal("8.00")
         self._initialize_pricing()
 
     def _initialize_pricing(self) -> None:
@@ -35,11 +56,11 @@ class HardcodedPricingProvider(PricingProvider):
         config = load_model_prices()
         effective_date = datetime(2024, 12, 1)
 
-        self._default_input_price = Decimal(config.get("default_input_price_per_million", "0.50"))
-        self._default_output_price = Decimal(config.get("default_output_price_per_million", "2.00"))
+        self._default_input_price = Decimal(config.get("default_input_price_per_million", "2.00"))
+        self._default_output_price = Decimal(config.get("default_output_price_per_million", "8.00"))
 
         for name, prices in config.get("models", {}).items():
-            self._pricing_cache[name.lower()] = ModelPricing(
+            pricing = ModelPricing(
                 model_name=name,
                 input_price_per_million=Decimal(prices["input"]),
                 output_price_per_million=Decimal(prices["output"]),
@@ -48,6 +69,11 @@ class HardcodedPricingProvider(PricingProvider):
                 effective_from=effective_date,
                 metadata={"source": "json_config", "version": "1.0"},
             )
+            self._pricing_cache[name.lower()] = pricing
+            # Also index the slug form so spaced JSON keys / lookups collide less.
+            slug = _slugify_model_name(name)
+            if slug and slug not in self._pricing_cache:
+                self._pricing_cache[slug] = pricing
 
     @property
     def source_name(self) -> str:
@@ -95,32 +121,31 @@ class HardcodedPricingProvider(PricingProvider):
         )
 
     def _normalize_model_name(self, model_name: str) -> str:
-        """
-        Normalize model name for consistent lookup.
-
-        Handles case differences and separator/suffix variations.
-        """
-        normalized = model_name.lower().strip()
-        normalized = normalized.replace("_", "-")
-        for suffix in ["-instruct", "-chat", "-base"]:
-            if normalized.endswith(suffix):
-                normalized = normalized[:-len(suffix)]
-        return normalized
+        """Normalize model name for consistent lookup (slug + suffix trim)."""
+        return _slugify_model_name(model_name)
 
     def _fuzzy_match_pricing(self, normalized_name: str) -> Optional[ModelPricing]:
         """
-        Attempt fuzzy matching for model names.
+        Conservative substring match for pricing.
 
-        Matches models with variations like:
-        - "llama-3.3-70b-instruct" -> matches "llama-3.3-70b"
-        - "meta-llama-3.3-70b" -> matches "llama-3.3-70b"
+        Only matches when a known key is contained in the query (longest wins),
+        e.g. "meta-llama-3.3-70b" → "llama-3.3-70b". Does not match the reverse
+        (query contained in a longer key) — that mispriced base vs -fast / -pro.
+        Does not use difflib near-miss (too risky for money).
         """
+        if not normalized_name:
+            return None
+
+        best_name: Optional[str] = None
+        best_pricing: Optional[ModelPricing] = None
         for known_name, pricing in self._pricing_cache.items():
+            if not known_name:
+                continue
             if known_name in normalized_name:
-                return pricing
-            if normalized_name in known_name:
-                return pricing
-        return None
+                if best_name is None or len(known_name) > len(best_name):
+                    best_name = known_name
+                    best_pricing = pricing
+        return best_pricing
 
     def add_pricing(
         self,
