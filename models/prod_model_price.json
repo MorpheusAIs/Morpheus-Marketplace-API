@@ -1,6 +1,6 @@
 {
-  "default_input_price_per_million": "0.50",
-  "default_output_price_per_million": "2.00",
+  "default_input_price_per_million": "2.00",
+  "default_output_price_per_million": "8.00",
   "models": {
     "glm-5.2": { "input": "1.25", "output": "4.40" },
     "glm-5.2:web": { "input": "1.25", "output": "4.40" },

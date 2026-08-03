@@ -47,8 +47,8 @@ class HardcodedPricingProvider(PricingProvider):
 
     def __init__(self):
         self._pricing_cache: Dict[str, ModelPricing] = {}
-        self._default_input_price: Decimal = Decimal("0.50")
-        self._default_output_price: Decimal = Decimal("2.00")
+        self._default_input_price: Decimal = Decimal("2.00")
+        self._default_output_price: Decimal = Decimal("8.00")
         self._initialize_pricing()
 
     def _initialize_pricing(self) -> None:
@@ -56,8 +56,8 @@ class HardcodedPricingProvider(PricingProvider):
         config = load_model_prices()
         effective_date = datetime(2024, 12, 1)
 
-        self._default_input_price = Decimal(config.get("default_input_price_per_million", "0.50"))
-        self._default_output_price = Decimal(config.get("default_output_price_per_million", "2.00"))
+        self._default_input_price = Decimal(config.get("default_input_price_per_million", "2.00"))
+        self._default_output_price = Decimal(config.get("default_output_price_per_million", "8.00"))
 
         for name, prices in config.get("models", {}).items():
             pricing = ModelPricing(
