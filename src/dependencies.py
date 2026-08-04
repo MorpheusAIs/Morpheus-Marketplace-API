@@ -45,8 +45,11 @@ async def get_current_user(
 ) -> User:
     """
     Validate Cognito JWT token and return the associated user.
-    Creates user record if first time login.
-    
+
+    First-time login creates a user row only when the Cognito identity is not
+    tombstoned. Deleted accounts cannot be recreated from a lingering JWT.
+    Inactive users are rejected.
+
     In local testing mode, bypasses Cognito and returns test user.
     """
     # Local testing bypass
@@ -152,6 +155,20 @@ async def get_current_user(
                              event_type="jwt_validation_error")
             raise credentials_exception
             
+        # Reject deleted identities even if the JWT is still cryptographically valid.
+        if await user_crud.is_cognito_id_tombstoned(db, cognito_user_id):
+            auth_logger.warning(
+                "Rejected JWT for tombstoned Cognito identity",
+                cognito_user_id=cognito_user_id,
+                event_type="user_tombstoned",
+            )
+            await cache_service.delete("user", cognito_user_id)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Account has been deleted",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
         # Try to get user from cache first
         cached_user = await cache_service.get("user", cognito_user_id)
         if cached_user:
@@ -183,7 +200,15 @@ async def get_current_user(
                 await cache_service.set("user", cognito_user_id, user_cache_data, ttl_seconds=600)
         
         if not user:
-            user = await user_crud.create_user_from_cognito(db, cognito_user_id)
+            # First-time login only — never recreate tombstoned identities.
+            try:
+                user = await user_crud.create_user_from_cognito(db, cognito_user_id)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Account has been deleted",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
             auth_logger.info("Created new user from Cognito token",
                            cognito_user_id=cognito_user_id,
                            event_type="user_creation")
@@ -199,6 +224,20 @@ async def get_current_user(
                 'rate_limit_multiplier': user.rate_limit_multiplier,
             }
             await cache_service.set("user", cognito_user_id, user_cache_data, ttl_seconds=600)
+
+        if not getattr(user, "is_active", True):
+            auth_logger.warning(
+                "Rejected JWT for inactive user",
+                user_id=getattr(user, "id", None),
+                cognito_user_id=cognito_user_id,
+                event_type="user_inactive",
+            )
+            await cache_service.delete("user", cognito_user_id)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Account is inactive",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         
         return user
         

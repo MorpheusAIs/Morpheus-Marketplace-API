@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.models import User
+from src.db.models import User, DeletedUser
 from src.services.cache_service import cache_service
 from src.core.logging_config import get_auth_logger
 
@@ -18,8 +18,58 @@ async def get_user_by_cognito_id(db: AsyncSession, cognito_user_id: str) -> Opti
     result = await db.execute(select(User).where(User.cognito_user_id == cognito_user_id))
     return result.scalars().first()
 
+
+async def is_cognito_id_tombstoned(db: AsyncSession, cognito_user_id: str) -> bool:
+    """Return True if this Cognito identity was previously deleted."""
+    result = await db.execute(
+        select(DeletedUser.cognito_user_id).where(
+            DeletedUser.cognito_user_id == cognito_user_id
+        )
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def tombstone_deleted_user(
+    db: AsyncSession, *, cognito_user_id: str, former_user_id: Optional[int]
+) -> DeletedUser:
+    """Record a deletion tombstone so JWT auth cannot recreate the user."""
+    existing = await db.execute(
+        select(DeletedUser).where(DeletedUser.cognito_user_id == cognito_user_id)
+    )
+    row = existing.scalars().first()
+    if row:
+        return row
+
+    row = DeletedUser(
+        cognito_user_id=cognito_user_id,
+        former_user_id=former_user_id,
+        deleted_at=datetime.utcnow(),
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    logger.info(
+        "User deletion tombstone recorded",
+        cognito_user_id=cognito_user_id,
+        former_user_id=former_user_id,
+        event_type="user_tombstone_created",
+    )
+    return row
+
+
 async def create_user_from_cognito(db: AsyncSession, cognito_user_id: str) -> User:
-    """Create a new user row keyed by cognito_user_id (no PII stored)."""
+    """Create a new user row keyed by cognito_user_id (no PII stored).
+
+    Raises ValueError if the cognito_user_id is tombstoned (deleted account).
+    """
+    if await is_cognito_id_tombstoned(db, cognito_user_id):
+        logger.warning(
+            "Refusing to create user for tombstoned Cognito identity",
+            cognito_user_id=cognito_user_id,
+            event_type="user_create_blocked_tombstone",
+        )
+        raise ValueError("cognito_user_id is tombstoned")
+
     db_user = User(
         cognito_user_id=cognito_user_id,
         is_active=True,
