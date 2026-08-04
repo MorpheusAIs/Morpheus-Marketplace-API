@@ -228,6 +228,21 @@ class Settings(BaseSettings):
         default=float(os.getenv("SESSION_MOR_BALANCE_CACHE_SECONDS", "15"))
     )
 
+    # --- Curated allowlist (APIGW taster catalog) -----------------------------
+    # Comma-separated blockchain IDs that may open on the hosted gateway after
+    # alias rewrite. Empty DISABLES (full catalog). Non-empty: anything else
+    # resolves to HTTP 503 model_unavailable + P2P off-ramp.
+    SESSION_ALLOWED_MODEL_IDS: str = Field(
+        default=os.getenv("SESSION_ALLOWED_MODEL_IDS", "")
+    )
+    # Deterministic family aliases applied BEFORE resolve/allowlist.
+    # Format: comma-separated "alias=target" (also accepts "->" / "→").
+    # Keys matched case-insensitively. Never map :web/:tee → base when a twin
+    # exists — keep Venice / SecretVM feature paths.
+    SESSION_MODEL_ALIASES: str = Field(
+        default=os.getenv("SESSION_MODEL_ALIASES", "")
+    )
+
     # --- Max-bid PPS hard gate (standard lane) --------------------------------
     # Refuse opens (and idle claims) when the model's HIGHEST rated bid PPS is
     # at/above this MOR/sec threshold. Equivalent to ~175 MOR escrow for a
@@ -235,6 +250,8 @@ class Settings(BaseSettings):
     #   175 / (1800 * 338) ≈ 0.00028764
     # Warm (SESSION_PREFERRED_MODELS) and premium showcase IDs skip this gate.
     # 0 DISABLES the gate — ships inert; enable per-env via secrets.
+    # Prefer SESSION_ALLOWED_MODEL_IDS as the primary catalog control; keep PPS
+    # as an optional backup when allowlist is empty.
     SESSION_MAX_BID_PPS_MOR: float = Field(
         default=float(os.getenv("SESSION_MAX_BID_PPS_MOR", "0"))
     )
