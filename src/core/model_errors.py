@@ -93,3 +93,33 @@ class ModelNearMissError(ModelRoutingError):
             "code": self.code,
         }
         super().__post_init__()
+
+
+@dataclass
+class ModelNotAllowlistedError(ModelRoutingError):
+    """Resolved model is outside the hosted-gateway curated allowlist."""
+
+    requested_model: Optional[str] = None
+    resolved_id: Optional[str] = None
+    message: str = (
+        "This model is not available on the hosted gateway. "
+        "For the full marketplace catalog, run a self-custody node: "
+        "https://nodedocs.mor.org/consumers/quickstart"
+    )
+    error_type: str = "model_unavailable"
+    code: str = "model_unavailable"
+    status_code: int = 503
+
+    def __post_init__(self):
+        if self.requested_model:
+            self.message = (
+                f"Model '{self.requested_model}' is not available on the hosted gateway. "
+                "For the full marketplace catalog, run a self-custody node: "
+                "https://nodedocs.mor.org/consumers/quickstart"
+            )
+        self.details = {
+            "requested_model": self.requested_model,
+            "resolved_id": self.resolved_id,
+            "code": self.code,
+        }
+        super().__post_init__()

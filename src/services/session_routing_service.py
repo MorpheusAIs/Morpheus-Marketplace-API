@@ -135,6 +135,13 @@ class SessionPremiumBudgetError(SessionGatewayCapacityError):
         self.budget_mor = budget_mor
 
 
+class SessionAllowlistError(SessionGatewayCapacityError):
+    """Raised when model_id is outside SESSION_ALLOWED_MODEL_IDS."""
+
+    def __init__(self, message: str, model_id: Optional[str] = None):
+        super().__init__(message, model_id=model_id, category="allowlist")
+
+
 class SessionRoutingService:
     """
     Service for routing requests to sessions and managing session lifecycle.
@@ -201,6 +208,11 @@ class SessionRoutingService:
         raw = settings.SESSION_PREMIUM_MODEL_IDS or ""
         return {m.strip() for m in raw.split(",") if m.strip()}
 
+    def _get_allowed_models(self) -> set:
+        """Curated APIGW allowlist. Empty means disabled (full catalog)."""
+        raw = getattr(settings, "SESSION_ALLOWED_MODEL_IDS", "") or ""
+        return {m.strip() for m in raw.split(",") if m.strip()}
+
     def _is_warm_model(self, model_id: str) -> bool:
         """True if model_id is in SESSION_PREFERRED_MODELS (warm pool)."""
         return model_id in self._get_preferred_models()
@@ -208,6 +220,23 @@ class SessionRoutingService:
     def _is_premium_model(self, model_id: str) -> bool:
         """True if model_id is in SESSION_PREMIUM_MODEL_IDS (showcase lane)."""
         return model_id in self._get_premium_models()
+
+    async def _ensure_allowlist_allows_open(self, model_id: str) -> None:
+        """Refuse opens/claims when curated allowlist is set and ID is absent."""
+        allowed = self._get_allowed_models()
+        if not allowed:
+            return
+        if model_id in allowed:
+            return
+        logger.warning(
+            "Model outside hosted-gateway allowlist; refusing open",
+            model_id=model_id,
+            event_type="session_allowlist_refuse",
+        )
+        raise SessionAllowlistError(
+            f"This model is not available on the hosted gateway. {P2P_OFFRAMP_HINT}",
+            model_id=model_id,
+        )
 
     def _soft_cap_for_model(self, model_id: str) -> int:
         """Per-model OPEN soft cap. 0 means unlimited (cap disabled)."""
@@ -696,12 +725,16 @@ class SessionRoutingService:
             omit_provider=omit_provider,
         )
 
-        # Resolve model to blockchain ID
+        # Resolve model to blockchain ID (aliases + allowlist enforced in router)
         model_id = await model_router.get_target_model(requested_model, type=model_type)
         route_logger = route_logger.bind(model_id=model_id)
 
         route_logger.info("Routing request to session",
                          event_type="route_request_start")
+
+        # Defense in depth for automation / direct open paths; also blocks
+        # idle claim of leftover sessions after an allowlist shrink.
+        await self._ensure_allowlist_allows_open(model_id)
 
         # Standard-lane max-bid PPS gate runs before idle claim so leftover
         # over-gate sessions are not reused after the gate is enabled.
@@ -1046,7 +1079,9 @@ class SessionRoutingService:
         # Soft-cap + lane gates (request path also checks before calling here;
         # automation / preferred scale-up enters directly). Cap/watermark/
         # PPS/budget 0 = disabled for that gate. Warm skips LWM + PPS; premium
-        # skips PPS but is limited by daily daylock budget.
+        # skips PPS but is limited by daily daylock budget. Empty allowlist
+        # disables curated-catalog refusal.
+        await self._ensure_allowlist_allows_open(model_id)
         await self._ensure_soft_cap_allows_open(model_id)
         await self._ensure_mor_low_water_allows_open(model_id)
         await self._ensure_max_bid_pps_allows_open(model_id)
