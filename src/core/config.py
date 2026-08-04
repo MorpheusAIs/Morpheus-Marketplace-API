@@ -218,7 +218,7 @@ class Settings(BaseSettings):
     # opens. When balance <= this value, non-warm models cannot open new
     # on-chain sessions (idle claims still succeed). Warm models skip the gate.
     # 0 DISABLES the check — ships inert; turn on per-env via secrets
-    # (prod target ~30000 MOR). Distinct from soft caps (session count vs MOR).
+    # (prod target ~15000 MOR). Distinct from soft caps (session count vs MOR).
     SESSION_MOR_LOW_WATER_MARK_MOR: float = Field(
         default=float(os.getenv("SESSION_MOR_LOW_WATER_MARK_MOR", "0"))
     )
@@ -226,6 +226,35 @@ class Settings(BaseSettings):
     # C-Node. Per-replica only.
     SESSION_MOR_BALANCE_CACHE_SECONDS: float = Field(
         default=float(os.getenv("SESSION_MOR_BALANCE_CACHE_SECONDS", "15"))
+    )
+
+    # --- Max-bid PPS hard gate (standard lane) --------------------------------
+    # Refuse opens (and idle claims) when the model's HIGHEST rated bid PPS is
+    # at/above this MOR/sec threshold. Equivalent to ~175 MOR escrow for a
+    # 30-minute session under day-lock stake factor ~338:
+    #   175 / (1800 * 338) ≈ 0.00028764
+    # Warm (SESSION_PREFERRED_MODELS) and premium showcase IDs skip this gate.
+    # 0 DISABLES the gate — ships inert; enable per-env via secrets.
+    SESSION_MAX_BID_PPS_MOR: float = Field(
+        default=float(os.getenv("SESSION_MAX_BID_PPS_MOR", "0"))
+    )
+
+    # --- Premium showcase lane ------------------------------------------------
+    # Comma-separated model blockchain IDs exempt from the PPS gate but limited
+    # by SESSION_PREMIUM_DAILY_BUDGET_MOR (day-locked / used MOR, metered on
+    # session close, UTC day). Soft cap still applies (DEFAULT). Empty / budget
+    # 0 disables the premium lane (IDs would then hit the PPS gate like
+    # standard models if listed).
+    SESSION_PREMIUM_MODEL_IDS: str = Field(
+        default=os.getenv("SESSION_PREMIUM_MODEL_IDS", "")
+    )
+    SESSION_PREMIUM_DAILY_BUDGET_MOR: float = Field(
+        default=float(os.getenv("SESSION_PREMIUM_DAILY_BUDGET_MOR", "0"))
+    )
+    # Day-lock stake amplification used to estimate used MOR on close:
+    # daylock ≈ pps × elapsed_seconds × factor (observed ~338 on Base).
+    SESSION_STAKE_FACTOR: float = Field(
+        default=float(os.getenv("SESSION_STAKE_FACTOR", "338"))
     )
 
     # --- Expensive-model session tier ---------------------------------------

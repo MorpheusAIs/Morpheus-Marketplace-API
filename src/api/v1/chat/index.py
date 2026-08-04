@@ -28,7 +28,7 @@ from ....services import (
     NoSessionAvailableError,
     SessionOpenError,
     SessionPoolBusyError,
-    SessionMorReservedError,
+    SessionGatewayCapacityError,
 )
 from ....services.billing_service import billing_service
 from ....services.token_estimation_service import token_estimation_service
@@ -363,7 +363,8 @@ async def _resolve_session(
             open_count=e.open_count,
             message=e.message,
         ) from e
-    except SessionMorReservedError as e:
+    except SessionGatewayCapacityError as e:
+        # LWM warm reserve, max-bid PPS gate, or premium daily budget.
         raise ModelUnavailableError(
             model_id=e.model_id,
             message=e.message,

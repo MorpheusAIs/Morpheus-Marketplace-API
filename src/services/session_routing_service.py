@@ -70,7 +70,27 @@ class SessionPoolBusyError(SessionRoutingError):
         self.open_count = open_count
 
 
-class SessionMorReservedError(SessionRoutingError):
+# Shared off-ramp copy for hosted-gateway capacity / price refusals (503).
+P2P_OFFRAMP_HINT = (
+    "For higher volume or the full marketplace catalog, run a self-custody node: "
+    "https://nodedocs.mor.org/consumers/quickstart"
+)
+
+
+class SessionGatewayCapacityError(SessionRoutingError):
+    """Hosted-gateway capacity / price refusal (HTTP 503 model_unavailable)."""
+
+    def __init__(
+        self,
+        message: str,
+        model_id: Optional[str] = None,
+        category: str = "capacity",
+    ):
+        super().__init__(message, model_id=model_id)
+        self.category = category  # warm_reserve | price_gate | premium_budget
+
+
+class SessionMorReservedError(SessionGatewayCapacityError):
     """Raised when liquid wallet MOR is at/below the warm-model low-water mark."""
 
     def __init__(
@@ -80,9 +100,39 @@ class SessionMorReservedError(SessionRoutingError):
         balance_mor: Optional[float] = None,
         low_water_mark_mor: float = 0,
     ):
-        super().__init__(message, model_id=model_id)
+        super().__init__(message, model_id=model_id, category="warm_reserve")
         self.balance_mor = balance_mor
         self.low_water_mark_mor = low_water_mark_mor
+
+
+class SessionPriceGateError(SessionGatewayCapacityError):
+    """Raised when max rated-bid PPS exceeds the standard-lane hard gate."""
+
+    def __init__(
+        self,
+        message: str,
+        model_id: Optional[str] = None,
+        max_pps: Optional[float] = None,
+        gate_pps: float = 0,
+    ):
+        super().__init__(message, model_id=model_id, category="price_gate")
+        self.max_pps = max_pps
+        self.gate_pps = gate_pps
+
+
+class SessionPremiumBudgetError(SessionGatewayCapacityError):
+    """Raised when the UTC-day premium showcase daylock budget is exhausted."""
+
+    def __init__(
+        self,
+        message: str,
+        model_id: Optional[str] = None,
+        spent_mor: float = 0,
+        budget_mor: float = 0,
+    ):
+        super().__init__(message, model_id=model_id, category="premium_budget")
+        self.spent_mor = spent_mor
+        self.budget_mor = budget_mor
 
 
 class SessionRoutingService:
@@ -133,6 +183,10 @@ class SessionRoutingService:
         # (monotonic_expiry, balance_mor). Per-replica; fail-open on miss/error.
         self._mor_balance_cache: Optional[tuple] = None
 
+        # Per-replica fallback for premium daylock counters when Redis is down.
+        # Keyed by UTC date string -> spent MOR. Prefer Redis in multi-replica.
+        self._premium_daylock_local: Dict[str, float] = {}
+
         logger.info("SessionRoutingService initialized",
                    event_type="session_routing_service_init")
     
@@ -142,15 +196,31 @@ class SessionRoutingService:
             return set()
         return set(m.strip() for m in settings.SESSION_PREFERRED_MODELS.split(",") if m.strip())
 
+    def _get_premium_models(self) -> set:
+        """Showcase model IDs exempt from PPS gate, limited by daily daylock budget."""
+        raw = settings.SESSION_PREMIUM_MODEL_IDS or ""
+        return {m.strip() for m in raw.split(",") if m.strip()}
+
     def _is_warm_model(self, model_id: str) -> bool:
         """True if model_id is in SESSION_PREFERRED_MODELS (warm pool)."""
         return model_id in self._get_preferred_models()
+
+    def _is_premium_model(self, model_id: str) -> bool:
+        """True if model_id is in SESSION_PREMIUM_MODEL_IDS (showcase lane)."""
+        return model_id in self._get_premium_models()
 
     def _soft_cap_for_model(self, model_id: str) -> int:
         """Per-model OPEN soft cap. 0 means unlimited (cap disabled)."""
         if self._is_warm_model(model_id):
             return max(0, int(settings.SESSION_SOFT_CAP_WARM))
         return max(0, int(settings.SESSION_SOFT_CAP_DEFAULT))
+
+    @staticmethod
+    def _utc_day_key(when: Optional[datetime] = None) -> str:
+        dt = when or datetime.now(timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
     async def _count_open_sessions(self, db: AsyncSession, model_id: str) -> int:
         """Count OPEN sessions for a model (utilized + idle)."""
@@ -273,11 +343,180 @@ class SessionRoutingService:
                 event_type="session_mor_low_water_reserved",
             )
             raise SessionMorReservedError(
-                "This model is temporarily unavailable; "
-                "capacity is reserved for priority models.",
+                "Hosted capacity is reserved for priority (warm) models right now. "
+                + P2P_OFFRAMP_HINT,
                 model_id=model_id,
                 balance_mor=balance,
                 low_water_mark_mor=watermark,
+            )
+
+    async def _ensure_max_bid_pps_allows_open(self, model_id: str) -> None:
+        """Refuse standard-lane models whose max rated bid PPS is at/above the gate.
+
+        Warm and premium showcase models skip this gate. Gate 0 disables it.
+        Missing price (lookup failure / no bids) fails open so we don't brick
+        routing when the C-Node bid read is unavailable — soft-cap / open will
+        still fail naturally if there is no usable bid.
+        """
+        gate = float(settings.SESSION_MAX_BID_PPS_MOR or 0)
+        if gate <= 0:
+            return
+        if self._is_warm_model(model_id) or self._is_premium_model(model_id):
+            return
+
+        max_pps = await self._get_model_max_price_per_second(model_id)
+        if max_pps is None:
+            return
+        if max_pps >= gate:
+            logger.warning(
+                "Max-bid PPS gate refusing model",
+                model_id=model_id,
+                max_pps=max_pps,
+                gate_pps=gate,
+                event_type="session_max_bid_pps_refused",
+            )
+            raise SessionPriceGateError(
+                "This model is too expensive for the hosted API Gateway right now. "
+                + P2P_OFFRAMP_HINT,
+                model_id=model_id,
+                max_pps=max_pps,
+                gate_pps=gate,
+            )
+
+    async def _get_premium_daylock_spent(self) -> Optional[float]:
+        """UTC-day premium daylock spent (MOR), or None if unreadable."""
+        day = self._utc_day_key()
+        try:
+            from .cache_service import cache_service
+            redis = await cache_service._acquire_redis()
+            if redis is not None:
+                raw = await redis.get(f"apigw:premium_daylock:{day}")
+                if raw is None:
+                    return 0.0
+                return float(raw)
+        except Exception as e:
+            logger.warning(
+                "Premium daylock Redis read failed; using local fallback",
+                error=str(e),
+                event_type="premium_daylock_redis_read_error",
+            )
+        return float(self._premium_daylock_local.get(day, 0.0))
+
+    async def _add_premium_daylock_spent(self, amount_mor: float) -> None:
+        """Add used/daylocked MOR to today's premium counter (close path)."""
+        if amount_mor <= 0:
+            return
+        day = self._utc_day_key()
+        self._premium_daylock_local[day] = (
+            float(self._premium_daylock_local.get(day, 0.0)) + amount_mor
+        )
+        try:
+            from .cache_service import cache_service
+            redis = await cache_service._acquire_redis()
+            if redis is not None:
+                key = f"apigw:premium_daylock:{day}"
+                await redis.incrbyfloat(key, amount_mor)
+                # Expire a bit after the UTC day rolls (48h safety).
+                await redis.expire(key, 48 * 3600)
+        except Exception as e:
+            logger.warning(
+                "Premium daylock Redis write failed; local counter only",
+                error=str(e),
+                amount_mor=amount_mor,
+                event_type="premium_daylock_redis_write_error",
+            )
+
+    async def _ensure_premium_budget_allows_open(self, model_id: str) -> None:
+        """Refuse new premium opens when UTC-day daylock budget is exhausted.
+
+        Non-premium models skip. Budget 0 disables the premium lane check
+        (premium IDs would still need to pass PPS unless also warm).
+        """
+        if not self._is_premium_model(model_id):
+            return
+        budget = float(settings.SESSION_PREMIUM_DAILY_BUDGET_MOR or 0)
+        if budget <= 0:
+            return
+
+        spent = await self._get_premium_daylock_spent()
+        if spent is None:
+            # Cannot meter — fail closed for premium to protect the bank.
+            raise SessionPremiumBudgetError(
+                "Daily premium showcase capacity on the hosted gateway is unavailable. "
+                + P2P_OFFRAMP_HINT,
+                model_id=model_id,
+                spent_mor=0,
+                budget_mor=budget,
+            )
+        if spent >= budget:
+            logger.warning(
+                "Premium daily daylock budget exhausted; refusing open",
+                model_id=model_id,
+                spent_mor=spent,
+                budget_mor=budget,
+                event_type="session_premium_budget_exhausted",
+            )
+            raise SessionPremiumBudgetError(
+                "Daily premium showcase capacity on the hosted gateway is exhausted. "
+                + P2P_OFFRAMP_HINT,
+                model_id=model_id,
+                spent_mor=spent,
+                budget_mor=budget,
+            )
+
+    async def _record_premium_daylock_on_close(self, session: RoutedSession) -> None:
+        """Meter estimated daylocked MOR for a premium session at close time."""
+        if not self._is_premium_model(session.model_id):
+            return
+        budget = float(settings.SESSION_PREMIUM_DAILY_BUDGET_MOR or 0)
+        if budget <= 0:
+            return
+
+        try:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            created = session.created_at or now
+            if created.tzinfo is not None:
+                created = created.replace(tzinfo=None)
+            elapsed_s = max(0.0, (now - created).total_seconds())
+
+            # Cap by scheduled session length when known.
+            sched_s = None
+            if session.expires_at and session.created_at:
+                exp = session.expires_at
+                if exp.tzinfo is not None:
+                    exp = exp.replace(tzinfo=None)
+                sched_s = max(1.0, (exp - created).total_seconds())
+            if sched_s is not None:
+                elapsed_s = min(elapsed_s, sched_s)
+
+            max_pps = await self._get_model_max_price_per_second(session.model_id)
+            if max_pps is None or max_pps <= 0:
+                logger.warning(
+                    "Premium close meter skipped; no PPS",
+                    session_id=session.id,
+                    model_id=session.model_id,
+                    event_type="premium_daylock_meter_skip",
+                )
+                return
+
+            factor = float(settings.SESSION_STAKE_FACTOR or 338)
+            daylock = max_pps * elapsed_s * factor
+            await self._add_premium_daylock_spent(daylock)
+            logger.info(
+                "Recorded premium daylock on close",
+                session_id=session.id,
+                model_id=session.model_id,
+                elapsed_s=round(elapsed_s, 1),
+                max_pps=max_pps,
+                daylock_mor=round(daylock, 3),
+                event_type="premium_daylock_recorded",
+            )
+        except Exception as e:
+            logger.warning(
+                "Premium daylock meter failed",
+                session_id=getattr(session, "id", None),
+                error=str(e),
+                event_type="premium_daylock_meter_error",
             )
 
     # =========================================================================
@@ -464,6 +703,10 @@ class SessionRoutingService:
         route_logger.info("Routing request to session",
                          event_type="route_request_start")
 
+        # Standard-lane max-bid PPS gate runs before idle claim so leftover
+        # over-gate sessions are not reused after the gate is enabled.
+        await self._ensure_max_bid_pps_allows_open(model_id)
+
         # FAST PATH (lock-free): atomically claim an idle OPEN session for this
         # model with a single UPDATE ... FOR UPDATE SKIP LOCKED on its own
         # short-lived connection. The DB row lock (not an in-process lock) hands
@@ -478,13 +721,14 @@ class SessionRoutingService:
             return claimed_id
 
         # OPEN PATH: no idle session -> open a new paid on-chain session, unless
-        # soft-capped (429) or MOR low-water reserves capacity for warm models
-        # (503). Checks run before the wallet-serialized open so we don't burn
-        # a nonce on a session we refuse to keep. The session is created
-        # already assigned (active_requests=1), so it is never momentarily
-        # visible as idle between insert and use.
+        # soft-capped (429), MOR low-water / PPS / premium budget (503). Checks
+        # run before the wallet-serialized open so we don't burn a nonce on a
+        # session we refuse to keep. The session is created already assigned
+        # (active_requests=1), so it is never momentarily visible as idle
+        # between insert and use.
         await self._ensure_soft_cap_allows_open(model_id)
         await self._ensure_mor_low_water_allows_open(model_id)
+        await self._ensure_premium_budget_allows_open(model_id)
 
         route_logger.info("No idle session for model, opening a new one",
                          event_type="no_idle_session")
@@ -586,6 +830,21 @@ class SessionRoutingService:
             invalidate_logger.warning("Session invalidated after prompt failure",
                                       reason=reason,
                                       event_type="session_invalidated")
+            # Meter premium daylock before background close (needs model_id /
+            # created_at from the row). Best-effort.
+            try:
+                row = await db.execute(
+                    select(RoutedSession).where(RoutedSession.id == session_id)
+                )
+                session_row = row.scalar_one_or_none()
+                if session_row is not None:
+                    await self._record_premium_daylock_on_close(session_row)
+            except Exception as e:
+                invalidate_logger.warning(
+                    "Premium meter on invalidate failed",
+                    error=str(e),
+                    event_type="premium_daylock_invalidate_meter_error",
+                )
             # Close on-chain in the background: close needs a (possibly
             # failing) provider-report RPC plus a blockchain tx — too slow
             # to block the user's retry on. closeSession tolerates
@@ -784,11 +1043,14 @@ class SessionRoutingService:
         open_logger.info("Opening new session for model",
                         event_type="session_open_start")
 
-        # Soft-cap + MOR low-water gates (request path also checks before
-        # calling here; automation / preferred scale-up enters directly).
-        # Cap/watermark 0 = disabled. Warm models skip the MOR gate.
+        # Soft-cap + lane gates (request path also checks before calling here;
+        # automation / preferred scale-up enters directly). Cap/watermark/
+        # PPS/budget 0 = disabled for that gate. Warm skips LWM + PPS; premium
+        # skips PPS but is limited by daily daylock budget.
         await self._ensure_soft_cap_allows_open(model_id)
         await self._ensure_mor_low_water_allows_open(model_id)
+        await self._ensure_max_bid_pps_allows_open(model_id)
+        await self._ensure_premium_budget_allows_open(model_id)
 
         # Expensive models open with a shorter duration so the amplified
         # on-chain stake pulled per session stays small (more concurrent
@@ -956,6 +1218,9 @@ class SessionRoutingService:
                          event_type="session_close_start")
         
         try:
+            # Meter premium daylock on close (used MOR), then close on-chain.
+            await self._record_premium_daylock_on_close(session)
+
             # Close on-chain via the adaptive throttle (shared wallet/nonce
             # with every other on-chain session op on this replica).
             await self._run_onchain(
@@ -1377,6 +1642,8 @@ class SessionRoutingService:
                        session_id=session.id,
                        expired_at=session.expires_at.isoformat(),
                        event_type="closing_expired_session")
+
+            await self._record_premium_daylock_on_close(session)
             
             # Mark as EXPIRED rather than going through close flow
             session.state = SessionState.EXPIRED
