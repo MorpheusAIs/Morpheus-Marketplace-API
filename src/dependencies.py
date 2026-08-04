@@ -241,6 +241,9 @@ async def get_current_user(
         
         return user
         
+    except HTTPException:
+        # Intentional 401/403 (tombstone, inactive, credentials) must not become 500.
+        raise
     except httpx.HTTPError as e:
         auth_logger.error("Could not fetch Cognito JWKS",
                          error=str(e),
