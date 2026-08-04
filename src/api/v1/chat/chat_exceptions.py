@@ -155,12 +155,13 @@ class ModelBusyError(ChatError):
 
 @dataclass
 class ModelUnavailableError(ChatError):
-    """Raised when a non-warm model open is blocked by the MOR low-water mark."""
+    """Raised for hosted-gateway capacity/price refusals (LWM, PPS gate, premium budget)."""
 
     model_id: Optional[str] = None
     message: str = (
-        "This model is temporarily unavailable; "
-        "capacity is reserved for priority models."
+        "This model is temporarily unavailable on the hosted gateway. "
+        "For higher volume or the full marketplace catalog, run a self-custody node: "
+        "https://nodedocs.mor.org/consumers/quickstart"
     )
     status_code: int = status.HTTP_503_SERVICE_UNAVAILABLE
     error_type: str = "model_unavailable"

@@ -87,7 +87,8 @@ async def test_non_warm_refused_at_or_below_watermark(service):
     assert err.model_id == "0xcold"
     assert err.balance_mor == 25000.0
     assert err.low_water_mark_mor == 30000
-    assert "priority models" in err.message
+    assert "priority" in err.message.lower()
+    assert "nodedocs.mor.org" in err.message
 
 
 async def test_non_warm_allowed_above_watermark(service):

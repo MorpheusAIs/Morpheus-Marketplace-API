@@ -21,7 +21,7 @@ from ....services import (
     NoSessionAvailableError,
     SessionOpenError,
     SessionPoolBusyError,
-    SessionMorReservedError,
+    SessionGatewayCapacityError,
 )
 from ....services import proxy_router_service
 from ....services.billing_service import billing_service
@@ -155,12 +155,13 @@ async def create_embeddings(
                 detail=e.message,
                 headers={"Retry-After": str(e.retry_after)},
             )
-        except SessionMorReservedError as e:
+        except SessionGatewayCapacityError as e:
             embeddings_logger.warning(
-                "Model unavailable (MOR low-water reserve)",
+                "Model unavailable (gateway capacity / price lane)",
                 request_id=request_id,
                 error=str(e),
-                event_type="session_mor_reserved",
+                category=getattr(e, "category", None),
+                event_type="session_gateway_capacity",
             )
             await _void_billing_hold(user.id, ledger_entry_id, "model_unavailable", str(e), embeddings_logger)
             raise HTTPException(
