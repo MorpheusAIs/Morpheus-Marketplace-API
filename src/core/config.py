@@ -258,8 +258,9 @@ class Settings(BaseSettings):
 
     # --- Premium showcase lane ------------------------------------------------
     # Comma-separated model blockchain IDs exempt from the PPS gate but limited
-    # by SESSION_PREMIUM_DAILY_BUDGET_MOR (day-locked / used MOR, metered on
-    # session close, UTC day). Soft cap still applies (DEFAULT). Empty / budget
+    # by SESSION_PREMIUM_DAILY_BUDGET_MOR (day-locked MOR, UTC day). Gate uses
+    # Redis actuals (from close-tx / pro-rata) + SUM(stake_mor) on OPEN/CLOSING
+    # premium rows as holds. Soft cap still applies (DEFAULT). Empty / budget
     # 0 disables the premium lane (IDs would then hit the PPS gate like
     # standard models if listed).
     SESSION_PREMIUM_MODEL_IDS: str = Field(
@@ -268,10 +269,17 @@ class Settings(BaseSettings):
     SESSION_PREMIUM_DAILY_BUDGET_MOR: float = Field(
         default=float(os.getenv("SESSION_PREMIUM_DAILY_BUDGET_MOR", "0"))
     )
-    # Day-lock stake amplification used to estimate used MOR on close:
-    # daylock ≈ pps × elapsed_seconds × factor (observed ~338 on Base).
+    # Kept for stake-sizing / expensive-tier docs; premium daylock meter no
+    # longer uses max_pps × elapsed × factor (that inflated Redis vs chain).
     SESSION_STAKE_FACTOR: float = Field(
         default=float(os.getenv("SESSION_STAKE_FACTOR", "338"))
+    )
+    # Optional: decode close-tx MOR Transfer(to=consumer) for receipt-true
+    # daylock (= stake − returned). When unset, meter falls back to
+    # stake × lived / sched from getSession. Base mainnet MOR + C-Node wallet.
+    MOR_TOKEN_ADDRESS: str | None = Field(default=os.getenv("MOR_TOKEN_ADDRESS"))
+    SESSION_CONSUMER_WALLET_ADDRESS: str | None = Field(
+        default=os.getenv("SESSION_CONSUMER_WALLET_ADDRESS")
     )
 
     # --- Expensive-model session tier ---------------------------------------

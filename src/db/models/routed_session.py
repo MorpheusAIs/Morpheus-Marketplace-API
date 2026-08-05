@@ -9,7 +9,7 @@ This model supports the Session Routing Service with:
 
 Note: Rows are only created after a session is successfully opened (no OPENING state).
 """
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Index
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Index, Numeric
 from datetime import datetime, timezone
 import enum
 
@@ -68,6 +68,12 @@ class RoutedSession(Base):
     # On-chain provider address serving this session (0x hex). Used by
     # failover to exclude the failed provider when opening the retry session.
     provider_address = Column(String(42), nullable=True)
+
+    # On-chain escrow at open (MOR). Premium OPEN/CLOSING rows sum into the
+    # daily budget "hold". Nullable for rows opened before this column existed.
+    stake_mor = Column(Numeric(36, 18), nullable=True)
+    # Daylocked MOR attributed at close (receipt truth or pro-rata fallback).
+    daylock_mor = Column(Numeric(36, 18), nullable=True)
     
     # Indexes for efficient queries
     __table_args__ = (
