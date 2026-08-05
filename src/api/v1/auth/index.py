@@ -212,23 +212,17 @@ async def delete_user_account(
                            event_type="user_deletion_start")
     
     try:
-        # 1. Tombstone first so concurrent JWT auth cannot recreate mid-delete.
-        await user_crud.tombstone_deleted_user(
-            db, cognito_user_id=cognito_user_id, former_user_id=user_id
-        )
-        await cache_service.delete("user", cognito_user_id)
-
-        # 2. Delete all API keys manually (no cascade relationship)
+        # 1. Delete all API keys manually (no cascade relationship)
         delete_user_logger.info("Deleting user API keys", event_type="user_api_keys_deletion_start")
         api_keys_deleted = await api_key_crud.delete_all_user_api_keys(db, user_id)
         delete_user_logger.info("User API keys deleted",
                                api_keys_deleted=api_keys_deleted,
                                event_type="user_api_keys_deleted")
-        
-        # 3. Delete the user (this will cascade delete related data)
+
+        # 2. Delete the user (this will cascade delete related data)
         delete_user_logger.info("Deleting user record", event_type="user_record_deletion_start")
         deleted_user = await user_crud.delete_user(db, user_id)
-        
+
         if not deleted_user:
             delete_user_logger.error("User not found for deletion",
                                     event_type="user_not_found")
@@ -236,9 +230,17 @@ async def delete_user_account(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User not found"
             )
-        
+
         delete_user_logger.info("User record deleted successfully",
                                event_type="user_record_deleted")
+
+        # 3. Tombstone only after the user row is gone. Tombstoning earlier can
+        # permanently lock out a still-existing account if a later step fails
+        # (JWT auth 401s on the tombstone, so DELETE cannot be retried).
+        await user_crud.tombstone_deleted_user(
+            db, cognito_user_id=cognito_user_id, former_user_id=user_id
+        )
+        await cache_service.delete("user", cognito_user_id)
 
         # 4. Revoke Cognito sessions; delete Cognito user only in production
         env_lower = (settings.ENVIRONMENT or "").strip().lower()
