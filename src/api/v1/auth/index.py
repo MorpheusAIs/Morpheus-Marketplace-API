@@ -14,6 +14,7 @@ from ....schemas.api_key import APIKeyCreate, APIKeyResponse, APIKeyDB
 from ....dependencies import CurrentUser, get_current_user
 from ....db.models import User
 from ....services.cognito_service import cognito_service
+from ....services.cache_service import cache_service
 from ....core.config import settings
 from ....core.logging_config import get_auth_logger
 
@@ -191,10 +192,14 @@ async def delete_user_account(
     """
     Delete the current user's account and all associated data.
 
-    Always: deletes API keys, user record (cascades: wallet_links, chats, etc.).
-    Cognito: only in production (ENVIRONMENT in production|prod|prd) do we delete
-    the Cognito user. In dev/test/non-prod we leave the Cognito identity intact so
-    "Delete account" in TEST cannot accidentally nuke the user's real identity.
+    Always:
+      - deletes API keys and the user record (cascades: wallet_links, chats, etc.)
+      - writes a Cognito-id tombstone so lingering JWTs cannot recreate the user
+      - Cognito AdminUserGlobalSignOut (invalidates refresh tokens)
+    Cognito AdminDeleteUser: only in production (ENVIRONMENT in production|prod|prd).
+    In dev/test/non-prod the Cognito identity is preserved so "Delete account" in
+    TEST cannot accidentally nuke a shared real identity — but the tombstone still
+    blocks API access for that sub until cleared.
 
     Requires JWT Bearer authentication.
     """
@@ -213,11 +218,11 @@ async def delete_user_account(
         delete_user_logger.info("User API keys deleted",
                                api_keys_deleted=api_keys_deleted,
                                event_type="user_api_keys_deleted")
-        
+
         # 2. Delete the user (this will cascade delete related data)
         delete_user_logger.info("Deleting user record", event_type="user_record_deletion_start")
         deleted_user = await user_crud.delete_user(db, user_id)
-        
+
         if not deleted_user:
             delete_user_logger.error("User not found for deletion",
                                     event_type="user_not_found")
@@ -225,11 +230,19 @@ async def delete_user_account(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User not found"
             )
-        
+
         delete_user_logger.info("User record deleted successfully",
                                event_type="user_record_deleted")
 
-        # 3. Delete Cognito user only in production; in dev/test leave identity intact
+        # 3. Tombstone only after the user row is gone. Tombstoning earlier can
+        # permanently lock out a still-existing account if a later step fails
+        # (JWT auth 401s on the tombstone, so DELETE cannot be retried).
+        await user_crud.tombstone_deleted_user(
+            db, cognito_user_id=cognito_user_id, former_user_id=user_id
+        )
+        await cache_service.delete("user", cognito_user_id)
+
+        # 4. Revoke Cognito sessions; delete Cognito user only in production
         env_lower = (settings.ENVIRONMENT or "").strip().lower()
         is_production = env_lower in ("production", "prod", "prd")
         if is_production:
@@ -238,13 +251,17 @@ async def delete_user_account(
                                    event_type="cognito_deletion_start")
             cognito_deletion_result = await cognito_service.delete_user(cognito_user_id)
         else:
-            delete_user_logger.info("Skipping Cognito delete (non-production); identity preserved",
-                                   environment=settings.ENVIRONMENT,
-                                   event_type="cognito_deletion_skipped")
+            delete_user_logger.info(
+                "Non-production: global sign-out only; Cognito identity preserved",
+                environment=settings.ENVIRONMENT,
+                event_type="cognito_deletion_skipped",
+            )
+            sign_out = await cognito_service.global_sign_out(cognito_user_id)
             cognito_deletion_result = {
                 "success": True,
                 "skipped": True,
                 "reason": "non_production",
+                "global_sign_out": sign_out,
             }
 
         # Prepare response data

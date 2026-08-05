@@ -926,237 +926,197 @@ async def cors_check(request: Request):
 @app.get("/docs/oauth2-redirect", include_in_schema=False)
 async def swagger_ui_oauth2_redirect(request: Request):
     """
-    OAuth2 redirect endpoint that automatically exchanges code for token and integrates with Swagger UI.
+    OAuth2 redirect for Swagger UI.
+
+    Security (R5): never interpolate raw query params into JavaScript/HTML.
+    Values are embedded only via json.dumps (JS-safe) / html.escape (HTML-safe).
+    The page reads code/state from location.search as a second line of defense.
     """
+    import html
+    import json
     import httpx
-    
-    # Extract the authorization code and state
+
     code = request.query_params.get("code")
     state = request.query_params.get("state")
     error = request.query_params.get("error")
-    
+    error_description = request.query_params.get("error_description", "Unknown error")
+
     if error:
-        return HTMLResponse(content=f"""
-        <!DOCTYPE html>
-        <html>
-        <head><title>OAuth2 Error</title></head>
-        <body>
-            <h1>OAuth2 Authentication Error</h1>
-            <p><strong>Error:</strong> {error}</p>
-            <p><strong>Description:</strong> {request.query_params.get("error_description", "Unknown error")}</p>
-            <p><a href="/docs">Return to API Documentation</a></p>
-        </body>
-        </html>
-        """)
-    
-    # If we have a code, exchange it for an access token
+        safe_error = html.escape(error, quote=True)
+        safe_desc = html.escape(error_description, quote=True)
+        return HTMLResponse(
+            content=f"""<!DOCTYPE html>
+<html lang="en-US">
+<head><meta charset="utf-8"><title>OAuth2 Error</title></head>
+<body>
+  <h1>OAuth2 Authentication Error</h1>
+  <p><strong>Error:</strong> {safe_error}</p>
+  <p><strong>Description:</strong> {safe_desc}</p>
+  <p><a href="/docs">Return to API Documentation</a></p>
+</body>
+</html>""",
+            headers={
+                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
+
     access_token = None
-    token_error = None
     if code:
         try:
-            # Exchange the authorization code for tokens
             token_url = f"https://{settings.COGNITO_DOMAIN}/oauth2/token"
-            
             data = {
                 "grant_type": "authorization_code",
                 "client_id": settings.COGNITO_CLIENT_ID,
                 "code": code,
-                "redirect_uri": f"{settings.BASE_URL}/docs/oauth2-redirect"
+                "redirect_uri": f"{settings.BASE_URL}/docs/oauth2-redirect",
             }
-            
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded"
-            }
-            
             async with httpx.AsyncClient() as client:
-                response = await client.post(token_url, data=data, headers=headers)
-                
+                response = await client.post(
+                    token_url,
+                    data=data,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
             if response.status_code == 200:
-                tokens = response.json()
-                access_token = tokens.get("access_token")
+                access_token = response.json().get("access_token")
                 auth_logger.info("Token exchange successful", event_type="oauth_token_exchange")
             else:
-                error_body = response.text
-                auth_logger.warning("Token exchange failed",
-                                   status_code=response.status_code,
-                                   event_type="oauth_token_exchange_failed")
-                token_error = f"HTTP {response.status_code}: {error_body}"
-                
+                auth_logger.warning(
+                    "Token exchange failed",
+                    status_code=response.status_code,
+                    event_type="oauth_token_exchange_failed",
+                )
         except Exception as e:
-            auth_logger.error("Token exchange exception",
-                            error=str(e),
-                            event_type="oauth_token_exchange_error")
-            token_error = str(e)
-    
-    # Build the HTML with proper JavaScript variable interpolation
-    js_access_token = f'"{access_token}"' if access_token else '""'
-    js_auth_code = f'"{code}"' if code else '""'
-    js_state = f'"{state}"' if state else '""'
-    
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="en-US">
-    <head>
-        <title>OAuth2 Redirect</title>
-        <style>
-            body {{ 
-                font-family: Arial, sans-serif; 
-                padding: 40px; 
-                text-align: center;
-                background: #f8f9fa;
-            }}
-            .success {{ color: #28a745; }}
-            .spinner {{ 
-                border: 4px solid #f3f3f3; 
-                border-top: 4px solid #28a745; 
-                border-radius: 50%; 
-                width: 40px; 
-                height: 40px; 
-                animation: spin 1s linear infinite; 
-                margin: 20px auto; 
-            }}
-            @keyframes spin {{ 
-                0% {{ transform: rotate(0deg); }} 
-                100% {{ transform: rotate(360deg); }} 
-            }}
-            .token-display {{
-                background: #f8f9fa;
-                border: 2px solid #28a745;
-                border-radius: 8px;
-                padding: 15px;
-                margin: 20px auto;
-                max-width: 600px;
-                word-break: break-all;
-                font-family: monospace;
-                font-size: 12px;
-            }}
-        </style>
-    </head>
-    <body>
-        <h1 class="success">✅ Authentication Successful!</h1>
-        <div class="spinner" id="spinner"></div>
-        <p id="status">Processing OAuth2 authentication...</p>
-        
-        <script>
-            'use strict';
-            
-            const accessToken = {js_access_token};
-            const authCode = {js_auth_code};
-            const authState = {js_state};
-            
-            function run() {{
-                console.log('🔍 OAuth2 redirect processing...');
-                console.log('🔑 Access token available:', accessToken ? 'Yes' : 'No');
-                console.log('🔍 Authorization code:', authCode ? 'Present' : 'Missing');
-                console.log('🪟 Window opener:', window.opener ? 'Present' : 'Null');
-                
-                // Hide spinner
-                document.getElementById('spinner').style.display = 'none';
-                
-                // Try to handle as popup first
-                console.log('🔍 Popup detection:', {{
-                    hasOpener: !!window.opener,
-                    hasSwaggerCallback: !!(window.opener && window.opener.swaggerUIRedirectOauth2)
-                }});
-                
-                if (window.opener && window.opener.swaggerUIRedirectOauth2) {{
-                    console.log('🔄 Handling as popup window');
-                    try {{
-                        const oauth2 = window.opener.swaggerUIRedirectOauth2;
-                        
-                        // If we have an access token, pass it directly
-                        if (accessToken) {{
-                            console.log('✅ Passing access token to Swagger UI');
-                            oauth2.callback({{
-                                auth: oauth2.auth,
-                                token: {{
-                                    access_token: accessToken,
-                                    token_type: 'Bearer'
-                                }},
-                                redirectUrl: oauth2.redirectUrl
-                            }});
-                        }} else {{
-                            // Fall back to code-based flow
-                            oauth2.callback({{
-                                auth: oauth2.auth,
-                                code: authCode,
-                                state: authState,
-                                redirectUrl: oauth2.redirectUrl
-                            }});
-                        }}
-                        
-                        document.getElementById('status').innerHTML = `
-                            <div>
-                                <h2 style="color: #28a745;">✅ Authentication Complete!</h2>
-                                <p>Token has been applied to the main window.</p>
-                                <button onclick="window.close()" style="background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 6px; font-size: 16px; cursor: pointer; margin-top: 15px;">
-                                    Close Window
-                                </button>
-                                <p style="color: #6c757d; margin-top: 10px; font-size: 14px;">Window will close automatically in 3 seconds...</p>
-                            </div>
-                        `;
-                        setTimeout(() => window.close(), 3000);
-                        return;
-                    }} catch (e) {{
-                        console.error('❌ Popup callback error:', e);
-                    }}
-                }}
-                
-                // Handle as new tab OR popup - simplified approach
-                console.log('🔄 Handling authentication completion');
-                
-                if (accessToken) {{
-                    // Store token in localStorage 
-                    console.log('✅ Storing token in localStorage...');
-                    localStorage.setItem('swagger_oauth_token', accessToken);
-                    localStorage.setItem('swagger_oauth_token_timestamp', Date.now().toString());
-                    
-                    // Always show close button - no redirect, no detection needed
-                    console.log('🔄 Showing close button');
-                    document.getElementById('status').innerHTML = `
-                        <div>
-                            <h2 style="color: #28a745;">✅ Authentication Complete!</h2>
-                            <p>Token has been applied to the main window.</p>
-                            <button onclick="window.close()" style="background: #6c757d; color: white; padding: 12px 24px; border: none; border-radius: 6px; font-size: 16px; cursor: pointer; margin-top: 15px;">
-                                Close Window
-                            </button>
-                            <p style="color: #6c757d; margin-top: 10px; font-size: 14px;">Window will close automatically in 3 seconds...</p>
-                        </div>
-                    `;
-                    
-                    // Auto-close after 3 seconds using the same code as the button
-                    setTimeout(() => {{
-                        window.close();
-                    }}, 3000);
-                }} else {{
-                    // No token - show error
-                    document.getElementById('status').innerHTML = `
-                        <div>
-                            <h2 style="color: #dc3545;">❌ Token Exchange Failed</h2>
-                            <p>Authentication succeeded but automatic token exchange failed.</p>
-                            <p>Authorization code: <code>${{authCode || "None"}}</code></p>
-                            <p>Please try the manual process or contact support.</p>
-                            <p style="margin-top: 30px;">
-                                <a href="/docs" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px;">Return to API Docs</a>
-                            </p>
-                        </div>
-                    `;
-                }}
-            }}
-            
-            if (document.readyState !== 'loading') {{
-                run();
+            auth_logger.error(
+                "Token exchange exception",
+                error=str(e),
+                event_type="oauth_token_exchange_error",
+            )
+
+    # JSON embedding is XSS-safe for string values; also neutralize HTML breakout
+    # sequences that json.dumps does not escape by default (e.g. </script>).
+    boot_json = (
+        json.dumps(
+            {
+                "accessToken": access_token or "",
+                "authCode": code or "",
+                "authState": state or "",
+            },
+            ensure_ascii=True,
+        )
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en-US">
+<head>
+  <meta charset="utf-8">
+  <title>OAuth2 Redirect</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; padding: 40px; text-align: center; background: #f8f9fa; }}
+    .success {{ color: #28a745; }}
+    .spinner {{
+      border: 4px solid #f3f3f3; border-top: 4px solid #28a745; border-radius: 50%;
+      width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto;
+    }}
+    @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
+  </style>
+</head>
+<body>
+  <h1 class="success">Authentication Successful</h1>
+  <div class="spinner" id="spinner"></div>
+  <p id="status">Processing OAuth2 authentication...</p>
+  <script id="oauth-boot" type="application/json">{boot_json}</script>
+  <script>
+    'use strict';
+    (function () {{
+      function readBoot() {{
+        try {{
+          var el = document.getElementById('oauth-boot');
+          return el ? JSON.parse(el.textContent || '{{}}') : {{}};
+        }} catch (e) {{
+          return {{}};
+        }}
+      }}
+      // Prefer server-provided JSON; fall back to location.search (never eval query strings).
+      var boot = readBoot();
+      var params = new URLSearchParams(window.location.search);
+      var accessToken = boot.accessToken || '';
+      var authCode = boot.authCode || params.get('code') || '';
+      var authState = boot.authState || params.get('state') || '';
+
+      function setStatus(html) {{
+        document.getElementById('status').innerHTML = html;
+      }}
+
+      function run() {{
+        document.getElementById('spinner').style.display = 'none';
+
+        if (window.opener && window.opener.swaggerUIRedirectOauth2) {{
+          try {{
+            var oauth2 = window.opener.swaggerUIRedirectOauth2;
+            if (accessToken) {{
+              oauth2.callback({{
+                auth: oauth2.auth,
+                token: {{ access_token: accessToken, token_type: 'Bearer' }},
+                redirectUrl: oauth2.redirectUrl
+              }});
             }} else {{
-                document.addEventListener('DOMContentLoaded', function () {{
-                    run();
-                }});
+              oauth2.callback({{
+                auth: oauth2.auth,
+                code: authCode,
+                state: authState,
+                redirectUrl: oauth2.redirectUrl
+              }});
             }}
-        </script>
-    </body>
-    </html>
-    """
-    
-    return HTMLResponse(content=html_content)
+            setStatus('<div><h2 style="color:#28a745;">Authentication Complete</h2><p>You can close this window.</p></div>');
+            setTimeout(function () {{ window.close(); }}, 2000);
+            return;
+          }} catch (e) {{
+            console.error('Popup callback error', e);
+          }}
+        }}
+
+        if (accessToken) {{
+          localStorage.setItem('swagger_oauth_token', accessToken);
+          localStorage.setItem('swagger_oauth_token_timestamp', Date.now().toString());
+          setStatus('<div><h2 style="color:#28a745;">Authentication Complete</h2><p>Token stored for Swagger UI.</p><p><a href="/docs">Return to API Docs</a></p></div>');
+          setTimeout(function () {{ window.close(); }}, 2000);
+        }} else {{
+          setStatus('<div><h2 style="color:#dc3545;">Token Exchange Failed</h2><p>Please return to the docs and try again.</p><p><a href="/docs">Return to API Docs</a></p></div>');
+        }}
+      }}
+
+      if (document.readyState !== 'loading') {{
+        run();
+      }} else {{
+        document.addEventListener('DOMContentLoaded', run);
+      }}
+    }})();
+  </script>
+</body>
+</html>"""
+
+    return HTMLResponse(
+        content=html_content,
+        headers={
+            # Inline script required for Swagger popup callback; boot data is JSON-encoded.
+            "Content-Security-Policy": (
+                "default-src 'none'; "
+                "script-src 'unsafe-inline'; "
+                "style-src 'unsafe-inline'; "
+                "base-uri 'none'; "
+                "form-action 'none'; "
+                "frame-ancestors 'none'"
+            ),
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "X-Frame-Options": "DENY",
+        },
+    )
 
 # Note: Custom OAuth2 login endpoint removed - now using standard Swagger UI OAuth2 flow
 

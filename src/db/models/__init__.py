@@ -11,6 +11,7 @@ from .base import Base
 # User and authentication models
 from .user import User
 from .api_key import APIKey
+from .deleted_user import DeletedUser
 
 # Session models
 from .routed_session import RoutedSession, SessionState
@@ -37,6 +38,7 @@ __all__ = [
     # User models
     "User",
     "APIKey",
+    "DeletedUser",
     # Session
     "RoutedSession",
     "SessionState",

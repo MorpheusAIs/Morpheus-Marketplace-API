@@ -68,6 +68,69 @@ class CognitoUserService:
                           event_type="cognito_get_user_unexpected_error")
             return None
 
+    async def global_sign_out(self, cognito_user_id: str) -> Dict[str, Any]:
+        """
+        Invalidate all refresh tokens for the user (AdminUserGlobalSignOut).
+
+        Outstanding access tokens remain cryptographically valid until expiry;
+        callers must also tombstone / deactivate the app user so JWT auth fails.
+        """
+        sign_out_logger = logger.bind(cognito_user_id=cognito_user_id)
+        try:
+            sign_out_logger.info(
+                "Attempting Cognito global sign-out",
+                user_pool_id=settings.COGNITO_USER_POOL_ID,
+                event_type="cognito_global_sign_out_start",
+            )
+            self.cognito_client.admin_user_global_sign_out(
+                UserPoolId=settings.COGNITO_USER_POOL_ID,
+                Username=cognito_user_id,
+            )
+            sign_out_logger.info(
+                "Cognito global sign-out succeeded",
+                event_type="cognito_global_sign_out_success",
+            )
+            return {"success": True, "cognito_user_id": cognito_user_id}
+        except ClientError as e:
+            error_code = e.response["Error"]["Code"]
+            error_message = e.response["Error"]["Message"]
+            if error_code == "UserNotFoundException":
+                sign_out_logger.warning(
+                    "Cognito user not found for global sign-out",
+                    error_code=error_code,
+                    event_type="cognito_global_sign_out_not_found",
+                )
+                return {
+                    "success": True,
+                    "cognito_user_id": cognito_user_id,
+                    "warning": True,
+                    "message": "User not found in Cognito",
+                }
+            sign_out_logger.error(
+                "Cognito global sign-out failed",
+                error_code=error_code,
+                error_message=error_message,
+                event_type="cognito_global_sign_out_failed",
+            )
+            return {
+                "success": False,
+                "cognito_user_id": cognito_user_id,
+                "error": error_message,
+                "error_code": error_code,
+            }
+        except Exception as e:
+            sign_out_logger.error(
+                "Unexpected error during Cognito global sign-out",
+                error=str(e),
+                event_type="cognito_global_sign_out_unexpected_error",
+            )
+            return {
+                "success": False,
+                "cognito_user_id": cognito_user_id,
+                "error": str(e),
+                "error_code": "UnknownError",
+            }
+
     async def delete_user(self, cognito_user_id: str) -> Dict[str, Any]:
         """
         Delete a user from Cognito User Pool (admin operation using task role).
@@ -77,6 +140,9 @@ class CognitoUserService:
             delete_logger.info("Attempting to delete Cognito user",
                               user_pool_id=settings.COGNITO_USER_POOL_ID,
                               event_type="cognito_user_deletion_start")
+
+            # Invalidate refresh tokens before removing the identity.
+            await self.global_sign_out(cognito_user_id)
             
             response = self.cognito_client.admin_delete_user(
                 UserPoolId=settings.COGNITO_USER_POOL_ID,
