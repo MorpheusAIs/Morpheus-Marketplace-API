@@ -129,10 +129,12 @@ class SessionPremiumBudgetError(SessionGatewayCapacityError):
         model_id: Optional[str] = None,
         spent_mor: float = 0,
         budget_mor: float = 0,
+        holds_mor: float = 0,
     ):
         super().__init__(message, model_id=model_id, category="premium_budget")
         self.spent_mor = spent_mor
         self.budget_mor = budget_mor
+        self.holds_mor = holds_mor
 
 
 class SessionAllowlistError(SessionGatewayCapacityError):
@@ -455,11 +457,39 @@ class SessionRoutingService:
                 event_type="premium_daylock_redis_write_error",
             )
 
+    async def _sum_premium_open_stake_mor(self) -> float:
+        """SUM(stake_mor) for premium sessions still OPEN or CLOSING (holds)."""
+        premium_ids = list(self._get_premium_models())
+        if not premium_ids:
+            return 0.0
+        try:
+            async with get_db() as db:
+                result = await db.execute(
+                    select(func.coalesce(func.sum(RoutedSession.stake_mor), 0))
+                    .where(
+                        RoutedSession.model_id.in_(premium_ids),
+                        RoutedSession.state.in_(
+                            [SessionState.OPEN.value, SessionState.CLOSING.value]
+                        ),
+                    )
+                )
+                raw = result.scalar_one()
+                return float(raw or 0.0)
+        except Exception as e:
+            logger.warning(
+                "Premium open-stake hold sum failed",
+                error=str(e),
+                event_type="premium_daylock_holds_sum_error",
+            )
+            return 0.0
+
     async def _ensure_premium_budget_allows_open(self, model_id: str) -> None:
-        """Refuse new premium opens when UTC-day daylock budget is exhausted.
+        """Refuse new premium opens when actual + open holds exhaust the budget.
 
         Non-premium models skip. Budget 0 disables the premium lane check
         (premium IDs would still need to pass PPS unless also warm).
+        Holds = SUM(stake_mor) on OPEN/CLOSING premium rows (max possible
+        daylock still in flight). Actual = Redis close-truth counter.
         """
         if not self._is_premium_model(model_id):
             return
@@ -477,11 +507,15 @@ class SessionRoutingService:
                 spent_mor=0,
                 budget_mor=budget,
             )
-        if spent >= budget:
+        holds = await self._sum_premium_open_stake_mor()
+        committed = float(spent) + float(holds)
+        if committed >= budget:
             logger.warning(
                 "Premium daily daylock budget exhausted; refusing open",
                 model_id=model_id,
                 spent_mor=spent,
+                holds_mor=holds,
+                committed_mor=committed,
                 budget_mor=budget,
                 event_type="session_premium_budget_exhausted",
             )
@@ -491,61 +525,224 @@ class SessionRoutingService:
                 model_id=model_id,
                 spent_mor=spent,
                 budget_mor=budget,
+                holds_mor=holds,
             )
 
-    async def _record_premium_daylock_on_close(self, session: RoutedSession) -> None:
-        """Meter estimated daylocked MOR for a premium session at close time."""
-        if not self._is_premium_model(session.model_id):
-            return
-        budget = float(settings.SESSION_PREMIUM_DAILY_BUDGET_MOR or 0)
-        if budget <= 0:
-            return
+    @staticmethod
+    def _parse_session_stake_mor(status: Any) -> Optional[float]:
+        """Stake from getSessionStatus body in MOR, or None."""
+        if not isinstance(status, dict):
+            return None
+        session = status.get("session") or status.get("Session") or status
+        if not isinstance(session, dict):
+            return None
+        raw = session.get("Stake", session.get("stake"))
+        if raw is None:
+            return None
+        try:
+            wei = int(str(raw).strip().strip('"'))
+            return wei / 1e18
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_session_unix(status: Any, *keys: str) -> Optional[int]:
+        """First positive unix timestamp found under session for the given keys."""
+        if not isinstance(status, dict):
+            return None
+        session = status.get("session") or status.get("Session") or status
+        if not isinstance(session, dict):
+            return None
+        for key in keys:
+            raw = session.get(key)
+            if raw is None:
+                continue
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return None
+
+    @staticmethod
+    def _daylock_prorata_mor(
+        stake_mor: float,
+        opened_at: Optional[int],
+        ends_at: Optional[int],
+        closed_at: Optional[int],
+    ) -> float:
+        """Pro-rata of escrow: stake * lived / sched (early-close daylock proxy)."""
+        if stake_mor <= 0:
+            return 0.0
+        if not opened_at or not ends_at or ends_at <= opened_at:
+            return 0.0
+        end = closed_at if closed_at and closed_at > 0 else int(
+            datetime.now(timezone.utc).timestamp()
+        )
+        # Late path / past endsAt with full unused return ≈ 0 when closed after
+        # endsAt and release window logic would unlock — approximate: if closed
+        # strictly after endsAt, treat as 0 daylock (stake already returned).
+        if end > ends_at:
+            return 0.0
+        lived = max(0, min(end, ends_at) - opened_at)
+        sched = max(1, ends_at - opened_at)
+        daylock = stake_mor * (lived / sched)
+        return max(0.0, min(stake_mor, daylock))
+
+    def _extract_close_tx_hash(self, close_result: Any) -> Optional[str]:
+        if not isinstance(close_result, dict):
+            return None
+        for key in ("tx", "Tx", "txHash", "TxHash", "hash"):
+            raw = close_result.get(key)
+            if isinstance(raw, str) and raw.startswith("0x") and len(raw) >= 66:
+                return raw
+        return None
+
+    async def _daylock_from_close_receipt(
+        self, tx_hash: str, stake_mor: float
+    ) -> Optional[float]:
+        """daylock = stake − MOR Transfer(to=consumer) on the close tx, or None."""
+        token = (settings.MOR_TOKEN_ADDRESS or "").strip()
+        consumer = (settings.SESSION_CONSUMER_WALLET_ADDRESS or "").strip()
+        rpc = (settings.WEB3_PROVIDER_URL or "").strip()
+        if not token or not consumer or not rpc or stake_mor <= 0:
+            return None
+
+        def _decode() -> Optional[float]:
+            from web3 import Web3
+
+            w3 = Web3(Web3.HTTPProvider(rpc))
+            receipt = w3.eth.get_transaction_receipt(tx_hash)
+            if receipt is None:
+                return None
+            status = int(receipt.get("status", 0) if hasattr(receipt, "get") else receipt["status"])
+            if status != 1:
+                return None
+            transfer_topic = Web3.keccak(text="Transfer(address,address,uint256)")
+            transfer_topic_hex = Web3.to_hex(transfer_topic).lower()
+            token_addr = Web3.to_checksum_address(token)
+            consumer_addr = Web3.to_checksum_address(consumer)
+            returned_wei = 0
+            for log in receipt["logs"]:
+                if Web3.to_checksum_address(log["address"]) != token_addr:
+                    continue
+                topics = log["topics"]
+                if not topics or len(topics) < 3:
+                    continue
+                if Web3.to_hex(topics[0]).lower() != transfer_topic_hex:
+                    continue
+                to_addr = Web3.to_checksum_address(
+                    "0x" + Web3.to_hex(topics[2])[-40:]
+                )
+                if to_addr != consumer_addr:
+                    continue
+                data = log["data"]
+                if isinstance(data, (bytes, bytearray)):
+                    returned_wei += int.from_bytes(data, "big")
+                else:
+                    returned_wei += int(str(data), 16)
+            returned_mor = returned_wei / 1e18
+            return max(0.0, stake_mor - returned_mor)
 
         try:
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
-            created = session.created_at or now
-            if created.tzinfo is not None:
-                created = created.replace(tzinfo=None)
-            elapsed_s = max(0.0, (now - created).total_seconds())
+            return await asyncio.to_thread(_decode)
+        except Exception as e:
+            logger.warning(
+                "Close-tx daylock decode failed; will fallback",
+                tx_hash=tx_hash,
+                error=str(e),
+                event_type="daylock_receipt_decode_error",
+            )
+            return None
 
-            # Cap by scheduled session length when known.
-            sched_s = None
-            if session.expires_at and session.created_at:
-                exp = session.expires_at
-                if exp.tzinfo is not None:
-                    exp = exp.replace(tzinfo=None)
-                sched_s = max(1.0, (exp - created).total_seconds())
-            if sched_s is not None:
-                elapsed_s = min(elapsed_s, sched_s)
+    async def _record_daylock_on_close(
+        self,
+        session: RoutedSession,
+        close_result: Any = None,
+    ) -> None:
+        """Persist daylock_mor for any session; Redis-meter premium actuals.
 
-            max_pps = await self._get_model_max_price_per_second(session.model_id)
-            if max_pps is None or max_pps <= 0:
+        Prefer close-tx Transfer truth (stake − returned). Fallback: pro-rata
+        stake × lived / sched from getSession / row timestamps.
+        """
+        try:
+            status = None
+            try:
+                status = await proxy_router_service.getSessionStatus(session.id)
+            except Exception as e:
                 logger.warning(
-                    "Premium close meter skipped; no PPS",
+                    "getSessionStatus for daylock meter failed",
                     session_id=session.id,
-                    model_id=session.model_id,
-                    event_type="premium_daylock_meter_skip",
+                    error=str(e),
+                    event_type="daylock_meter_status_error",
                 )
-                return
 
-            factor = float(settings.SESSION_STAKE_FACTOR or 338)
-            daylock = max_pps * elapsed_s * factor
-            await self._add_premium_daylock_spent(daylock)
+            stake_mor = self._parse_session_stake_mor(status)
+            if stake_mor is None and session.stake_mor is not None:
+                stake_mor = float(session.stake_mor)
+            if stake_mor is None or stake_mor < 0:
+                stake_mor = 0.0
+
+            opened_at = self._parse_session_unix(
+                status, "OpenedAt", "openedAt"
+            )
+            ends_at = self._parse_session_unix(status, "EndsAt", "endsAt")
+            closed_at = self._parse_session_unix(
+                status, "ClosedAt", "closedAt"
+            )
+
+            daylock: Optional[float] = None
+            source = "prorata"
+            tx_hash = self._extract_close_tx_hash(close_result)
+            if tx_hash and stake_mor > 0:
+                daylock = await self._daylock_from_close_receipt(tx_hash, stake_mor)
+                if daylock is not None:
+                    source = "receipt"
+
+            if daylock is None:
+                if opened_at is None and session.created_at is not None:
+                    created = session.created_at
+                    if created.tzinfo is not None:
+                        created = created.replace(tzinfo=None)
+                    opened_at = int(created.replace(tzinfo=timezone.utc).timestamp())
+                if ends_at is None and session.expires_at is not None:
+                    exp = session.expires_at
+                    if exp.tzinfo is not None:
+                        exp = exp.replace(tzinfo=None)
+                    # expires_at includes SESSION_EXPIRY_BUFFER; still OK as sched proxy
+                    ends_at = int(exp.replace(tzinfo=timezone.utc).timestamp())
+                daylock = self._daylock_prorata_mor(
+                    stake_mor, opened_at, ends_at, closed_at
+                )
+                source = "prorata"
+
+            daylock = max(0.0, float(daylock or 0.0))
+            session.daylock_mor = daylock
+            if session.stake_mor is None and stake_mor > 0:
+                session.stake_mor = stake_mor
+
+            is_premium = self._is_premium_model(session.model_id)
+            budget = float(settings.SESSION_PREMIUM_DAILY_BUDGET_MOR or 0)
+            if is_premium and budget > 0 and daylock > 0:
+                await self._add_premium_daylock_spent(daylock)
+
             logger.info(
-                "Recorded premium daylock on close",
+                "Recorded session daylock on close",
                 session_id=session.id,
                 model_id=session.model_id,
-                elapsed_s=round(elapsed_s, 1),
-                max_pps=max_pps,
-                daylock_mor=round(daylock, 3),
-                event_type="premium_daylock_recorded",
+                stake_mor=round(stake_mor, 6),
+                daylock_mor=round(daylock, 6),
+                meter_source=source,
+                premium=is_premium,
+                event_type="daylock_recorded",
             )
         except Exception as e:
             logger.warning(
-                "Premium daylock meter failed",
+                "Daylock meter failed",
                 session_id=getattr(session, "id", None),
                 error=str(e),
-                event_type="premium_daylock_meter_error",
+                event_type="daylock_meter_error",
             )
 
     # =========================================================================
@@ -863,25 +1060,10 @@ class SessionRoutingService:
             invalidate_logger.warning("Session invalidated after prompt failure",
                                       reason=reason,
                                       event_type="session_invalidated")
-            # Meter premium daylock before background close (needs model_id /
-            # created_at from the row). Best-effort.
-            try:
-                row = await db.execute(
-                    select(RoutedSession).where(RoutedSession.id == session_id)
-                )
-                session_row = row.scalar_one_or_none()
-                if session_row is not None:
-                    await self._record_premium_daylock_on_close(session_row)
-            except Exception as e:
-                invalidate_logger.warning(
-                    "Premium meter on invalidate failed",
-                    error=str(e),
-                    event_type="premium_daylock_invalidate_meter_error",
-                )
             # Close on-chain in the background: close needs a (possibly
             # failing) provider-report RPC plus a blockchain tx — too slow
             # to block the user's retry on. closeSession tolerates
-            # already-closed sessions.
+            # already-closed sessions. Daylock is metered after close lands.
             task = asyncio.create_task(self._close_invalidated_session(session_id))
             self._background_close_tasks.add(task)
             task.add_done_callback(self._background_close_tasks.discard)
@@ -892,11 +1074,29 @@ class SessionRoutingService:
         try:
             # Same wallet/nonce sequence as opens -> route through the adaptive
             # throttle so a storm's closes don't collide with its opens.
-            await self._run_onchain(
+            close_result = await self._run_onchain(
                 lambda: proxy_router_service.closeSession(session_id),
                 op_name="closeSession",
                 op_logger=logger,
             )
+            try:
+                async with get_db() as db:
+                    row = await db.execute(
+                        select(RoutedSession).where(RoutedSession.id == session_id)
+                    )
+                    session_row = row.scalar_one_or_none()
+                    if session_row is not None:
+                        await self._record_daylock_on_close(
+                            session_row, close_result=close_result
+                        )
+                        await db.commit()
+            except Exception as e:
+                logger.warning(
+                    "Daylock meter on invalidate close failed",
+                    session_id=session_id,
+                    error=str(e),
+                    event_type="daylock_invalidate_meter_error",
+                )
             logger.info("Invalidated session closed on proxy router",
                         session_id=session_id,
                         event_type="invalidated_session_closed")
@@ -1161,6 +1361,7 @@ class SessionRoutingService:
             # (omitProvider) instead of possibly reopening on the same
             # impaired provider.
             provider_address = self._parse_provider_address(status)
+            stake_mor = self._parse_session_stake_mor(status)
 
             # Create session record only after successful open
             now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1185,7 +1386,8 @@ class SessionRoutingService:
                     created_at=now,
                     updated_at=now,
                     endpoint=endpoint,
-                    provider_address=provider_address
+                    provider_address=provider_address,
+                    stake_mor=stake_mor,
                 )
                 db.add(session)
                 await db.commit()
@@ -1253,16 +1455,16 @@ class SessionRoutingService:
                          event_type="session_close_start")
         
         try:
-            # Meter premium daylock on close (used MOR), then close on-chain.
-            await self._record_premium_daylock_on_close(session)
-
             # Close on-chain via the adaptive throttle (shared wallet/nonce
             # with every other on-chain session op on this replica).
-            await self._run_onchain(
+            close_result = await self._run_onchain(
                 lambda: proxy_router_service.closeSession(session.id),
                 op_name="closeSession",
                 op_logger=close_logger,
             )
+
+            # Meter daylock after the close lands (receipt truth / pro-rata).
+            await self._record_daylock_on_close(session, close_result=close_result)
 
             # Mark as CLOSED
             session.state = SessionState.CLOSED
@@ -1678,8 +1880,6 @@ class SessionRoutingService:
                        expired_at=session.expires_at.isoformat(),
                        event_type="closing_expired_session")
 
-            await self._record_premium_daylock_on_close(session)
-            
             # Mark as EXPIRED rather than going through close flow
             session.state = SessionState.EXPIRED
             session.updated_at = now
@@ -1687,10 +1887,13 @@ class SessionRoutingService:
             # Still try to close on proxy router (via the adaptive throttle,
             # shared wallet/nonce with all other on-chain ops).
             try:
-                await self._run_onchain(
+                close_result = await self._run_onchain(
                     lambda: proxy_router_service.closeSession(session.id),
                     op_name="closeSession",
                     op_logger=logger,
+                )
+                await self._record_daylock_on_close(
+                    session, close_result=close_result
                 )
 
             except Exception as e:
