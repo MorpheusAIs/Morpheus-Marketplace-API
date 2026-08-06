@@ -572,7 +572,14 @@ class SessionRoutingService:
         ends_at: Optional[int],
         closed_at: Optional[int],
     ) -> float:
-        """Pro-rata of escrow: stake * lived / sched (early-close daylock proxy)."""
+        """Pro-rata daylock proxy matching on-chain used-stipend split.
+
+        Early close (closedAt < endsAt): unused returns immediately; used ≈
+        stake × lived / sched and day-locks until next UTC day.
+
+        At/after endsAt: unused ≈ 0, so daylock ≈ full stake. (Closing a few
+        seconds after endsAt — the EXPIRED cleanup path — must NOT meter 0.)
+        """
         if stake_mor <= 0:
             return 0.0
         if not opened_at or not ends_at or ends_at <= opened_at:
@@ -580,12 +587,10 @@ class SessionRoutingService:
         end = closed_at if closed_at and closed_at > 0 else int(
             datetime.now(timezone.utc).timestamp()
         )
-        # Late path / past endsAt with full unused return ≈ 0 when closed after
-        # endsAt and release window logic would unlock — approximate: if closed
-        # strictly after endsAt, treat as 0 daylock (stake already returned).
-        if end > ends_at:
-            return 0.0
-        lived = max(0, min(end, ends_at) - opened_at)
+        # Full schedule lived → entire escrow is the used/daylocked slice.
+        if end >= ends_at:
+            return float(stake_mor)
+        lived = max(0, end - opened_at)
         sched = max(1, ends_at - opened_at)
         daylock = stake_mor * (lived / sched)
         return max(0.0, min(stake_mor, daylock))
@@ -665,8 +670,15 @@ class SessionRoutingService:
 
         Prefer close-tx Transfer truth (stake − returned). Fallback: pro-rata
         stake × lived / sched from getSession / row timestamps.
+
+        Idempotent: if daylock_mor is already > 0, skip so Redis premium
+        actual is not double-incremented on retry paths.
         """
         try:
+            prior = getattr(session, "daylock_mor", None)
+            if prior is not None and float(prior) > 0:
+                return
+
             status = None
             try:
                 status = await proxy_router_service.getSessionStatus(session.id)
@@ -701,6 +713,18 @@ class SessionRoutingService:
                     source = "receipt"
 
             if daylock is None:
+                # Do not invent daylock while the session is still open on-chain
+                # (EXPIRED cleanup / invalidate may call us after a failed close).
+                if (not closed_at or closed_at <= 0) and not tx_hash:
+                    logger.info(
+                        "Skip daylock meter; on-chain close not confirmed yet",
+                        session_id=session.id,
+                        event_type="daylock_meter_skipped_not_closed",
+                    )
+                    return
+                if (not closed_at or closed_at <= 0) and tx_hash:
+                    # Close tx returned but status lag — treat as just closed.
+                    closed_at = int(datetime.now(timezone.utc).timestamp())
                 if opened_at is None and session.created_at is not None:
                     created = session.created_at
                     if created.tzinfo is not None:
@@ -1071,6 +1095,7 @@ class SessionRoutingService:
 
     async def _close_invalidated_session(self, session_id: str) -> None:
         """Best-effort proxy-router close for an invalidated session."""
+        close_result = None
         try:
             # Same wallet/nonce sequence as opens -> route through the adaptive
             # throttle so a storm's closes don't collide with its opens.
@@ -1079,34 +1104,36 @@ class SessionRoutingService:
                 op_name="closeSession",
                 op_logger=logger,
             )
-            try:
-                async with get_db() as db:
-                    row = await db.execute(
-                        select(RoutedSession).where(RoutedSession.id == session_id)
-                    )
-                    session_row = row.scalar_one_or_none()
-                    if session_row is not None:
-                        await self._record_daylock_on_close(
-                            session_row, close_result=close_result
-                        )
-                        await db.commit()
-            except Exception as e:
-                logger.warning(
-                    "Daylock meter on invalidate close failed",
-                    session_id=session_id,
-                    error=str(e),
-                    event_type="daylock_invalidate_meter_error",
-                )
             logger.info("Invalidated session closed on proxy router",
                         session_id=session_id,
                         event_type="invalidated_session_closed")
         except Exception as e:
             # The proxy-router's SessionExpiryHandler will close it after
             # EndsAt anyway; losing this close only delays stake recovery.
+            # Still try to meter below if the chain already shows ClosedAt.
             logger.warning("Best-effort close of invalidated session failed",
                            session_id=session_id,
                            error=str(e),
                            event_type="invalidated_session_close_error")
+
+        try:
+            async with get_db() as db:
+                row = await db.execute(
+                    select(RoutedSession).where(RoutedSession.id == session_id)
+                )
+                session_row = row.scalar_one_or_none()
+                if session_row is not None:
+                    await self._record_daylock_on_close(
+                        session_row, close_result=close_result
+                    )
+                    await db.commit()
+        except Exception as e:
+            logger.warning(
+                "Daylock meter on invalidate close failed",
+                session_id=session_id,
+                error=str(e),
+                event_type="daylock_invalidate_meter_error",
+            )
 
     @asynccontextmanager
     async def session_context(
@@ -1880,27 +1907,31 @@ class SessionRoutingService:
                        expired_at=session.expires_at.isoformat(),
                        event_type="closing_expired_session")
 
-            # Mark as EXPIRED rather than going through close flow
+            # Mark as EXPIRED rather than going through the idle CLOSE flow.
+            # Still close on-chain and meter daylock — full-duration expires
+            # daylock ≈ stake (unused Transfer is 0).
             session.state = SessionState.EXPIRED
             session.updated_at = now
-            
-            # Still try to close on proxy router (via the adaptive throttle,
-            # shared wallet/nonce with all other on-chain ops).
+
+            close_result = None
             try:
                 close_result = await self._run_onchain(
-                    lambda: proxy_router_service.closeSession(session.id),
+                    lambda sid=session.id: proxy_router_service.closeSession(sid),
                     op_name="closeSession",
                     op_logger=logger,
                 )
-                await self._record_daylock_on_close(
-                    session, close_result=close_result
-                )
-
             except Exception as e:
+                # Proxy SessionExpiryHandler may already have closed it (or
+                # will). Meter from getSessionStatus / pro-rata anyway so
+                # EXPIRED rows are not left with daylock_mor=0.
                 logger.warning("Error closing expired session on proxy",
                              session_id=session.id,
                              error=str(e),
                              event_type="expired_session_close_error")
+
+            await self._record_daylock_on_close(
+                session, close_result=close_result
+            )
         
         if expired_sessions:
             await db.commit()

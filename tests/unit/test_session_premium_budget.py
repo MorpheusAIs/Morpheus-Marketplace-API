@@ -99,14 +99,109 @@ def test_daylock_prorata_full_duration(service):
     assert daylock == pytest.approx(100.0)
 
 
-def test_daylock_prorata_late_close_zero(service):
+def test_daylock_prorata_late_close_full_stake(service):
+    """Close at/after endsAt → unused ≈ 0 → daylock ≈ full stake (EXPIRED path)."""
     daylock = service._daylock_prorata_mor(
         stake_mor=100.0,
         opened_at=1_000_000,
         ends_at=1_000_000 + 1200,
         closed_at=1_000_000 + 1201,
     )
-    assert daylock == 0.0
+    assert daylock == pytest.approx(100.0)
+
+
+async def test_record_daylock_expired_late_close_meters_full_stake(service):
+    """EXPIRED cleanup closes seconds after endsAt; must meter full stake."""
+    now = int(datetime.now(timezone.utc).timestamp())
+    session = MagicMock()
+    session.id = "0xexpired"
+    session.model_id = "0xprem"
+    session.stake_mor = 3750.0
+    session.daylock_mor = None
+    session.created_at = None
+    session.expires_at = None
+
+    status = {
+        "session": {
+            "Stake": str(int(3750 * 1e18)),
+            "OpenedAt": now - 1200,
+            "EndsAt": now - 4,
+            "ClosedAt": now,
+        }
+    }
+    service._add_premium_daylock_spent = AsyncMock()
+    service._daylock_from_close_receipt = AsyncMock(return_value=None)
+
+    with patch(
+        "src.services.session_routing_service.proxy_router_service.getSessionStatus",
+        new=AsyncMock(return_value=status),
+    ), patch("src.services.session_routing_service.settings") as mock_settings:
+        mock_settings.SESSION_PREMIUM_MODEL_IDS = "0xprem"
+        mock_settings.SESSION_PREMIUM_DAILY_BUDGET_MOR = 15000
+        mock_settings.MOR_TOKEN_ADDRESS = None
+        mock_settings.SESSION_CONSUMER_WALLET_ADDRESS = None
+        mock_settings.WEB3_PROVIDER_URL = None
+        await service._record_daylock_on_close(
+            session, close_result={"tx": "0x" + "ef" * 32}
+        )
+
+    assert float(session.daylock_mor) == pytest.approx(3750.0)
+    service._add_premium_daylock_spent.assert_awaited_once_with(3750.0)
+
+
+async def test_record_daylock_skips_when_not_closed_on_chain(service):
+    session = MagicMock()
+    session.id = "0xstillopen"
+    session.model_id = "0xprem"
+    session.stake_mor = 100.0
+    session.daylock_mor = None
+    session.created_at = None
+    session.expires_at = None
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    status = {
+        "session": {
+            "Stake": str(int(100 * 1e18)),
+            "OpenedAt": now - 1300,
+            "EndsAt": now - 100,
+            "ClosedAt": 0,
+        }
+    }
+    service._add_premium_daylock_spent = AsyncMock()
+
+    with patch(
+        "src.services.session_routing_service.proxy_router_service.getSessionStatus",
+        new=AsyncMock(return_value=status),
+    ), patch("src.services.session_routing_service.settings") as mock_settings:
+        mock_settings.SESSION_PREMIUM_MODEL_IDS = "0xprem"
+        mock_settings.SESSION_PREMIUM_DAILY_BUDGET_MOR = 15000
+        mock_settings.MOR_TOKEN_ADDRESS = None
+        mock_settings.SESSION_CONSUMER_WALLET_ADDRESS = None
+        mock_settings.WEB3_PROVIDER_URL = None
+        await service._record_daylock_on_close(session, close_result=None)
+
+    assert session.daylock_mor is None
+    service._add_premium_daylock_spent.assert_not_awaited()
+
+
+async def test_record_daylock_idempotent_skips_redis_double_count(service):
+    session = MagicMock()
+    session.id = "0xdone"
+    session.model_id = "0xprem"
+    session.stake_mor = 100.0
+    session.daylock_mor = 50.0
+    service._add_premium_daylock_spent = AsyncMock()
+    service._daylock_from_close_receipt = AsyncMock(return_value=50.0)
+
+    with patch(
+        "src.services.session_routing_service.proxy_router_service.getSessionStatus",
+        new=AsyncMock(side_effect=AssertionError("should not fetch")),
+    ):
+        await service._record_daylock_on_close(
+            session, close_result={"tx": "0x" + "ab" * 32}
+        )
+
+    service._add_premium_daylock_spent.assert_not_awaited()
 
 
 async def test_record_daylock_premium_prorata_meters_redis(service):
