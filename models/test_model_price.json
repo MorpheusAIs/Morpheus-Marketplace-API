@@ -9,6 +9,10 @@
 
     "kimi-k2.5": { "input": "0.60", "output": "3.00" },
     "kimi-k2-thinking": { "input": "0.60", "output": "3.00" },
+    "kimi-k3": { "input": "2.00", "output": "10.00" },
+    "kimi-k3-fast": { "input": "3.00", "output": "15.00" },
+    "Kimi K3 Fast": { "input": "3.00", "output": "15.00" },
+    "kimi-k3-fast-api": { "input": "3.00", "output": "15.00" },
 
     "qwen3-235b": { "input": "0.40", "output": "3.00" },
     "qwen-3-235b": { "input": "0.40", "output": "3.00" },
