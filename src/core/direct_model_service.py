@@ -192,6 +192,41 @@ class DirectModelService:
         """
         await self._ensure_fresh_cache()
         return self._raw_models_data.copy()
+
+    async def get_healthy_bid_ids_for_model(self, model_id: str) -> Set[str]:
+        """Bid IDs active.mor.org reports as healthy for a model.
+
+        Used by session open to avoid knocking on providers that host-health
+        already excluded (stale proxy-router, unreachable endpoint, etc.).
+        Rated/on-chain bid lists can still contain those ghost bids.
+
+        Returns lowercase ``0x…`` bid IDs with ``bidDetail[].status == "healthy"``.
+        Empty when the model is missing or has no healthy bids — callers must
+        not fall back to unfiltered rated bids.
+        """
+        await self._ensure_fresh_cache()
+        want = (model_id or "").strip().lower()
+        if not want:
+            return set()
+
+        for model in self._raw_models_data:
+            if not isinstance(model, dict):
+                continue
+            mid = str(model.get("Id") or model.get("id") or "").strip().lower()
+            if mid != want:
+                continue
+            healthy: Set[str] = set()
+            for bid in model.get("bidDetail") or []:
+                if not isinstance(bid, dict):
+                    continue
+                status = str(bid.get("status") or "").strip().lower()
+                if status != "healthy":
+                    continue
+                bid_id = str(bid.get("bidId") or bid.get("bid_id") or "").strip().lower()
+                if bid_id.startswith("0x") and len(bid_id) >= 10:
+                    healthy.add(bid_id)
+            return healthy
+        return set()
     
     async def resolve_model_id(self, model_identifier: str) -> Optional[str]:
         """
