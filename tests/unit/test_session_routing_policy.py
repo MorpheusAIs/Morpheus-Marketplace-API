@@ -49,6 +49,24 @@ def service():
     return SessionRoutingService()
 
 
+def _patch_cheapest(healthy_ids, rated_resp, *, max_stake=700):
+    """Common patches for cheapest-bid selection + active healthy filter."""
+    return (
+        patch(
+            "src.services.session_routing_service.get_session_routing_policy"
+        ),
+        patch(
+            "src.services.session_routing_service.proxy_router_service.getRatedBids",
+            new=AsyncMock(return_value=rated_resp),
+        ),
+        patch(
+            "src.services.session_routing_service.direct_model_service.get_healthy_bid_ids_for_model",
+            new=AsyncMock(return_value={b.lower() for b in healthy_ids}),
+        ),
+        patch("src.services.session_routing_service.settings"),
+    )
+
+
 @pytest.mark.asyncio
 async def test_cheapest_bid_under_fuse_picks_low_pps(service):
     bids = {
@@ -75,15 +93,11 @@ async def test_cheapest_bid_under_fuse_picks_low_pps(service):
     }
     resp = MagicMock()
     resp.json.return_value = bids
+    p_policy, p_rated, p_healthy, p_settings = _patch_cheapest(
+        {"0xbid_hi", "0xbid_lo"}, resp
+    )
 
-    with patch(
-        "src.services.session_routing_service.get_session_routing_policy"
-    ) as mock_policy, patch(
-        "src.services.session_routing_service.proxy_router_service.getRatedBids",
-        new=AsyncMock(return_value=resp),
-    ), patch(
-        "src.services.session_routing_service.settings"
-    ) as mock_settings:
+    with p_policy as mock_policy, p_rated, p_healthy, p_settings as mock_settings:
         mock_policy.return_value.max_stake_mor = 700
         mock_settings.SESSION_STAKE_FACTOR = 338
         chosen = await service._select_cheapest_bid_under_fuse(
@@ -94,6 +108,42 @@ async def test_cheapest_bid_under_fuse_picks_low_pps(service):
     assert chosen["bid_id"] == "0xbid_lo"
     # 0.0003 * 1800 * 338 = 182.52
     assert chosen["stake_mor"] == pytest.approx(182.52, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_cheapest_bid_skips_active_unhealthy_ghost(service):
+    """Ghost cheapest bid not on active.mor.org healthy list must be ignored."""
+    bids = {
+        "bids": [
+            {
+                "Bid": {
+                    "Id": "0xghost_cheap",
+                    "Provider": "0xdeadhost",
+                    "PricePerSecond": str(int(0.0001 * 1e18)),
+                }
+            },
+            {
+                "Bid": {
+                    "Id": "0xhealthy",
+                    "Provider": "0xgood",
+                    "PricePerSecond": str(int(0.0003 * 1e18)),
+                }
+            },
+        ]
+    }
+    resp = MagicMock()
+    resp.json.return_value = bids
+    p_policy, p_rated, p_healthy, p_settings = _patch_cheapest({"0xhealthy"}, resp)
+
+    with p_policy as mock_policy, p_rated, p_healthy, p_settings as mock_settings:
+        mock_policy.return_value.max_stake_mor = 700
+        mock_settings.SESSION_STAKE_FACTOR = 338
+        chosen = await service._select_cheapest_bid_under_fuse(
+            model_id="0xmodel",
+            session_duration=1800,
+        )
+
+    assert chosen["bid_id"] == "0xhealthy"
 
 
 @pytest.mark.asyncio
@@ -111,15 +161,9 @@ async def test_cheapest_bid_over_fuse_refused(service):
     }
     resp = MagicMock()
     resp.json.return_value = bids
+    p_policy, p_rated, p_healthy, p_settings = _patch_cheapest({"0xbid_hi"}, resp)
 
-    with patch(
-        "src.services.session_routing_service.get_session_routing_policy"
-    ) as mock_policy, patch(
-        "src.services.session_routing_service.proxy_router_service.getRatedBids",
-        new=AsyncMock(return_value=resp),
-    ), patch(
-        "src.services.session_routing_service.settings"
-    ) as mock_settings:
+    with p_policy as mock_policy, p_rated, p_healthy, p_settings as mock_settings:
         mock_policy.return_value.max_stake_mor = 700
         mock_settings.SESSION_STAKE_FACTOR = 338
         with pytest.raises(SessionStakeFuseError) as exc:
@@ -137,13 +181,36 @@ async def test_cheapest_bid_over_fuse_refused(service):
 async def test_cheapest_bid_no_bids(service):
     resp = MagicMock()
     resp.json.return_value = {"bids": []}
-    with patch(
-        "src.services.session_routing_service.get_session_routing_policy"
-    ) as mock_policy, patch(
-        "src.services.session_routing_service.proxy_router_service.getRatedBids",
-        new=AsyncMock(return_value=resp),
-    ):
+    p_policy, p_rated, p_healthy, _ = _patch_cheapest(set(), resp)
+    with p_policy as mock_policy, p_rated, p_healthy:
         mock_policy.return_value.max_stake_mor = 700
+        with pytest.raises(SessionOpenError):
+            await service._select_cheapest_bid_under_fuse(
+                model_id="0xmodel",
+                session_duration=1800,
+            )
+
+
+@pytest.mark.asyncio
+async def test_cheapest_bid_no_active_healthy_refuses(service):
+    """Rated bids exist but none are active-healthy → do not open any."""
+    bids = {
+        "bids": [
+            {
+                "Bid": {
+                    "Id": "0xghost",
+                    "Provider": "0xdead",
+                    "PricePerSecond": str(int(0.0001 * 1e18)),
+                }
+            }
+        ]
+    }
+    resp = MagicMock()
+    resp.json.return_value = bids
+    p_policy, p_rated, p_healthy, p_settings = _patch_cheapest(set(), resp)
+    with p_policy as mock_policy, p_rated, p_healthy, p_settings as mock_settings:
+        mock_policy.return_value.max_stake_mor = 700
+        mock_settings.SESSION_STAKE_FACTOR = 338
         with pytest.raises(SessionOpenError):
             await service._select_cheapest_bid_under_fuse(
                 model_id="0xmodel",

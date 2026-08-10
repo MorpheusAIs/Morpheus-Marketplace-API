@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db.models import RoutedSession, SessionState
 from ..db.database import get_db, advisory_xact_lock
 from ..core.config import settings
+from ..core.direct_model_service import direct_model_service
 from ..core.model_routing import model_router
 from ..core.session_routing_policy import get_session_routing_policy
 from ..core.logging_config import get_api_logger
@@ -449,7 +450,12 @@ class SessionRoutingService:
         model_id: str,
         omit_provider: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Rated bids for model, cheapest PPS first (proxy rates by score, not price)."""
+        """Rated bids for model, cheapest PPS first (proxy rates by score, not price).
+
+        Only bids that active.mor.org marks ``healthy`` in ``bidDetail`` are
+        eligible. On-chain rated lists still include ghost/outdated hosts;
+        knocking on those doors is what trips session-creation alarms.
+        """
         try:
             response = await proxy_router_service.getRatedBids(model_id)
             result = response.json()
@@ -468,8 +474,19 @@ class SessionRoutingService:
             )
             return []
 
+        healthy_ids = await direct_model_service.get_healthy_bid_ids_for_model(model_id)
+        if not healthy_ids:
+            logger.warning(
+                "No active.mor.org healthy bids for model; refusing rated-bid open",
+                model_id=model_id,
+                rated_bid_count=len(bids) if isinstance(bids, list) else 0,
+                event_type="cheapest_bid_no_active_healthy",
+            )
+            return []
+
         omit = (omit_provider or "").strip().lower()
         parsed: List[Dict[str, Any]] = []
+        skipped_unhealthy = 0
         for bid in bids:
             if not isinstance(bid, dict):
                 continue
@@ -480,6 +497,10 @@ class SessionRoutingService:
             pps_raw = inner.get("PricePerSecond")
             provider = inner.get("Provider") or ""
             if not bid_id or pps_raw is None:
+                continue
+            bid_id_l = str(bid_id).strip().lower()
+            if bid_id_l not in healthy_ids:
+                skipped_unhealthy += 1
                 continue
             if omit and str(provider).strip().lower() == omit:
                 continue
@@ -494,6 +515,15 @@ class SessionRoutingService:
                     "provider": str(provider) if provider else None,
                     "score": bid.get("Score"),
                 }
+            )
+        if skipped_unhealthy:
+            logger.info(
+                "Filtered rated bids not healthy on active.mor.org",
+                model_id=model_id,
+                skipped_unhealthy=skipped_unhealthy,
+                kept=len(parsed),
+                active_healthy=len(healthy_ids),
+                event_type="cheapest_bid_unhealthy_filtered",
             )
         parsed.sort(key=lambda b: b["pps"])
         return parsed
