@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any, Union, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 from enum import Enum
 
@@ -54,7 +54,13 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    """OpenAI chat completion request schema"""
+    """OpenAI chat completion request schema.
+
+    Provider-specific extras (e.g. venice_parameters) are allowed for parity
+    with the live chat endpoint schema in api.v1.chat.chat_models.
+    """
+    model_config = ConfigDict(extra="allow")
+
     model: Optional[str] = None
     messages: List[ChatMessage]
     temperature: Optional[float] = 1.0

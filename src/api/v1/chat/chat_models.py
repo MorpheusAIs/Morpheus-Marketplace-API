@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ImageUrl(BaseModel):
@@ -100,8 +100,17 @@ class ToolChoice(BaseModel):
 class ChatCompletionRequest(BaseModel):
     """Request payload for chat completions.
 
-    Note: Field defaults and names must remain unchanged for API parity.
+    Known OpenAI-compatible fields are validated. Provider-specific extras
+    (e.g. ``venice_parameters``, ``stream_options``) are accepted and forwarded
+    to the proxy-router unchanged — the router already preserves unknown keys
+    via OpenAICompletionRequestExtra.
+
+    Note: Field defaults and names for the typed fields must remain unchanged
+    for API parity.
     """
+
+    # Keep typed validation for known fields; do not drop vendor extensions.
+    model_config = ConfigDict(extra="allow")
 
     model: Optional[str] = None
     messages: List[ChatMessage]
