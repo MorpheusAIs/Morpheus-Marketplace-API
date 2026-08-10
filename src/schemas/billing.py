@@ -2,7 +2,7 @@
 Pydantic schemas for billing/credits API.
 """
 from typing import Optional, List, Annotated
-from pydantic import BaseModel, Field, ConfigDict, PlainSerializer
+from pydantic import BaseModel, Field, ConfigDict, PlainSerializer, field_validator
 from datetime import datetime, date
 from decimal import Decimal
 from enum import Enum
@@ -93,6 +93,29 @@ class BalanceResponse(BaseModel):
 
 # === Ledger Entry Schemas ===
 
+# payment_metadata is a free-form JSONB column that also carries server-side-only
+# data: the fraud-control source_ip (signup bonus), internal Stripe identifiers
+# (customer_id, payment_intent_id, subscription_id, client_reference_id), Coinbase
+# settlement economics (settlement_net / settlement_fee), and the raw `payments`
+# array from legacy Coinbase charges (payer wallet addresses and tx hashes).
+# Only the descriptive keys below may leave the API; everything else is redacted.
+PUBLIC_PAYMENT_METADATA_KEYS = frozenset({
+    "type",
+    "source",
+    "checkout_session_id",
+    "invoice_id",
+    "payment_link_id",
+    "charge_code",
+    "network",
+    "currency",
+    "status",
+    "description",
+    "created_at",
+    "updated_at",
+    "expires_at",
+})
+
+
 class LedgerEntryResponse(BaseModel):
     """Response for a single ledger entry."""
     id: uuid.UUID
@@ -111,7 +134,7 @@ class LedgerEntryResponse(BaseModel):
     external_transaction_id: Optional[str] = None  # For Stripe: checkout_session_id or invoice_id
     # For Coinbase: charge_id
     # For others: their primary transaction identifier
-    payment_metadata: Optional[dict] = None  # JSONB column for provider-specific metadata
+    payment_metadata: Optional[dict] = None  # Redacted view of the JSONB column (see PUBLIC_PAYMENT_METADATA_KEYS)
     
     # Usage metadata
     request_id: Optional[str] = None
@@ -133,6 +156,15 @@ class LedgerEntryResponse(BaseModel):
     updated_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("payment_metadata", mode="before")
+    @classmethod
+    def _redact_payment_metadata(cls, value):
+        """Strip server-side-only keys (source_ip, provider internals) from API output."""
+        if not isinstance(value, dict):
+            return None
+        public = {k: v for k, v in value.items() if k in PUBLIC_PAYMENT_METADATA_KEYS}
+        return public or None
 
 
 class LedgerListResponse(BaseModel):

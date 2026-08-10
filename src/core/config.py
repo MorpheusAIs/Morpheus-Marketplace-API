@@ -218,7 +218,7 @@ class Settings(BaseSettings):
     # opens. When balance <= this value, non-warm models cannot open new
     # on-chain sessions (idle claims still succeed). Warm models skip the gate.
     # 0 DISABLES the check — ships inert; turn on per-env via secrets
-    # (prod target ~30000 MOR). Distinct from soft caps (session count vs MOR).
+    # (prod target ~15000 MOR). Distinct from soft caps (session count vs MOR).
     SESSION_MOR_LOW_WATER_MARK_MOR: float = Field(
         default=float(os.getenv("SESSION_MOR_LOW_WATER_MARK_MOR", "0"))
     )
@@ -226,6 +226,60 @@ class Settings(BaseSettings):
     # C-Node. Per-replica only.
     SESSION_MOR_BALANCE_CACHE_SECONDS: float = Field(
         default=float(os.getenv("SESSION_MOR_BALANCE_CACHE_SECONDS", "15"))
+    )
+
+    # --- Curated allowlist (APIGW taster catalog) -----------------------------
+    # Comma-separated blockchain IDs that may open on the hosted gateway after
+    # alias rewrite. Empty DISABLES (full catalog). Non-empty: anything else
+    # resolves to HTTP 503 model_unavailable + P2P off-ramp.
+    SESSION_ALLOWED_MODEL_IDS: str = Field(
+        default=os.getenv("SESSION_ALLOWED_MODEL_IDS", "")
+    )
+    # Deterministic family aliases applied BEFORE resolve/allowlist.
+    # Format: comma-separated "alias=target" (also accepts "->" / "→").
+    # Keys matched case-insensitively. Never map :web/:tee → base when a twin
+    # exists — keep Venice / SecretVM feature paths.
+    SESSION_MODEL_ALIASES: str = Field(
+        default=os.getenv("SESSION_MODEL_ALIASES", "")
+    )
+
+    # --- Max-bid PPS hard gate (standard lane) --------------------------------
+    # Refuse opens (and idle claims) when the model's HIGHEST rated bid PPS is
+    # at/above this MOR/sec threshold. Equivalent to ~175 MOR escrow for a
+    # 30-minute session under day-lock stake factor ~338:
+    #   175 / (1800 * 338) ≈ 0.00028764
+    # Warm (SESSION_PREFERRED_MODELS) and premium showcase IDs skip this gate.
+    # 0 DISABLES the gate — ships inert; enable per-env via secrets.
+    # Prefer SESSION_ALLOWED_MODEL_IDS as the primary catalog control; keep PPS
+    # as an optional backup when allowlist is empty.
+    SESSION_MAX_BID_PPS_MOR: float = Field(
+        default=float(os.getenv("SESSION_MAX_BID_PPS_MOR", "0"))
+    )
+
+    # --- Premium showcase lane ------------------------------------------------
+    # Comma-separated model blockchain IDs exempt from the PPS gate but limited
+    # by SESSION_PREMIUM_DAILY_BUDGET_MOR (day-locked MOR, UTC day). Gate uses
+    # Redis actuals (from close-tx / pro-rata) + SUM(stake_mor) on OPEN/CLOSING
+    # premium rows as holds. Soft cap still applies (DEFAULT). Empty / budget
+    # 0 disables the premium lane (IDs would then hit the PPS gate like
+    # standard models if listed).
+    SESSION_PREMIUM_MODEL_IDS: str = Field(
+        default=os.getenv("SESSION_PREMIUM_MODEL_IDS", "")
+    )
+    SESSION_PREMIUM_DAILY_BUDGET_MOR: float = Field(
+        default=float(os.getenv("SESSION_PREMIUM_DAILY_BUDGET_MOR", "0"))
+    )
+    # Kept for stake-sizing / expensive-tier docs; premium daylock meter no
+    # longer uses max_pps × elapsed × factor (that inflated Redis vs chain).
+    SESSION_STAKE_FACTOR: float = Field(
+        default=float(os.getenv("SESSION_STAKE_FACTOR", "338"))
+    )
+    # Optional: decode close-tx MOR Transfer(to=consumer) for receipt-true
+    # daylock (= stake − returned). When unset, meter falls back to
+    # stake × lived / sched from getSession. Base mainnet MOR + C-Node wallet.
+    MOR_TOKEN_ADDRESS: str | None = Field(default=os.getenv("MOR_TOKEN_ADDRESS"))
+    SESSION_CONSUMER_WALLET_ADDRESS: str | None = Field(
+        default=os.getenv("SESSION_CONSUMER_WALLET_ADDRESS")
     )
 
     # --- Expensive-model session tier ---------------------------------------

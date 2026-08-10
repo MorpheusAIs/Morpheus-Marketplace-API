@@ -1,9 +1,13 @@
-from typing import Dict, Optional
+from typing import Dict, Optional, Set, Tuple
 
 from .direct_model_service import direct_model_service
 from .config import settings
 from .logging_config import get_models_logger
-from .model_errors import ModelNearMissError, ModelTypeMismatchError
+from .model_errors import (
+    ModelNearMissError,
+    ModelNotAllowlistedError,
+    ModelTypeMismatchError,
+)
 
 # Configure logger
 logger = get_models_logger()
@@ -13,6 +17,55 @@ DEFAULT_MODEL = getattr(settings, 'DEFAULT_FALLBACK_MODEL', "mistral-31-24b")
 DEFAULT_EMBEDDINGS_MODEL = getattr(settings, 'DEFAULT_FALLBACK_EMBEDDINGS_MODEL', "text-embedding-bge-m3")
 DEFAULT_TTS_MODEL = getattr(settings, 'DEFAULT_FALLBACK_TTS_MODEL', "tts-kokoro")
 DEFAULT_STT_MODEL = getattr(settings, 'DEFAULT_FALLBACK_STT_MODEL', "whisper-1")
+
+
+def parse_model_id_csv(raw: Optional[str]) -> Set[str]:
+    """Parse a comma-separated list of model blockchain IDs."""
+    if not raw:
+        return set()
+    return {m.strip() for m in raw.split(",") if m.strip()}
+
+
+def parse_model_aliases(raw: Optional[str]) -> Dict[str, str]:
+    """Parse SESSION_MODEL_ALIASES into lowercased alias → target map.
+
+    Accepts ``alias=target``, ``alias->target``, or ``alias→target`` pairs,
+    comma-separated. Values keep their configured casing (names or 0x IDs).
+    """
+    if not raw:
+        return {}
+    out: Dict[str, str] = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        key: Optional[str] = None
+        value: Optional[str] = None
+        for sep in ("→", "->", "="):
+            if sep in part:
+                left, right = part.split(sep, 1)
+                key, value = left.strip(), right.strip()
+                break
+        if not key or not value:
+            continue
+        out[key.lower()] = value
+    return out
+
+
+def apply_model_alias(
+    requested_model: str,
+    aliases: Optional[Dict[str, str]] = None,
+) -> Tuple[str, Optional[str]]:
+    """Return (possibly rewritten name, matched alias key or None)."""
+    if aliases is None:
+        aliases = parse_model_aliases(getattr(settings, "SESSION_MODEL_ALIASES", "") or "")
+    if not aliases or not requested_model:
+        return requested_model, None
+    hit = aliases.get(requested_model.lower())
+    if hit:
+        return hit, requested_model.lower()
+    return requested_model, None
+
 
 class ModelRouter:
     """
@@ -31,6 +84,27 @@ class ModelRouter:
         logger.info("Initialized ModelRouter with DirectModelService",
                    event_type="model_router_init")
         # No initialization needed - DirectModelService handles all caching
+
+    def _allowed_model_ids(self) -> Set[str]:
+        return parse_model_id_csv(getattr(settings, "SESSION_ALLOWED_MODEL_IDS", "") or "")
+
+    def _ensure_allowlisted(self, requested_model: Optional[str], resolved_id: str) -> str:
+        """Raise ModelNotAllowlistedError when curated allowlist is active."""
+        allowed = self._allowed_model_ids()
+        if not allowed:
+            return resolved_id
+        if resolved_id in allowed:
+            return resolved_id
+        logger.warning(
+            "Resolved model is outside hosted-gateway allowlist",
+            requested_model=requested_model,
+            resolved_id=resolved_id,
+            event_type="model_not_allowlisted",
+        )
+        raise ModelNotAllowlistedError(
+            requested_model=requested_model,
+            resolved_id=resolved_id,
+        )
     
     async def get_target_model(self, requested_model: Optional[str], type: Optional[str] = "LLM") -> str:
         """
@@ -45,6 +119,7 @@ class ModelRouter:
         Raises:
             ModelTypeMismatchError: Model exists but is wrong type for the endpoint
             ModelNearMissError: Name not found, but close catalog matches exist
+            ModelNotAllowlistedError: Resolved ID outside SESSION_ALLOWED_MODEL_IDS
         """
         # return "0xe086adc275c99e32bb10b0aff5e8bfc391aad18cbb184727a75b2569149425c6"
         logger.info("Getting target model for requested model",
@@ -60,11 +135,21 @@ class ModelRouter:
             logger.info("Resolved to default model ID",
                        default_model_id=default_id,
                        event_type="default_model_resolved")
-            return default_id
+            return self._ensure_allowlisted(DEFAULT_MODEL, default_id)
+
+        aliased_model, alias_key = apply_model_alias(requested_model)
+        if alias_key:
+            logger.info(
+                "Applied model family alias",
+                requested_model=requested_model,
+                alias_key=alias_key,
+                aliased_model=aliased_model,
+                event_type="model_alias_applied",
+            )
             
         # Try to resolve using DirectModelService
         try:
-            resolved_id = await direct_model_service.resolve_model_id(requested_model)
+            resolved_id = await direct_model_service.resolve_model_id(aliased_model)
 
             # A resolved model must be usable by this endpoint type. Without
             # this check a chat completion naming an EMBEDDING model opens a
@@ -94,17 +179,20 @@ class ModelRouter:
             if resolved_id:
                 logger.info("Found model mapping",
                            requested_model=requested_model,
+                           aliased_model=aliased_model if alias_key else None,
                            resolved_id=resolved_id,
                            event_type="model_resolved")
-                return resolved_id
+                return self._ensure_allowlisted(requested_model, resolved_id)
 
             # Not found — if we have close matches, hard-fail with suggestions
             # so agents stop / alert instead of continuing on the default model.
-            # True unknowns (no near miss) still soft-fallback for operability.
+            # True unknowns (no near miss) still soft-fallback for operability
+            # unless a curated allowlist is active (then 503, no silent rewrite).
             logger.warning("Model not found in active models",
                           requested_model=requested_model,
+                          aliased_model=aliased_model if alias_key else None,
                           event_type="model_not_found")
-            suggestions = await direct_model_service.suggest_models(requested_model)
+            suggestions = await direct_model_service.suggest_models(aliased_model)
             if suggestions:
                 logger.warning("Near-miss model name; returning suggestions",
                               requested_model=requested_model,
@@ -113,6 +201,12 @@ class ModelRouter:
                 raise ModelNearMissError(
                     requested_model=requested_model,
                     suggestions=suggestions,
+                )
+
+            if self._allowed_model_ids():
+                raise ModelNotAllowlistedError(
+                    requested_model=requested_model,
+                    resolved_id=None,
                 )
 
             model_mapping = await direct_model_service.get_model_mapping()
@@ -128,13 +222,18 @@ class ModelRouter:
                           default_model_id=default_id,
                           event_type="default_model_fallback")
             return default_id
-        except (ModelTypeMismatchError, ModelNearMissError):
+        except (ModelTypeMismatchError, ModelNearMissError, ModelNotAllowlistedError):
             raise
         except Exception as e:
             logger.error("Error resolving model - using default fallback",
                         requested_model=requested_model,
                         error=str(e),
                         event_type="model_resolution_error")
+            if self._allowed_model_ids():
+                raise ModelNotAllowlistedError(
+                    requested_model=requested_model,
+                    resolved_id=None,
+                ) from e
             # Fall back to default model
             default_id = await self._get_default_model_id(type)
             logger.warning("Using default model ID due to error",

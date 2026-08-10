@@ -4,9 +4,20 @@ Sanitize error messages to prevent leaking sensitive infrastructure details.
 Strips URLs, IP addresses, hostnames with ports, API keys, and authorization
 headers from error text before it reaches API clients.  Raw (unsanitized)
 messages should still be written to logs for debugging.
+
+Public docs hosts (nodedocs / apidocs) are allowlisted so intentional
+off-ramp links in capacity/allowlist errors survive to the client.
 """
 
 import re
+
+# Public documentation hosts that are safe (and intended) in client-facing
+# error copy — e.g. P2P / self-custody off-ramp on model_unavailable.
+_ALLOWED_URL_HOSTS = (
+    "nodedocs.mor.org",
+    "nodedocs.dev",
+    "apidocs.mor.org",
+)
 
 _URL_RE = re.compile(
     r"""
@@ -48,7 +59,6 @@ _BARE_FQDN_RE = re.compile(
 )
 
 _PATTERNS: list[tuple[re.Pattern, str]] = [
-    (_URL_RE,          "[redacted-url]"),
     (_BEARER_TOKEN_RE, r"\1[redacted-token]"),
     (_AUTH_HEADER_RE,  r"\1[redacted-header]"),
     (_API_KEY_RE,      r"\1[redacted-key]"),
@@ -59,17 +69,53 @@ _PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 
+def _url_allowed(url: str) -> bool:
+    """True if URL host is an intentional public docs off-ramp."""
+    # Strip scheme for host check
+    rest = re.sub(r"^(?:https?|ftp)://", "", url, flags=re.IGNORECASE)
+    host = rest.split("/", 1)[0].split("?", 1)[0].split(":", 1)[0].lower()
+    return host in _ALLOWED_URL_HOSTS or any(
+        host.endswith(f".{h}") for h in _ALLOWED_URL_HOSTS
+    )
+
+
+def _redact_urls(text: str) -> str:
+    def repl(match: re.Match) -> str:
+        url = match.group(0)
+        return url if _url_allowed(url) else "[redacted-url]"
+
+    return _URL_RE.sub(repl, text)
+
+
+def _redact_bare_fqdn(text: str) -> str:
+    def repl(match: re.Match) -> str:
+        host = match.group(0).lower()
+        if host in _ALLOWED_URL_HOSTS or any(
+            host.endswith(f".{h}") for h in _ALLOWED_URL_HOSTS
+        ):
+            return match.group(0)
+        return "[redacted-host]"
+
+    return _BARE_FQDN_RE.sub(repl, text)
+
+
 def sanitize_error_message(raw: str) -> str:
     """Return *raw* with sensitive infrastructure details redacted.
 
     Designed to be cheap (sub-microsecond on typical error strings) and
     safe to call on every error path.  Only the *client-facing* message
     should be sanitized -- keep writing the original to logs.
+
+    Public docs URLs/hosts (nodedocs.mor.org, apidocs.mor.org) are kept so
+    hosted-gateway off-ramp copy can point users at self-custody docs.
     """
     if not raw:
         return raw
 
-    result = raw
+    result = _redact_urls(raw)
     for pattern, replacement in _PATTERNS:
-        result = pattern.sub(replacement, result)
+        if pattern is _BARE_FQDN_RE:
+            result = _redact_bare_fqdn(result)
+        else:
+            result = pattern.sub(replacement, result)
     return result
