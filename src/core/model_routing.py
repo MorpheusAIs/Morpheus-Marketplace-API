@@ -4,10 +4,12 @@ from .direct_model_service import direct_model_service
 from .config import settings
 from .logging_config import get_models_logger
 from .model_errors import (
+    ModelDeniedError,
     ModelNearMissError,
     ModelNotAllowlistedError,
     ModelTypeMismatchError,
 )
+from .session_routing_policy import get_session_routing_policy
 
 # Configure logger
 logger = get_models_logger()
@@ -52,13 +54,21 @@ def parse_model_aliases(raw: Optional[str]) -> Dict[str, str]:
     return out
 
 
+def _effective_aliases() -> Dict[str, str]:
+    """Prefer JSON policy aliases; fall back to legacy CSV SESSION_MODEL_ALIASES."""
+    policy = get_session_routing_policy()
+    if policy.aliases:
+        return dict(policy.aliases)
+    return parse_model_aliases(getattr(settings, "SESSION_MODEL_ALIASES", "") or "")
+
+
 def apply_model_alias(
     requested_model: str,
     aliases: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, Optional[str]]:
     """Return (possibly rewritten name, matched alias key or None)."""
     if aliases is None:
-        aliases = parse_model_aliases(getattr(settings, "SESSION_MODEL_ALIASES", "") or "")
+        aliases = _effective_aliases()
     if not aliases or not requested_model:
         return requested_model, None
     hit = aliases.get(requested_model.lower())
@@ -105,7 +115,45 @@ class ModelRouter:
             requested_model=requested_model,
             resolved_id=resolved_id,
         )
-    
+
+    async def _ensure_not_denied(
+        self,
+        requested_model: Optional[str],
+        resolved_id: str,
+    ) -> str:
+        """Raise ModelDeniedError when resolved identity is on the deny list."""
+        policy = get_session_routing_policy()
+        native_name = await direct_model_service.get_model_name_from_id(resolved_id)
+        if (
+            policy.is_denied_id(resolved_id)
+            or policy.is_denied_name(requested_model)
+            or policy.is_denied_name(native_name)
+        ):
+            logger.warning(
+                "Resolved model is on hosted-gateway deny list",
+                requested_model=requested_model,
+                resolved_id=resolved_id,
+                resolved_model=native_name,
+                event_type="model_denied",
+            )
+            raise ModelDeniedError(
+                requested_model=requested_model,
+                resolved_id=resolved_id,
+                resolved_model=native_name,
+            )
+        return resolved_id
+
+    async def _resolve_preference_or_name(self, label: str) -> Optional[str]:
+        """Resolve a preference/alias target that may already be a 0x ID."""
+        if not label:
+            return None
+        if label.startswith("0x") and len(label) >= 10:
+            # Prefer exact blockchain id when configured.
+            ids = await direct_model_service.get_blockchain_ids()
+            if label in ids:
+                return label
+        return await direct_model_service.resolve_model_id(label)
+
     async def get_target_model(self, requested_model: Optional[str], type: Optional[str] = "LLM") -> str:
         """
         Get the target blockchain ID for the requested model.
@@ -146,10 +194,28 @@ class ModelRouter:
                 aliased_model=aliased_model,
                 event_type="model_alias_applied",
             )
-            
-        # Try to resolve using DirectModelService
+
+        policy = get_session_routing_policy()
+        preference_target = (
+            policy.preference_target(requested_model)
+            or policy.preference_target(aliased_model)
+        )
+        if preference_target:
+            logger.info(
+                "Applied model preference",
+                requested_model=requested_model,
+                preference_target=preference_target,
+                event_type="model_preference_applied",
+            )
+
+        # Try to resolve using DirectModelService (preferences win on collisions).
         try:
-            resolved_id = await direct_model_service.resolve_model_id(aliased_model)
+            if preference_target:
+                resolved_id = await self._resolve_preference_or_name(preference_target)
+            elif aliased_model.startswith("0x"):
+                resolved_id = await self._resolve_preference_or_name(aliased_model)
+            else:
+                resolved_id = await direct_model_service.resolve_model_id(aliased_model)
 
             # A resolved model must be usable by this endpoint type. Without
             # this check a chat completion naming an EMBEDDING model opens a
@@ -180,8 +246,10 @@ class ModelRouter:
                 logger.info("Found model mapping",
                            requested_model=requested_model,
                            aliased_model=aliased_model if alias_key else None,
+                           preference_target=preference_target,
                            resolved_id=resolved_id,
                            event_type="model_resolved")
+                await self._ensure_not_denied(requested_model, resolved_id)
                 return self._ensure_allowlisted(requested_model, resolved_id)
 
             # Not found — if we have close matches, hard-fail with suggestions
@@ -222,7 +290,12 @@ class ModelRouter:
                           default_model_id=default_id,
                           event_type="default_model_fallback")
             return default_id
-        except (ModelTypeMismatchError, ModelNearMissError, ModelNotAllowlistedError):
+        except (
+            ModelTypeMismatchError,
+            ModelNearMissError,
+            ModelNotAllowlistedError,
+            ModelDeniedError,
+        ):
             raise
         except Exception as e:
             logger.error("Error resolving model - using default fallback",

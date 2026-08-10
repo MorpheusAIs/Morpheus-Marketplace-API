@@ -22,6 +22,7 @@ from .session_routing_service import (
     SessionPriceGateError,
     SessionPremiumBudgetError,
     SessionAllowlistError,
+    SessionStakeFuseError,
 )
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     "SessionPriceGateError",
     "SessionPremiumBudgetError",
     "SessionAllowlistError",
+    "SessionStakeFuseError",
 ]
