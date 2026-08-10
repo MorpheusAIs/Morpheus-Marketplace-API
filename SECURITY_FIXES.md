@@ -79,7 +79,7 @@ split, shielded cleanup), so we split them:
     `finalize_usage` return early on `status == voided`, and add a startup assertion
     that `HOLD_MAX_PENDING_SECONDS > proxy_timeout` so the safety gap can't be
     misconfigured away.
-- **Commit:** `8c80441`
+- **Commit:** `fd57759`
 
 ---
 
