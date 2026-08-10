@@ -239,8 +239,14 @@ class Settings(BaseSettings):
     # Format: comma-separated "alias=target" (also accepts "->" / "→").
     # Keys matched case-insensitively. Never map :web/:tee → base when a twin
     # exists — keep Venice / SecretVM feature paths.
+    # Prefer SESSION_ROUTING_POLICY_JSON.aliases when that env is set.
     SESSION_MODEL_ALIASES: str = Field(
         default=os.getenv("SESSION_MODEL_ALIASES", "")
+    )
+    # Open-native routing policy JSON: aliases, preferences, deny, max_stake_mor.
+    # See Morpheus-Infra session_routing_policy + APIGW_MOR_LANES.md.
+    SESSION_ROUTING_POLICY_JSON: str = Field(
+        default=os.getenv("SESSION_ROUTING_POLICY_JSON", "")
     )
 
     # --- Max-bid PPS hard gate (standard lane) --------------------------------
