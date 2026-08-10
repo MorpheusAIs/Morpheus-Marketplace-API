@@ -28,6 +28,7 @@ from ..db.models import RoutedSession, SessionState
 from ..db.database import get_db, advisory_xact_lock
 from ..core.config import settings
 from ..core.model_routing import model_router
+from ..core.session_routing_policy import get_session_routing_policy
 from ..core.logging_config import get_api_logger
 from ..services import proxy_router_service
 
@@ -87,7 +88,7 @@ class SessionGatewayCapacityError(SessionRoutingError):
         category: str = "capacity",
     ):
         super().__init__(message, model_id=model_id)
-        self.category = category  # warm_reserve | price_gate | premium_budget
+        self.category = category  # warm_reserve | price_gate | premium_budget | stake_fuse
 
 
 class SessionMorReservedError(SessionGatewayCapacityError):
@@ -142,6 +143,23 @@ class SessionAllowlistError(SessionGatewayCapacityError):
 
     def __init__(self, message: str, model_id: Optional[str] = None):
         super().__init__(message, model_id=model_id, category="allowlist")
+
+
+class SessionStakeFuseError(SessionGatewayCapacityError):
+    """Raised when the cheapest openable bid stake exceeds max_stake_mor."""
+
+    def __init__(
+        self,
+        message: str,
+        model_id: Optional[str] = None,
+        stake_mor: float = 0,
+        max_stake_mor: float = 0,
+        bid_id: Optional[str] = None,
+    ):
+        super().__init__(message, model_id=model_id, category="stake_fuse")
+        self.stake_mor = stake_mor
+        self.max_stake_mor = max_stake_mor
+        self.bid_id = bid_id
 
 
 class SessionRoutingService:
@@ -388,6 +406,9 @@ class SessionRoutingService:
         Missing price (lookup failure / no bids) fails open so we don't brick
         routing when the C-Node bid read is unavailable — soft-cap / open will
         still fail naturally if there is no usable bid.
+
+        Prefer SESSION_ROUTING_POLICY_JSON.max_stake_mor (chosen-bid fuse).
+        This PPS gate remains as an optional legacy backup.
         """
         gate = float(settings.SESSION_MAX_BID_PPS_MOR or 0)
         if gate <= 0:
@@ -413,6 +434,133 @@ class SessionRoutingService:
                 max_pps=max_pps,
                 gate_pps=gate,
             )
+
+    def _session_duration_for_open(self, is_expensive: bool) -> int:
+        if is_expensive:
+            return int(settings.SESSION_EXPENSIVE_DEFAULT_DURATION_SECONDS)
+        return int(settings.SESSION_DEFAULT_DURATION_SECONDS)
+
+    def _stake_mor_for_pps(self, pps_mor: float, session_duration: int) -> float:
+        factor = float(settings.SESSION_STAKE_FACTOR or 338)
+        return float(pps_mor) * float(session_duration) * factor
+
+    async def _list_rated_bids_cheapest_first(
+        self,
+        model_id: str,
+        omit_provider: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Rated bids for model, cheapest PPS first (proxy rates by score, not price)."""
+        try:
+            response = await proxy_router_service.getRatedBids(model_id)
+            result = response.json()
+            if isinstance(result, dict):
+                bids = result.get("bids", []) or []
+            elif isinstance(result, list):
+                bids = result
+            else:
+                bids = []
+        except Exception as e:
+            logger.warning(
+                "Rated-bid list failed for cheapest-bid selection",
+                model_id=model_id,
+                error=str(e),
+                event_type="cheapest_bid_lookup_error",
+            )
+            return []
+
+        omit = (omit_provider or "").strip().lower()
+        parsed: List[Dict[str, Any]] = []
+        for bid in bids:
+            if not isinstance(bid, dict):
+                continue
+            inner = bid.get("Bid") if isinstance(bid.get("Bid"), dict) else bid
+            if not isinstance(inner, dict):
+                continue
+            bid_id = inner.get("Id") or inner.get("ID") or bid.get("ID") or bid.get("Id")
+            pps_raw = inner.get("PricePerSecond")
+            provider = inner.get("Provider") or ""
+            if not bid_id or pps_raw is None:
+                continue
+            if omit and str(provider).strip().lower() == omit:
+                continue
+            try:
+                pps = int(str(pps_raw)) / 1e18
+            except (ValueError, TypeError):
+                continue
+            parsed.append(
+                {
+                    "bid_id": str(bid_id),
+                    "pps": pps,
+                    "provider": str(provider) if provider else None,
+                    "score": bid.get("Score"),
+                }
+            )
+        parsed.sort(key=lambda b: b["pps"])
+        return parsed
+
+    async def _select_cheapest_bid_under_fuse(
+        self,
+        model_id: str,
+        session_duration: int,
+        omit_provider: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Pick cheapest rated bid whose implied stake is under max_stake_mor.
+
+        max_stake_mor 0 disables the fuse (still returns cheapest rated bid).
+        Raises SessionStakeFuseError when every rated bid is over the fuse.
+        Raises SessionOpenError when no rated bids are available.
+        """
+        policy = get_session_routing_policy()
+        max_stake = float(policy.max_stake_mor or 0)
+        bids = await self._list_rated_bids_cheapest_first(
+            model_id, omit_provider=omit_provider
+        )
+        if not bids:
+            raise SessionOpenError(
+                "No rated bids available for model",
+                model_id=model_id,
+            )
+
+        under: List[Dict[str, Any]] = []
+        for bid in bids:
+            stake = self._stake_mor_for_pps(bid["pps"], session_duration)
+            row = {**bid, "stake_mor": stake, "session_duration": session_duration}
+            if max_stake <= 0 or stake <= max_stake:
+                under.append(row)
+
+        if not under:
+            cheapest = bids[0]
+            stake = self._stake_mor_for_pps(cheapest["pps"], session_duration)
+            logger.warning(
+                "Cheapest rated bid exceeds max stake fuse",
+                model_id=model_id,
+                bid_id=cheapest["bid_id"],
+                stake_mor=round(stake, 6),
+                max_stake_mor=max_stake,
+                session_duration=session_duration,
+                event_type="session_stake_fuse_refused",
+            )
+            raise SessionStakeFuseError(
+                "This model is too expensive for the hosted API Gateway right now. "
+                + P2P_OFFRAMP_HINT,
+                model_id=model_id,
+                stake_mor=stake,
+                max_stake_mor=max_stake,
+                bid_id=str(cheapest["bid_id"]),
+            )
+
+        chosen = under[0]
+        logger.info(
+            "Selected cheapest rated bid under stake fuse",
+            model_id=model_id,
+            bid_id=chosen["bid_id"],
+            pps=chosen["pps"],
+            stake_mor=round(float(chosen["stake_mor"]), 6),
+            max_stake_mor=max_stake,
+            candidate_count=len(under),
+            event_type="cheapest_bid_selected",
+        )
+        return chosen
 
     async def _get_premium_daylock_spent(self) -> Optional[float]:
         """UTC-day premium daylock spent (MOR), or None if unreadable."""
@@ -1307,7 +1455,8 @@ class SessionRoutingService:
         # automation / preferred scale-up enters directly). Cap/watermark/
         # PPS/budget 0 = disabled for that gate. Warm skips LWM + PPS; premium
         # skips PPS but is limited by daily daylock budget. Empty allowlist
-        # disables curated-catalog refusal.
+        # disables curated-catalog refusal. Stake fuse runs on the chosen bid
+        # immediately before open (all lanes).
         await self._ensure_allowlist_allows_open(model_id)
         await self._ensure_soft_cap_allows_open(model_id)
         await self._ensure_mor_low_water_allows_open(model_id)
@@ -1320,14 +1469,18 @@ class SessionRoutingService:
         # if the tier is disabled or the price can't be read, use the global
         # default duration.
         is_expensive = await self._is_expensive_model(model_id)
-        session_duration = (
-            settings.SESSION_EXPENSIVE_DEFAULT_DURATION_SECONDS
-            if is_expensive
-            else settings.SESSION_DEFAULT_DURATION_SECONDS
+        session_duration = self._session_duration_for_open(is_expensive)
+        chosen_bid = await self._select_cheapest_bid_under_fuse(
+            model_id=model_id,
+            session_duration=session_duration,
+            omit_provider=omit_provider,
         )
+        bid_id = str(chosen_bid["bid_id"])
         open_logger = open_logger.bind(
             expensive_tier=is_expensive,
             session_duration=session_duration,
+            bid_id=bid_id,
+            selected_stake_mor=round(float(chosen_bid["stake_mor"]), 6),
         )
         # Fallback ONLY. The authoritative expiry is the actual on-chain endsAt,
         # read back after the open (see below). This call-start estimate is used
@@ -1341,9 +1494,9 @@ class SessionRoutingService:
         )
 
         try:
-            # Call proxy router to open session
-            # Uses user's private key if provided, otherwise uses fallback key
-            open_logger.info("Calling proxy router to open session",
+            # Open the specific cheapest-under-fuse bid (not model-level open,
+            # which ranks by proxy score and can pick an expensive peer).
+            open_logger.info("Calling proxy router to open session by bid",
                            user_id=user_id,
                            event_type="proxy_open_session_start")
 
@@ -1353,14 +1506,11 @@ class SessionRoutingService:
             # uses its own short-lived session), so a throttled queue can grow
             # without exhausting the DB pool.
             response = await self._run_onchain(
-                lambda: proxy_router_service.openSession(
-                    target_model=model_id,
+                lambda: proxy_router_service.openSessionByBid(
+                    bid_id=bid_id,
                     session_duration=session_duration,
-                    failover=False,
-                    direct_payment=False,
-                    omit_provider=omit_provider,
                 ),
-                op_name="openSession",
+                op_name="openSessionByBid",
                 op_logger=open_logger,
             )
 

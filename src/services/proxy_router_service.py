@@ -690,6 +690,51 @@ async def createBidSession(
         raise ProxyRouterServiceError(f"Failed to create bid session: {str(e)}")
 
 
+async def openSessionByBid(
+    *,
+    bid_id: str,
+    session_duration: int = 3600,
+) -> Dict[str, Any]:
+    """Open a session on a specific bid (cheapest-bid path for APIGW)."""
+    if not bid_id or not str(bid_id).startswith("0x"):
+        raise ProxyRouterServiceError(
+            f"Invalid bid ID format: {bid_id}. Expected hex string starting with '0x'",
+            status_code=400,
+            error_type="validation_error",
+        )
+
+    logger.info(
+        "Opening proxy router session by bid",
+        bid_id=bid_id,
+        session_duration=session_duration,
+        event_type="bid_session_open_start",
+    )
+    try:
+        response = await _execute_request(
+            "POST",
+            f"blockchain/bids/{bid_id}/session",
+            headers={"Content-Type": "application/json"},
+            json_data={"sessionDuration": session_duration},
+            max_retries=3,
+        )
+        result = response.json()
+        logger.info(
+            "Bid session opened successfully",
+            bid_id=bid_id,
+            session_id=result.get("sessionID"),
+            event_type="bid_session_opened",
+        )
+        return result
+    except Exception as e:
+        logger.error(
+            "Error opening session by bid",
+            bid_id=bid_id,
+            error=str(e),
+            event_type="bid_session_open_error",
+        )
+        raise ProxyRouterServiceError(f"Failed to open bid session: {str(e)}")
+
+
 async def getModels(headers: Optional[Dict[str, str]] = None) -> httpx.Response:
     """Call the proxy router /v1/models endpoint and return the response.
 
