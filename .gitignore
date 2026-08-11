@@ -64,4 +64,7 @@ logs/
 debug_log.txt
 
 # Local configuration
-config.local.json 
+config.local.json
+
+# Internal security tracker (kept local, not shipped in the branch)
+SECURITY_FIXES.md 
