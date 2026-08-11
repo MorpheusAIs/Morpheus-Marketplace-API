@@ -29,6 +29,11 @@ if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
 
 
+# Rough chars-per-token ratio, kept consistent with TokenEstimationService so
+# that fallback (disconnect) billing lines up with the original hold estimate.
+_CHARS_PER_TOKEN = 4
+
+
 @dataclass
 class StreamingBillingParams:
     """Parameters for streaming billing integration."""
@@ -53,12 +58,64 @@ class StreamingUsageAccumulator:
     model_name: Optional[str] = None
     model_id: Optional[str] = None
     endpoint: str = "/v1/chat/completions"
+    # True once the provider's authoritative usage chunk has been seen.
+    provider_usage_seen: bool = False
+    # Characters of assistant content actually forwarded to the client. Used to
+    # bill delivered output when the provider usage chunk never arrives (e.g. a
+    # mid-stream client disconnect) instead of voiding the hold for free.
+    delivered_chars: int = 0
+    # Carry-over for SSE lines split across raw byte chunks.
+    _sse_buffer: str = ""
 
     def update_from_usage(self, usage: dict) -> None:
         """Update accumulated tokens from provider usage dict."""
         self.tokens_input = usage.get("prompt_tokens", self.tokens_input)
         self.tokens_output = usage.get("completion_tokens", self.tokens_output)
         self.tokens_total = usage.get("total_tokens", self.tokens_input + self.tokens_output)
+        self.provider_usage_seen = True
+
+    def note_delivered_chunk(self, chunk_bytes: bytes) -> None:
+        """Measure assistant content forwarded to the client for fallback billing.
+
+        Parses complete ``data:`` SSE lines and sums the length of any
+        ``choices[].delta.content`` strings. Partial trailing lines are buffered
+        until the rest arrives. This is a best-effort estimate (used only when
+        the provider never sends a final usage chunk), not an authoritative count.
+        """
+        try:
+            self._sse_buffer += chunk_bytes.decode("utf-8", errors="replace")
+        except Exception:
+            return
+
+        # Process complete lines only; keep any trailing partial line buffered.
+        lines = self._sse_buffer.split("\n")
+        self._sse_buffer = lines.pop()
+
+        for line in lines:
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            for choice in data.get("choices", []) or []:
+                delta = choice.get("delta") or {}
+                content = delta.get("content")
+                if isinstance(content, str):
+                    self.delivered_chars += len(content)
+
+    @property
+    def measured_output_tokens(self) -> int:
+        """Fallback output-token estimate from delivered content."""
+        return self.delivered_chars // _CHARS_PER_TOKEN
+
+    def has_billable_output(self) -> bool:
+        """True if any output was delivered (authoritative or measured)."""
+        return self.tokens_output > 0 or self.measured_output_tokens > 0
 
 
 @dataclass
@@ -128,17 +185,34 @@ async def _finalize_streaming_billing(
     ledger_entry_id: uuid.UUID,
     accumulator: StreamingUsageAccumulator,
     logger: "BoundLogger",
+    estimated_input_tokens: int = 0,
     rate_limit_user_id: Optional[str] = None,
     request_id: Optional[str] = None,
+    partial: bool = False,
 ) -> None:
-    """Finalize billing after successful stream completion and record actual token usage for rate limiting."""
+    """Finalize billing after a stream ends and record token usage for rate limiting.
+
+    When the provider sent its authoritative usage chunk we bill those counts.
+    When it did not (e.g. the client disconnected mid-stream), we fall back to
+    the output measured from delivered content plus the request's input estimate,
+    so delivered inference is billed rather than voided.
+    """
+    if accumulator.provider_usage_seen:
+        tokens_input = accumulator.tokens_input
+        tokens_output = accumulator.tokens_output
+        tokens_total = accumulator.tokens_total
+    else:
+        tokens_input = estimated_input_tokens
+        tokens_output = accumulator.measured_output_tokens
+        tokens_total = tokens_input + tokens_output
+
     try:
         async with get_db() as db:
             finalize_request = UsageFinalizeRequest(
                 ledger_entry_id=ledger_entry_id,
-                tokens_input=accumulator.tokens_input,
-                tokens_output=accumulator.tokens_output,
-                tokens_total=accumulator.tokens_total,
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
+                tokens_total=tokens_total,
                 model_name=accumulator.model_name,
                 model_id=accumulator.model_id,
                 endpoint=accumulator.endpoint,
@@ -147,26 +221,28 @@ async def _finalize_streaming_billing(
 
             logger.info(
                 "Streaming billing finalized",
-                tokens_input=accumulator.tokens_input,
-                tokens_output=accumulator.tokens_output,
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
                 amount_total=str(response.amount_total),
+                partial=partial,
+                provider_usage_seen=accumulator.provider_usage_seen,
                 event_type="streaming_billing_finalized",
             )
 
         # Record actual token usage for rate limiting
-        if rate_limit_user_id and accumulator.tokens_total > 0:
+        if rate_limit_user_id and tokens_total > 0:
             await rate_limit_service.record_token_usage(
                 user_id=rate_limit_user_id,
-                input_tokens=accumulator.tokens_input,
-                output_tokens=accumulator.tokens_output,
+                input_tokens=tokens_input,
+                output_tokens=tokens_output,
                 model=accumulator.model_name,
                 request_id=request_id,
             )
             logger.debug(
                 "Recorded actual streaming token usage for rate limiting",
-                tokens_input=accumulator.tokens_input,
-                tokens_output=accumulator.tokens_output,
-                tokens_total=accumulator.tokens_total,
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
+                tokens_total=tokens_total,
                 event_type="rate_limit_streaming_tokens_recorded",
             )
 
@@ -245,14 +321,23 @@ async def _stream_cleanup(
         )
 
     if billing_enabled and ledger_entry_id and billing_params:
-        if stream_completed_successfully and accumulator:
+        # Bill whenever output was actually delivered — either a clean completion
+        # or a mid-stream disconnect that still streamed content. Only void when
+        # nothing billable reached the client (e.g. a pre-first-token failure),
+        # so a disconnect can't be used to get delivered inference for free.
+        billable = accumulator is not None and (
+            stream_completed_successfully or accumulator.has_billable_output()
+        )
+        if billable:
             await _finalize_streaming_billing(
                 user_id=billing_params.user_id,
                 ledger_entry_id=ledger_entry_id,
                 accumulator=accumulator,
+                estimated_input_tokens=billing_params.estimated_input_tokens,
                 logger=logger,
                 rate_limit_user_id=billing_params.rate_limit_user_id,
                 request_id=billing_params.request_id,
+                partial=not stream_completed_successfully,
             )
         else:
             await _void_streaming_billing(
@@ -503,6 +588,11 @@ async def _process_stream_request(
 
             async for chunk_bytes in response.aiter_bytes():
                 chunk_count += 1
+
+                if accumulator:
+                    # Measure delivered content on every chunk so a mid-stream
+                    # disconnect can still be billed for what was streamed.
+                    accumulator.note_delivered_chunk(chunk_bytes)
 
                 if accumulator and b"usage_from_provider" in chunk_bytes:
                     usage = parse_sse_usage(chunk_bytes)

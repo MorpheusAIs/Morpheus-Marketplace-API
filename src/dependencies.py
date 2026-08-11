@@ -394,22 +394,19 @@ async def _build_auth_from_cache(
     """Construct APIKeyAuth from a cache hit, with hash verification."""
 
     # ── Key verification ────────────────────────────────────────────────
-    if cached_data.get("encrypted_key") is not None:
-        # Modern key – full hash verification
-        if not verify_api_key(raw_key, cached_data.get("hashed_key")):
-            auth_logger.error("Cached API key hash validation failed",
-                             key_prefix=key_prefix,
-                             event_type="cached_api_key_validation_failed")
-            await cache_service.delete("api_key", key_prefix)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid API key",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-    else:
-        auth_logger.debug("Legacy API key verified (cached, prefix-only)",
-                        key_prefix=key_prefix,
-                        event_type="cached_legacy_api_key_verified")
+    # Always verify the SHA-256 hash. Legacy prefix-only authentication (rows
+    # with encrypted_key IS NULL) has been removed: the displayed 9-char prefix
+    # must never be sufficient to authenticate (B-09).
+    if not verify_api_key(raw_key, cached_data.get("hashed_key")):
+        auth_logger.error("Cached API key hash validation failed",
+                         key_prefix=key_prefix,
+                         event_type="cached_api_key_validation_failed")
+        await cache_service.delete("api_key", key_prefix)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     # ── Reject revoked keys / inactive users (cache path) ───────────────
     # A revoked key whose cache entry is still warm (e.g. invalidation lost, or
@@ -497,20 +494,18 @@ async def _build_auth_from_db(
             )
 
         # ── Verify hash ────────────────────────────────────────────────
-        if db_api_key.encrypted_key is not None:
-            if not verify_api_key(raw_key, db_api_key.hashed_key):
-                auth_logger.error("API key hash validation failed",
-                                 key_prefix=key_prefix,
-                                 event_type="api_key_validation_failed")
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid API key",
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-        else:
-            auth_logger.info("Legacy API key verified (prefix-only)",
-                           key_prefix=key_prefix,
-                           event_type="legacy_api_key_verified")
+        # Always verify the SHA-256 hash. Legacy prefix-only authentication has
+        # been removed so the displayed prefix can never authenticate on its
+        # own (B-09).
+        if not verify_api_key(raw_key, db_api_key.hashed_key):
+            auth_logger.error("API key hash validation failed",
+                             key_prefix=key_prefix,
+                             event_type="api_key_validation_failed")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
         # ── Reject revoked keys ─────────────────────────────────────────
         # Checked before update_last_used and before the write-through cache,
