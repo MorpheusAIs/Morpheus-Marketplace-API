@@ -19,7 +19,7 @@ import random
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Optional, Dict, Any, List
+from typing import Awaitable, Callable, Optional, Dict, Any, List, Set
 
 from sqlalchemy import select, update, func, and_, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +34,28 @@ from ..core.logging_config import get_api_logger
 from ..services import proxy_router_service
 
 logger = get_api_logger()
+
+# OpenSessionByBid failures where the next cheapest healthy bid may succeed.
+# Deliberately excludes nonce conflicts (wallet throttle handles those) and
+# stake/policy/auth errors (walking peers will not help).
+_OPEN_BID_WALK_RETRYABLE_PATTERNS = (
+    "no capacity",
+    "out of capacity",
+    "at capacity",
+    "capacity",
+    "overloaded",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "service unavailable",
+    "provider not found",
+    "failed to connect",
+    "connection refused",
+    "connection reset",
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+)
 
 
 class SessionRoutingError(Exception):
@@ -214,6 +236,12 @@ class SessionRoutingService:
         # Per-replica fallback for premium daylock counters when Redis is down.
         # Keyed by UTC date string -> spent MOR. Prefer Redis in multi-replica.
         self._premium_daylock_local: Dict[str, float] = {}
+
+        # Per-replica open-capacity cool-off: model_id:provider -> monotonic expiry.
+        # After InitiateSession returns no_capacity / unreachable, skip that
+        # provider for SESSION_OPEN_PROVIDER_COOLDOWN_SECONDS so we keep moving
+        # down the cheapest-healthy list instead of re-hitting a full host.
+        self._provider_open_cooldown: Dict[str, float] = {}
 
         logger.info("SessionRoutingService initialized",
                    event_type="session_routing_service_init")
@@ -528,15 +556,60 @@ class SessionRoutingService:
         parsed.sort(key=lambda b: b["pps"])
         return parsed
 
-    async def _select_cheapest_bid_under_fuse(
+    def _provider_cooldown_key(self, model_id: str, provider: str) -> str:
+        return f"{(model_id or '').strip().lower()}:{(provider or '').strip().lower()}"
+
+    def _mark_provider_open_cooldown(self, model_id: str, provider: Optional[str]) -> None:
+        """Cool off a provider after a capacity/unreachable open failure."""
+        if not provider:
+            return
+        ttl = float(getattr(settings, "SESSION_OPEN_PROVIDER_COOLDOWN_SECONDS", 0) or 0)
+        if ttl <= 0:
+            return
+        key = self._provider_cooldown_key(model_id, provider)
+        self._provider_open_cooldown[key] = time.monotonic() + ttl
+        # Opportunistic prune of expired entries so the dict cannot grow without bound.
+        now = time.monotonic()
+        expired = [k for k, until in self._provider_open_cooldown.items() if until <= now]
+        for k in expired:
+            self._provider_open_cooldown.pop(k, None)
+
+    def _provider_on_open_cooldown(self, model_id: str, provider: Optional[str]) -> bool:
+        if not provider:
+            return False
+        key = self._provider_cooldown_key(model_id, provider)
+        until = self._provider_open_cooldown.get(key)
+        if until is None:
+            return False
+        if until <= time.monotonic():
+            self._provider_open_cooldown.pop(key, None)
+            return False
+        return True
+
+    @staticmethod
+    def _is_open_bid_walk_retryable(exc: BaseException) -> bool:
+        """True when InitiateSession failure may succeed on the next peer bid."""
+        if proxy_router_service.is_nonce_error(str(exc)):
+            return False
+        message = str(exc).lower()
+        if any(p in message for p in _OPEN_BID_WALK_RETRYABLE_PATTERNS):
+            return True
+        if isinstance(exc, proxy_router_service.ProxyRouterServiceError):
+            if exc.error_type in ("network_error", "timeout_error"):
+                return True
+            if exc.status_code in (429, 503):
+                return True
+        return False
+
+    async def _list_bids_under_fuse(
         self,
         model_id: str,
         session_duration: int,
         omit_provider: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Pick cheapest rated bid whose implied stake is under max_stake_mor.
+    ) -> List[Dict[str, Any]]:
+        """Rated healthy bids under max_stake_mor, cheapest PPS first.
 
-        max_stake_mor 0 disables the fuse (still returns cheapest rated bid).
+        max_stake_mor 0 disables the fuse (returns all rated healthy bids).
         Raises SessionStakeFuseError when every rated bid is over the fuse.
         Raises SessionOpenError when no rated bids are available.
         """
@@ -578,8 +651,23 @@ class SessionRoutingService:
                 max_stake_mor=max_stake,
                 bid_id=str(cheapest["bid_id"]),
             )
+        return under
 
+    async def _select_cheapest_bid_under_fuse(
+        self,
+        model_id: str,
+        session_duration: int,
+        omit_provider: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Pick cheapest rated bid whose implied stake is under max_stake_mor."""
+        under = await self._list_bids_under_fuse(
+            model_id=model_id,
+            session_duration=session_duration,
+            omit_provider=omit_provider,
+        )
         chosen = under[0]
+        policy = get_session_routing_policy()
+        max_stake = float(policy.max_stake_mor or 0)
         logger.info(
             "Selected cheapest rated bid under stake fuse",
             model_id=model_id,
@@ -1462,8 +1550,9 @@ class SessionRoutingService:
                 to its caller (never momentarily idle / claimable by another
                 request between insert and use); the automation path passes 0 to
                 create an idle, pre-warmed session.
-            omit_provider: Provider address to exclude from the proxy-router's
-                bid selection (failover away from an impaired provider).
+            omit_provider: Optional provider to seed the omit set (chat HA
+                failover). Open-time capacity walk accumulates further
+                providers into that set so we never ping-pong within one open.
 
         Returns:
             str: The blockchain session id of the newly opened session.
@@ -1500,17 +1589,18 @@ class SessionRoutingService:
         # default duration.
         is_expensive = await self._is_expensive_model(model_id)
         session_duration = self._session_duration_for_open(is_expensive)
-        chosen_bid = await self._select_cheapest_bid_under_fuse(
+        # Frozen cheapest-first candidate list (healthy + under stake fuse).
+        # Walk with an accumulating omit set so capacity failures never
+        # ping-pong A↔B within one open; cool-off spans subsequent opens.
+        candidates = await self._list_bids_under_fuse(
             model_id=model_id,
             session_duration=session_duration,
             omit_provider=omit_provider,
         )
-        bid_id = str(chosen_bid["bid_id"])
         open_logger = open_logger.bind(
             expensive_tier=is_expensive,
             session_duration=session_duration,
-            bid_id=bid_id,
-            selected_stake_mor=round(float(chosen_bid["stake_mor"]), 6),
+            candidate_count=len(candidates),
         )
         # Fallback ONLY. The authoritative expiry is the actual on-chain endsAt,
         # read back after the open (see below). This call-start estimate is used
@@ -1523,111 +1613,187 @@ class SessionRoutingService:
             datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=session_duration)
         )
 
-        try:
-            # Open the specific cheapest-under-fuse bid (not model-level open,
-            # which ranks by proxy score and can pick an expensive peer).
-            open_logger.info("Calling proxy router to open session by bid",
-                           user_id=user_id,
-                           event_type="proxy_open_session_start")
+        omitted: Set[str] = set()
+        if omit_provider:
+            omitted.add(omit_provider.strip().lower())
+        max_attempts = max(
+            1, int(getattr(settings, "SESSION_OPEN_BID_WALK_MAX_ATTEMPTS", 3) or 3)
+        )
+        attempts = 0
+        last_proxy_error: Optional[BaseException] = None
+        skipped_cooldown = 0
 
-            # Adaptive throttle: open concurrently on the happy path; serialize
-            # on the wallet lock only while throttled (after a nonce conflict).
-            # No DB connection is held across this call (the row insert below
-            # uses its own short-lived session), so a throttled queue can grow
-            # without exhausting the DB pool.
-            response = await self._run_onchain(
-                lambda: proxy_router_service.openSessionByBid(
-                    bid_id=bid_id,
-                    session_duration=session_duration,
-                ),
-                op_name="openSessionByBid",
-                op_logger=open_logger,
+        for chosen_bid in candidates:
+            provider = (chosen_bid.get("provider") or "").strip()
+            provider_l = provider.lower()
+            if provider_l and provider_l in omitted:
+                continue
+            if self._provider_on_open_cooldown(model_id, provider):
+                skipped_cooldown += 1
+                continue
+            if attempts >= max_attempts:
+                break
+
+            attempts += 1
+            bid_id = str(chosen_bid["bid_id"])
+            bid_logger = open_logger.bind(
+                bid_id=bid_id,
+                provider=provider or None,
+                selected_stake_mor=round(float(chosen_bid["stake_mor"]), 6),
+                walk_attempt=attempts,
+                walk_max_attempts=max_attempts,
             )
+            try:
+                # Open the specific cheapest-under-fuse bid (not model-level open,
+                # which ranks by proxy score and can pick an expensive peer).
+                bid_logger.info(
+                    "Calling proxy router to open session by bid",
+                    user_id=user_id,
+                    event_type="proxy_open_session_start",
+                )
 
-            blockchain_session_id = response.get("sessionID")
+                # Adaptive throttle: open concurrently on the happy path; serialize
+                # on the wallet lock only while throttled (after a nonce conflict).
+                # No DB connection is held across this call (the row insert below
+                # uses its own short-lived session), so a throttled queue can grow
+                # without exhausting the DB pool.
+                response = await self._run_onchain(
+                    lambda bid=bid_id: proxy_router_service.openSessionByBid(
+                        bid_id=bid,
+                        session_duration=session_duration,
+                    ),
+                    op_name="openSessionByBid",
+                    op_logger=bid_logger,
+                )
 
-            if not blockchain_session_id:
+                blockchain_session_id = response.get("sessionID")
+
+                if not blockchain_session_id:
+                    raise SessionOpenError(
+                        "No session ID returned from proxy router",
+                        model_id=model_id,
+                    )
+
+                # Read the session's on-chain status once and use it for both the
+                # authoritative expiry and the provider address. Best-effort: any
+                # failure falls back to the call-start expiry estimate and a NULL
+                # provider, so an open is never blocked on this read.
+                status = await self._fetch_session_status(
+                    blockchain_session_id, bid_logger
+                )
+
+                # Anchor expires_at to the REAL on-chain endsAt (+ small buffer) so
+                # natural-expiry cleanup does not close a few seconds early.
+                expires_at = self._resolve_expires_at(
+                    status, estimated_expires_at, bid_logger
+                )
+
+                # Provider serving this session — lets failover exclude it later
+                # (omitProvider) instead of possibly reopening on the same
+                # impaired provider.
+                provider_address = self._parse_provider_address(status)
+                stake_mor = self._parse_session_stake_mor(status)
+
+                # Create session record only after successful open
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                endpoint = "/v1/chat/completions"
+                if model_type == "EMBEDDINGS":
+                    endpoint = "/v1/embeddings"
+                elif model_type == "AUTOMATION":
+                    endpoint = ""
+
+                # Persist on a fresh short-lived connection. Create the row already
+                # assigned (active_requests=initial_active_requests) so a request-path
+                # session (1) is never visible as idle - and thus claimable by a
+                # concurrent request via _claim_idle_session - between insert and use.
+                async with get_db() as db:
+                    session = RoutedSession(
+                        id=blockchain_session_id,
+                        model_id=model_id,
+                        model_name=model_name,
+                        state=SessionState.OPEN,
+                        expires_at=expires_at,
+                        active_requests=initial_active_requests,
+                        created_at=now,
+                        updated_at=now,
+                        endpoint=endpoint,
+                        provider_address=provider_address,
+                        stake_mor=stake_mor,
+                    )
+                    db.add(session)
+                    await db.commit()
+
+                bid_logger.info(
+                    "Session opened successfully",
+                    session_id=blockchain_session_id,
+                    event_type="session_opened",
+                )
+                return blockchain_session_id
+
+            except SessionOpenError:
+                # Domain error after a successful proxy response (e.g. missing
+                # session id) — not a peer-capacity case; do not walk further.
+                raise
+            except proxy_router_service.ProxyRouterServiceError as e:
+                last_proxy_error = e
+                bid_logger.error(
+                    "Proxy router error opening session",
+                    error=str(e),
+                    event_type="session_open_proxy_error",
+                )
+                if not self._is_open_bid_walk_retryable(e):
+                    raise SessionOpenError(
+                        f"Failed to open session: {e.message}",
+                        model_id=model_id,
+                    ) from e
+                if provider_l:
+                    omitted.add(provider_l)
+                self._mark_provider_open_cooldown(model_id, provider)
+                bid_logger.warning(
+                    "Open bid walk: capacity/unreachable; trying next peer",
+                    omitted_providers=sorted(omitted),
+                    event_type="session_open_bid_walk_retry",
+                )
+                continue
+            except Exception as e:
+                open_logger.error(
+                    "Error opening session",
+                    error=str(e),
+                    event_type="session_open_error",
+                    exc_info=True,
+                )
                 raise SessionOpenError(
-                    "No session ID returned from proxy router",
-                    model_id=model_id
-                )
+                    f"Failed to open session: {str(e)}",
+                    model_id=model_id,
+                ) from e
 
-            # Read the session's on-chain status once and use it for both the
-            # authoritative expiry and the provider address. Best-effort: any
-            # failure falls back to the call-start expiry estimate and a NULL
-            # provider, so an open is never blocked on this read.
-            status = await self._fetch_session_status(blockchain_session_id, open_logger)
-
-            # Anchor expires_at to the REAL on-chain endsAt (+ small buffer) so
-            # natural-expiry cleanup does not close a few seconds early.
-            expires_at = self._resolve_expires_at(
-                status, estimated_expires_at, open_logger
+        if attempts == 0 and skipped_cooldown:
+            open_logger.warning(
+                "All open candidates on short cool-off after capacity failures",
+                skipped_cooldown=skipped_cooldown,
+                event_type="session_open_bid_walk_cooled",
+            )
+            raise SessionOpenError(
+                "No provider capacity available for model right now",
+                model_id=model_id,
             )
 
-            # Provider serving this session — lets failover exclude it later
-            # (omitProvider) instead of possibly reopening on the same
-            # impaired provider.
-            provider_address = self._parse_provider_address(status)
-            stake_mor = self._parse_session_stake_mor(status)
-
-            # Create session record only after successful open
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
-            endpoint = "/v1/chat/completions"
-            if model_type == "EMBEDDINGS":
-                endpoint = "/v1/embeddings"
-            elif model_type == "AUTOMATION":
-                endpoint = ""
-
-            # Persist on a fresh short-lived connection. Create the row already
-            # assigned (active_requests=initial_active_requests) so a request-path
-            # session (1) is never visible as idle - and thus claimable by a
-            # concurrent request via _claim_idle_session - between insert and use.
-            async with get_db() as db:
-                session = RoutedSession(
-                    id=blockchain_session_id,
-                    model_id=model_id,
-                    model_name=model_name,
-                    state=SessionState.OPEN,
-                    expires_at=expires_at,
-                    active_requests=initial_active_requests,
-                    created_at=now,
-                    updated_at=now,
-                    endpoint=endpoint,
-                    provider_address=provider_address,
-                    stake_mor=stake_mor,
-                )
-                db.add(session)
-                await db.commit()
-
-            open_logger.info("Session opened successfully",
-                           session_id=blockchain_session_id,
-                           event_type="session_opened")
-
-            return blockchain_session_id
-
-        except SessionOpenError:
-            # Already a clean domain error (e.g. no session id returned).
-            raise
-        except proxy_router_service.ProxyRouterServiceError as e:
-            open_logger.error("Proxy router error opening session",
-                            error=str(e),
-                            event_type="session_open_proxy_error")
-
+        if last_proxy_error is not None:
+            open_logger.error(
+                "Open bid walk exhausted without a session",
+                attempts=attempts,
+                omitted_providers=sorted(omitted),
+                event_type="session_open_bid_walk_exhausted",
+            )
             raise SessionOpenError(
-                f"Failed to open session: {e.message}",
-                model_id=model_id
-            ) from e
+                f"Failed to open session: {getattr(last_proxy_error, 'message', str(last_proxy_error))}",
+                model_id=model_id,
+            ) from last_proxy_error
 
-        except Exception as e:
-            open_logger.error("Error opening session",
-                            error=str(e),
-                            event_type="session_open_error",
-                            exc_info=True)
-
-            raise SessionOpenError(
-                f"Failed to open session: {str(e)}",
-                model_id=model_id
-            ) from e
+        raise SessionOpenError(
+            "No rated bids available for model",
+            model_id=model_id,
+        )
     
     async def _close_session(
         self,
