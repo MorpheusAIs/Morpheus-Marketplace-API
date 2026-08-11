@@ -81,6 +81,25 @@ split, shielded cleanup), so we split them:
     misconfigured away.
 - **Commit:** `fd57759`
 
+### BE-6 / B-10 — Deactivation doesn't revoke — Medium — FIXED UPSTREAM (in `dev`)
+
+- **Finding:** B-10 (JWT path never checked `is_active`; 600s user cache delayed
+  revocation).
+- **Status:** Already fixed on `dev` (merged into this branch); no change needed
+  here. Verified against current code:
+  - `get_current_user` now rejects inactive users and clears their cache entry
+    (`src/dependencies.py:228-240`), and also rejects tombstoned/deleted
+    identities on the JWT path (`:159-170`).
+  - Both halves of the recommended fix are present: the `is_active` check and
+    cache invalidation on the rejection path.
+- **Residual (minor, not a live vuln):** the 600s user cache still means a
+  *manual* DB flip of `is_active=False` (bypassing app code) isn't reflected until
+  the cache expires. There is no in-app "deactivate user" endpoint — removal goes
+  through `delete_user`, which tombstones + clears the cache (`crud/user.py:151`),
+  and the existing admin mutation path clears the cache too (`admin.py:344`). If a
+  deactivate endpoint is ever added, it must call
+  `cache_service.delete("user", cognito_user_id)` like the others.
+
 ---
 
 ## Todo (backend, by priority)
@@ -130,13 +149,6 @@ Order follows §5 of `ATTACK_SCENARIOS.md` ("if you only fix ten things").
 - **Findings:** B-03 (payment-link GET not token-scoped).
 - **Fix direction:** scope lookup to `metadata.user_id == current_user`, 404 on
   mismatch. Also closes FE-3 one layer down.
-- **Status:** Todo.
-
-### BE-6 / B-10 — Deactivation doesn't revoke — Medium
-
-- **Findings:** B-10 (JWT path never checks `is_active`; 600 s user cache).
-- **Fix direction:** check `is_active` on the JWT path + invalidate cache on
-  deactivation.
 - **Status:** Todo.
 
 ### CB-4 / B-13 — Credentialed CORS reflects any HTTPS origin — High (trap)
