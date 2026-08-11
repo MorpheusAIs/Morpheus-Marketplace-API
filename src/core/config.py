@@ -317,6 +317,18 @@ class Settings(BaseSettings):
     # seconds (sliding; each new conflict re-arms it). 0 disables the throttle
     # (always concurrent). The happy path is never serialized.
     SESSION_ONCHAIN_THROTTLE_COOLDOWN_SECONDS: float = Field(default=float(os.getenv("SESSION_ONCHAIN_THROTTLE_COOLDOWN_SECONDS", "20")))
+    # Open-time bid walk: when InitiateSession fails with provider capacity /
+    # unreachable, try the next cheapest healthy-under-fuse bid (omit accumulated
+    # providers so we never ping-pong). Cap attempts to bound on-chain load.
+    SESSION_OPEN_BID_WALK_MAX_ATTEMPTS: int = Field(
+        default=int(os.getenv("SESSION_OPEN_BID_WALK_MAX_ATTEMPTS", "3"))
+    )
+    # After a capacity/unreachable open failure, skip that model+provider for
+    # this many seconds (per-replica) so subsequent opens start further down
+    # the candidate list instead of re-hammering the same full host.
+    SESSION_OPEN_PROVIDER_COOLDOWN_SECONDS: float = Field(
+        default=float(os.getenv("SESSION_OPEN_PROVIDER_COOLDOWN_SECONDS", "120"))
+    )
 
     # Direct Model Fetching Settings (replaces model sync)
     ACTIVE_MODELS_URL: str = Field(default=os.getenv("ACTIVE_MODELS_URL", "https://active.dev.mor.org/active_models.json"))
