@@ -46,6 +46,7 @@ router = APIRouter(tags=["Embeddings"])
 logger = get_api_logger()
 
 from .models import EmbeddingRequest, EmbeddingResponse
+from .usage import extract_embeddings_usage
 
 @router.post("/embeddings", response_model=EmbeddingResponse)
 async def create_embeddings(
@@ -524,12 +525,9 @@ async def _finalize_billing(
     updated_rate_limit_result = None
     
     try:
-        # Get token usage from response
-        usage = response_data.get("usage_from_provider", {})
-        tokens_input = usage.get("prompt_tokens", 0)
+        tokens_input, tokens_total, usage_source = extract_embeddings_usage(response_data)
         tokens_output = 0  # Embeddings don't have output tokens
-        tokens_total = usage.get("total_tokens", tokens_input)
-        
+
         # Record actual token usage for rate limiting
         if db_api_key and tokens_total > 0:
             user_identifier = f"key:{db_api_key.key_prefix}"
@@ -544,6 +542,7 @@ async def _finalize_billing(
                 "Recorded actual token usage for rate limiting",
                 tokens_input=tokens_input,
                 tokens_total=tokens_total,
+                usage_source=usage_source,
                 tpm_current=updated_rate_limit_result.tpm_current if updated_rate_limit_result else None,
                 event_type="rate_limit_tokens_recorded",
             )
@@ -566,6 +565,7 @@ async def _finalize_billing(
                 "Usage finalized",
                 tokens_input=tokens_input,
                 tokens_total=tokens_total,
+                usage_source=usage_source,
                 amount_total=str(finalize_response.amount_total),
                 event_type="usage_finalized",
             )
