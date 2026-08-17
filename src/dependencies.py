@@ -75,7 +75,7 @@ async def get_current_user(
     
     try:
         # Add debug logging for JWT validation
-        # B-14: never log token material, even truncated previews.
+        # Never log token material, even truncated previews.
         auth_logger.debug("Starting JWT validation",
                          token_length=len(token.credentials),
                          expected_audience=settings.COGNITO_CLIENT_ID,
@@ -144,7 +144,7 @@ async def get_current_user(
                              event_type="jwt_validation_error")
             raise credentials_exception
 
-        # B-21: only Cognito *access* tokens may authenticate API calls. Rejects
+        # Only Cognito *access* tokens may authenticate API calls. Rejects
         # id tokens (different claim set/purpose) presented as bearer tokens.
         token_use = payload.get('token_use')
         if token_use != 'access':
@@ -275,7 +275,7 @@ async def get_current_user(
                          event_type="auth_error",
                          exc_info=True)
         
-        # B-18: full details (with stack trace) are already logged above.
+        # Full details (with stack trace) are already logged above.
         # The client only gets the failure category — raw exception text can
         # carry connection strings, hostnames, and other internals.
         error_detail = "Authentication error"
@@ -410,7 +410,7 @@ async def _build_auth_from_cache(
     # ── Key verification ────────────────────────────────────────────────
     # Always verify the SHA-256 hash. Legacy prefix-only authentication (rows
     # with encrypted_key IS NULL) has been removed: the displayed 9-char prefix
-    # must never be sufficient to authenticate (B-09).
+    # must never be sufficient to authenticate.
     if not verify_api_key(raw_key, cached_data.get("hashed_key")):
         auth_logger.error("Cached API key hash validation failed",
                          key_prefix=key_prefix,
@@ -510,7 +510,7 @@ async def _build_auth_from_db(
         # ── Verify hash ────────────────────────────────────────────────
         # Always verify the SHA-256 hash. Legacy prefix-only authentication has
         # been removed so the displayed prefix can never authenticate on its
-        # own (B-09).
+        # own.
         if not verify_api_key(raw_key, db_api_key.hashed_key):
             auth_logger.error("API key hash validation failed",
                              key_prefix=key_prefix,

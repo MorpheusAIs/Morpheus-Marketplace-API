@@ -38,7 +38,7 @@ router = APIRouter(tags=["Billing"])
 
 
 def _resolve_client_ip(request: Request) -> str:
-    """Resolve the client IP without trusting caller-controlled headers (B-17).
+    """Resolve the client IP without trusting caller-controlled headers.
 
     The first X-Forwarded-For hop is whatever the client sent, so it must never
     feed abuse controls (the signup-bonus per-IP guard). Instead:

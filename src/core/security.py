@@ -47,5 +47,5 @@ def verify_api_key(plain_api_key: str, hashed_api_key: str) -> bool:
     if not hashed_api_key:
         return False
     computed_hash = hashlib.sha256(plain_api_key.encode()).hexdigest()
-    # Constant-time comparison (B-21) — avoids leaking prefix-match timing.
+    # Constant-time comparison — avoids leaking prefix-match timing.
     return hmac.compare_digest(computed_hash, hashed_api_key)

@@ -90,7 +90,7 @@ def log_tool_request_details(json_body: Dict[str, Any], session_id: str, logger)
         tool_count = len(json_body.get("tools", [])) if has_tools else 0
         message_count = len(json_body.get("messages", []))
         
-        # B-14: never log the request body — prompts and tool arguments carry
+        # Never log the request body — prompts and tool arguments carry
         # user data (PII, credentials). Counts only.
         logger.info("Tool calling request detected",
                    session_id=session_id,

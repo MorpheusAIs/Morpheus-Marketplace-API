@@ -16,7 +16,7 @@ logger = get_core_logger()
 
 # Environments where the Cognito auth bypass is permitted. Anything outside this
 # set (production, staging, or an unrecognized value) must never run with the
-# bypass active — see BE-1 in ATTACK_SCENARIOS.md.
+# bypass active.
 _BYPASS_ALLOWED_ENVIRONMENTS = {"development", "dev", "test", "local"}
 
 

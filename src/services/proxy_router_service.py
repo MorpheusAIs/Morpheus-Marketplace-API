@@ -220,7 +220,7 @@ async def _execute_request(
     req_logger.debug("Proxy router request URL", url=url)
     
     if json_data:
-        # B-14: don't log the body itself (prompts/tool args are user data);
+        # Don't log the body itself (prompts/tool args are user data);
         # top-level shape is enough for debugging.
         req_logger.debug("Proxy router request body",
                          request_body_keys=sorted(json_data.keys()) if isinstance(json_data, dict) else type(json_data).__name__)

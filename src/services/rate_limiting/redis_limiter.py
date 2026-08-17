@@ -279,7 +279,7 @@ class RedisRateLimiter:
         try:
             async with self._get_redis() as redis:
                 if redis is None:
-                    # Degraded (circuit open). B-15: fail closed when configured,
+                    # Degraded (circuit open): fail closed when configured,
                     # otherwise preserve the availability-first fail-open.
                     return 0, config.rpm, not settings.RATE_LIMIT_FAIL_CLOSED
 
@@ -308,7 +308,7 @@ class RedisRateLimiter:
                 user_id=user_id,
                 event_type="rpm_check_error",
             )
-            # B-15: fail open unless RATE_LIMIT_FAIL_CLOSED is set.
+            # Fail open unless RATE_LIMIT_FAIL_CLOSED is set.
             return 0, config.rpm, allowed
 
     async def add_tokens(

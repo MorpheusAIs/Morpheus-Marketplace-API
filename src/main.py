@@ -79,7 +79,7 @@ try:
             r"^https://.*\.mor\.org$",  # Any subdomain of mor.org
             r"^https://.*\.dev\.mor\.org$",  # Any subdomain of dev.mor.org
         ],
-        # B-13: reflecting ANY https origin with Allow-Credentials is a CSRF
+        # Reflecting ANY https origin with Allow-Credentials is a CSRF
         # primitive the moment cookie auth exists. Only permitted in local/dev/
         # test; production-like environments rely on the explicit allowlist and
         # the *.mor.org trusted patterns above.
@@ -1402,7 +1402,7 @@ def admin_swagger_ui_html():
         oauth_state="swagger-ui-admin-oauth2",
     ))
 
-# B-11: dev-only Swagger convenience. It accepts an authorization code from any
+# Dev-only Swagger convenience. It accepts an authorization code from any
 # caller via GET query string (logged by proxies/ALBs) and returns raw tokens in
 # the JSON body, so it is not registered in production-like environments.
 # The real OAuth path for Swagger is /docs/oauth2-redirect above.

@@ -699,7 +699,7 @@ class BillingService:
 
         Args:
             amount: Positive to add credits, negative to subtract credits
-            idempotency_key: Optional caller-supplied deduplication key (B-01).
+            idempotency_key: Optional caller-supplied deduplication key.
                 When provided, a replay with the same key returns the original
                 ledger entry without crediting again. Namespaced with "adjust:"
                 so it cannot collide with webhook idempotency keys.

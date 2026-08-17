@@ -288,7 +288,7 @@ async def _check_rate_limits(
     )
     
     # A limiter-internal ERROR normally fails open; with RATE_LIMIT_FAIL_CLOSED
-    # (B-15) a degraded limiter blocks too instead of granting unmetered access.
+    # a degraded limiter blocks too instead of granting unmetered access.
     if not result.allowed and (
         result.status != RateLimitStatus.ERROR or settings.RATE_LIMIT_FAIL_CLOSED
     ):

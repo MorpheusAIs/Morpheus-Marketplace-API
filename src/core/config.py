@@ -11,7 +11,7 @@ load_dotenv()
 # Environments considered safe for development conveniences (placeholder
 # secrets, missing Cognito config, permissive CORS). Anything else — production,
 # staging, or an unrecognized value — is treated as production-like and must be
-# fully, explicitly configured (see B-12 / B-16 in ATTACK_SCENARIOS.md).
+# fully, explicitly configured.
 NON_PRODUCTION_ENVIRONMENTS = {"local", "development", "dev", "test"}
 
 # Known placeholder that used to ship as the ENCRYPTION_SECRET_KEY default.
@@ -429,7 +429,7 @@ class Settings(BaseSettings):
     # Rate Limiting Settings
     # Enable/disable rate limiting globally
     RATE_LIMIT_ENABLED: bool = Field(default=os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true")
-    # B-15: when true, a degraded limiter (Redis outage, circuit breaker open)
+    # When true, a degraded limiter (Redis outage, circuit breaker open)
     # REJECTS requests (429 with Retry-After) instead of letting them through
     # unmetered. Default false preserves the availability-first behavior; enable
     # per environment where unthrottled cost amplification is the bigger risk.
@@ -450,10 +450,10 @@ class Settings(BaseSettings):
     def enforce_production_configuration(self) -> "Settings":
         """Fail startup on unsafe configuration outside local/dev/test.
 
-        B-12: ENCRYPTION_SECRET_KEY must be explicitly set (and not the public
+        ENCRYPTION_SECRET_KEY must be explicitly set (and not the public
         placeholder) in production-like environments — otherwise every stored
         API key is encrypted with a key published in the source repo.
-        B-16: Cognito pool/client IDs must be explicitly set in production-like
+        Cognito pool/client IDs must be explicitly set in production-like
         environments — otherwise a misconfigured deploy silently authenticates
         against the wrong (previously: hardcoded production) user pool.
         """
