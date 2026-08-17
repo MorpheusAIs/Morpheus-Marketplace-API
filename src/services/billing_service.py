@@ -8,6 +8,7 @@ from decimal import Decimal
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
 from src.db.models import CreditLedger, CreditAccountBalance, LedgerStatus, LedgerEntryType
 from src.crud import credits as credits_crud
@@ -691,14 +692,20 @@ class BillingService:
         user_id: int,
         amount: Decimal,
         description: Optional[str] = None,
-    ) -> Tuple[CreditLedger, Decimal]:
+        idempotency_key: Optional[str] = None,
+    ) -> Tuple[CreditLedger, Decimal, bool]:
         """
         Adjust credits for an account (add or subtract).
-        
+
         Args:
             amount: Positive to add credits, negative to subtract credits
-            
-        Returns (ledger_entry, new_paid_balance).
+            idempotency_key: Optional caller-supplied deduplication key (B-01).
+                When provided, a replay with the same key returns the original
+                ledger entry without crediting again. Namespaced with "adjust:"
+                so it cannot collide with webhook idempotency keys.
+
+        Returns (ledger_entry, new_paid_balance, created) — ``created`` is False
+        when the entry already existed for the supplied idempotency key.
         """
         # Determine entry type based on amount sign
         if amount >= 0:
@@ -707,35 +714,68 @@ class BillingService:
         else:
             entry_type = LedgerEntryType.adjustment
             default_description = "Manual credit adjustment (deduction)"
-        
-        idempotency_key = f"adjust:{user_id}:{datetime.utcnow().isoformat()}:{uuid.uuid4()}"
-        
-        # Create ledger entry and update balance in a single transaction
-        entry = await credits_crud.create_ledger_entry(
-            db=db,
-            user_id=user_id,
-            entry_type=entry_type,
-            status=LedgerStatus.posted,
-            idempotency_key=idempotency_key,
-            amount_paid=amount,  # Positive for credit, negative for debit
-            amount_staking=Decimal("0"),  # Adjustments only affect paid bucket
-            description=description or default_description,
-            auto_commit=False,
-        )
-        
-        # Update balance cache
-        balance = await credits_crud.update_balance(
-            db=db,
-            user_id=user_id,
-            paid_posted_delta=amount,
-            auto_commit=False,
-        )
-        
-        # Commit both atomically
-        await db.commit()
+
+        if idempotency_key:
+            ledger_key = f"adjust:{idempotency_key}"
+            existing = await credits_crud.get_ledger_entry_by_idempotency_key(db, ledger_key)
+            if existing:
+                balance = await credits_crud.get_or_create_balance(db, user_id)
+                logger.info(
+                    "Credit adjustment replay detected — returning existing entry",
+                    user_id=user_id,
+                    idempotency_key=ledger_key,
+                    ledger_entry_id=str(existing.id),
+                    event_type="credit_adjust_idempotent_replay",
+                )
+                return existing, balance.paid_posted_balance, False
+        else:
+            # No caller key: legacy behavior, every call posts a new entry.
+            ledger_key = f"adjust:{user_id}:{datetime.utcnow().isoformat()}:{uuid.uuid4()}"
+
+        try:
+            # Create ledger entry and update balance in a single transaction
+            entry = await credits_crud.create_ledger_entry(
+                db=db,
+                user_id=user_id,
+                entry_type=entry_type,
+                status=LedgerStatus.posted,
+                idempotency_key=ledger_key,
+                amount_paid=amount,  # Positive for credit, negative for debit
+                amount_staking=Decimal("0"),  # Adjustments only affect paid bucket
+                description=description or default_description,
+                auto_commit=False,
+            )
+
+            # Update balance cache
+            balance = await credits_crud.update_balance(
+                db=db,
+                user_id=user_id,
+                paid_posted_delta=amount,
+                auto_commit=False,
+            )
+
+            # Commit both atomically
+            await db.commit()
+        except IntegrityError:
+            # Concurrent replay raced past the pre-insert lookup; the unique
+            # constraint on credits_ledger.idempotency_key is the backstop.
+            await db.rollback()
+            existing = await credits_crud.get_ledger_entry_by_idempotency_key(db, ledger_key)
+            if existing is None:
+                raise
+            balance = await credits_crud.get_or_create_balance(db, user_id)
+            logger.info(
+                "Credit adjustment replay caught by unique constraint",
+                user_id=user_id,
+                idempotency_key=ledger_key,
+                ledger_entry_id=str(existing.id),
+                event_type="credit_adjust_idempotent_replay",
+            )
+            return existing, balance.paid_posted_balance, False
+
         await db.refresh(entry)
         await db.refresh(balance)
-        
+
         action = "Added" if amount >= 0 else "Subtracted"
         logger.info(
             f"{action} credits",
@@ -744,8 +784,8 @@ class BillingService:
             new_balance=str(balance.paid_posted_balance),
             ledger_entry_id=str(entry.id),
         )
-        
-        return entry, balance.paid_posted_balance
+
+        return entry, balance.paid_posted_balance, True
     
     # Alias for backward compatibility
     async def add_credits(
@@ -756,7 +796,8 @@ class BillingService:
         description: Optional[str] = None,
     ) -> Tuple[CreditLedger, Decimal]:
         """Alias for adjust_credits (backward compatibility)."""
-        return await self.adjust_credits(db, user_id, abs(amount), description)
+        entry, new_balance, _created = await self.adjust_credits(db, user_id, abs(amount), description)
+        return entry, new_balance
     
     # === Automated Hold Reconciliation ===
     

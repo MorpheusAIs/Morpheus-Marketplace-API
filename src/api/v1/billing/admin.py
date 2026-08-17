@@ -5,6 +5,7 @@ Protected by X-Admin-Secret header. Served on /admin/docs Swagger page.
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
+from decimal import Decimal
 import secrets
 
 from ....db.database import get_db_session
@@ -29,6 +30,7 @@ from ....schemas.payment_link import (
     PaymentLinkListResponse,
 )
 from ....core.logging_config import get_api_logger
+from ....utils.error_sanitizer import sanitize_error_message
 from ....core.config import settings
 from ....services.cache_service import cache_service
 from ....services.coinbase_payment_link_service import coinbase_payment_link_service
@@ -126,7 +128,7 @@ async def set_staking_settings(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error updating staking settings: {str(e)}"
+            detail=sanitize_error_message(f"Error updating staking settings: {str(e)}")
         )
 
 
@@ -221,28 +223,32 @@ async def adjust_credits(
                 )
             target_user_id = target_user.id
         
-        entry, new_balance = await billing_service.adjust_credits(
+        entry, new_balance, created = await billing_service.adjust_credits(
             db=db,
             user_id=target_user_id,
             amount=request.amount_usd,
             description=request.description,
+            idempotency_key=request.idempotency_key,
         )
-        
+
         action = "added" if request.amount_usd >= 0 else "subtracted"
         logger.info(
-            f"Manual credit adjustment by admin: {action}",
+            f"Manual credit adjustment by admin: {action}" if created
+            else "Manual credit adjustment replayed (idempotent, no new credit)",
             user_id=str(target_user_id),
             admin_user_id=str(current_user.id),
             amount=str(request.amount_usd),
             new_balance=str(new_balance),
+            idempotency_key=request.idempotency_key,
             event_type="billing_admin_credit_adjust"
         )
-        
+
         return ManualTopupResponse(
             ledger_entry_id=entry.id,
-            amount_added=request.amount_usd,
+            amount_added=entry.amount_paid if created else Decimal("0"),
             new_paid_balance=new_balance,
-            message=f"Credits {action} successfully",
+            message=f"Credits {action} successfully" if created
+            else "Duplicate request — original adjustment already applied, no new credit",
         )
     except HTTPException:
         raise
@@ -256,7 +262,7 @@ async def adjust_credits(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error adjusting credits: {str(e)}"
+            detail=sanitize_error_message(f"Error adjusting credits: {str(e)}")
         )
 
 
@@ -304,7 +310,7 @@ async def reconcile_balance(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error reconciling balance: {str(e)}",
+            detail=sanitize_error_message(f"Error reconciling balance: {str(e)}"),
         )
 
 
@@ -369,7 +375,7 @@ async def set_rate_limit_multiplier(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error setting rate limit multiplier: {str(e)}",
+            detail=sanitize_error_message(f"Error setting rate limit multiplier: {str(e)}"),
         )
 
 
@@ -410,7 +416,7 @@ async def get_rate_limit_multiplier(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error getting rate limit multiplier: {str(e)}",
+            detail=sanitize_error_message(f"Error getting rate limit multiplier: {str(e)}"),
         )
 
 
@@ -454,7 +460,7 @@ async def list_payment_links(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error listing payment links: {str(e)}",
+            detail=sanitize_error_message(f"Error listing payment links: {str(e)}"),
         )
 
 
@@ -497,5 +503,5 @@ async def deactivate_payment_link(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error deactivating payment link: {str(e)}",
+            detail=sanitize_error_message(f"Error deactivating payment link: {str(e)}"),
         )

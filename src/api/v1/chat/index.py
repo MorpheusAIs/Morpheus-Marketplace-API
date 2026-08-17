@@ -38,6 +38,7 @@ from ....services.rate_limiting import (
     RateLimitStatus,
 )
 from ....schemas.billing import UsageHoldRequest, UsageFinalizeRequest, UsageVoidRequest
+from ....core.config import settings
 from ....core.logging_config import get_api_logger
 from .chat_models import ChatCompletionRequest
 from .chat_utils import (
@@ -286,7 +287,11 @@ async def _check_rate_limits(
         multiplier=getattr(user, "rate_limit_multiplier", 1.0) or 1.0,
     )
     
-    if not result.allowed and result.status != RateLimitStatus.ERROR:
+    # A limiter-internal ERROR normally fails open; with RATE_LIMIT_FAIL_CLOSED
+    # (B-15) a degraded limiter blocks too instead of granting unmetered access.
+    if not result.allowed and (
+        result.status != RateLimitStatus.ERROR or settings.RATE_LIMIT_FAIL_CLOSED
+    ):
         limit_type = "rpm" if result.status == RateLimitStatus.EXCEEDED_RPM else "tpm"
         
         chat_logger.warning(

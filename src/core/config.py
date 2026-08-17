@@ -2,11 +2,21 @@ import os
 from decimal import Decimal
 from typing import List, Union, Optional, Any
 from pydantic_settings import BaseSettings
-from pydantic import PostgresDsn, Field, AnyHttpUrl, field_validator
+from pydantic import PostgresDsn, Field, AnyHttpUrl, field_validator, model_validator
 from dotenv import load_dotenv
 
 # Load .env file variables
 load_dotenv()
+
+# Environments considered safe for development conveniences (placeholder
+# secrets, missing Cognito config, permissive CORS). Anything else — production,
+# staging, or an unrecognized value — is treated as production-like and must be
+# fully, explicitly configured (see B-12 / B-16 in ATTACK_SCENARIOS.md).
+NON_PRODUCTION_ENVIRONMENTS = {"local", "development", "dev", "test"}
+
+# Known placeholder that used to ship as the ENCRYPTION_SECRET_KEY default.
+# Never acceptable outside local/test: it is public in the repo history.
+_PLACEHOLDER_ENCRYPTION_KEY = "encryption_secret_change_me"
 
 class Settings(BaseSettings):
     # Project Settings
@@ -154,8 +164,11 @@ class Settings(BaseSettings):
     SIGNUP_BONUS_AMOUNT: Decimal = Field(default=Decimal(os.getenv("SIGNUP_BONUS_AMOUNT", "1")))
     SIGNUP_BONUS_IP_WINDOW_HOURS: int = Field(default=int(os.getenv("SIGNUP_BONUS_IP_WINDOW_HOURS", "24")))
 
-    # API Key Encryption
-    ENCRYPTION_SECRET_KEY: str = Field(default=os.getenv("ENCRYPTION_SECRET_KEY", "encryption_secret_change_me"))
+    # API Key Encryption.
+    # No baked-in default: production-like environments must set this explicitly
+    # (enforced in enforce_production_configuration below). Local/dev/test fall
+    # back to a placeholder there so local boots keep working.
+    ENCRYPTION_SECRET_KEY: str = Field(default=os.getenv("ENCRYPTION_SECRET_KEY", ""))
 
     # Proxy Router Settings
     PROXY_ROUTER_URL: str = Field(default=os.getenv("PROXY_ROUTER_URL", ""))
@@ -168,12 +181,19 @@ class Settings(BaseSettings):
     # AWS settings (credentials come from ECS task role; no explicit keys needed)
     AWS_REGION: str = os.getenv("AWS_REGION", "us-east-2")
     
-    # AWS Cognito Settings
-    COGNITO_USER_POOL_ID: str = Field(default=os.getenv("COGNITO_USER_POOL_ID", "us-east-2_tqCTHoSST"))
-    COGNITO_CLIENT_ID: str = Field(default=os.getenv("COGNITO_CLIENT_ID", "7faqqo5lcj3175epjqs2upvmmu"))
+    # AWS Cognito Settings.
+    # No hardcoded pool/client defaults: a misconfigured environment must not
+    # silently authenticate against the production user pool. Production-like
+    # environments fail startup when these are unset (see
+    # enforce_production_configuration); local/dev/test simply leave JWT auth
+    # unconfigured until set.
+    COGNITO_USER_POOL_ID: str = Field(default=os.getenv("COGNITO_USER_POOL_ID", ""))
+    COGNITO_CLIENT_ID: str = Field(default=os.getenv("COGNITO_CLIENT_ID", ""))
     COGNITO_REGION: str = Field(default=os.getenv("COGNITO_REGION", "us-east-2"))
     COGNITO_DOMAIN: str = Field(default=os.getenv("COGNITO_DOMAIN", "auth.mor.org"))
-    COGNITO_JWKS_URL: str = Field(default=f"https://cognito-idp.{os.getenv('COGNITO_REGION', 'us-east-2')}.amazonaws.com/{os.getenv('COGNITO_USER_POOL_ID', 'us-east-2_tqCTHoSST')}/.well-known/jwks.json")
+    # Derived from the final region/pool values in enforce_production_configuration
+    # unless overridden explicitly.
+    COGNITO_JWKS_URL: str = Field(default=os.getenv("COGNITO_JWKS_URL", ""))
     
     # Session Routing Service Configuration
     # Interval in seconds for automated activity loop (session scaling)
@@ -409,10 +429,61 @@ class Settings(BaseSettings):
     # Rate Limiting Settings
     # Enable/disable rate limiting globally
     RATE_LIMIT_ENABLED: bool = Field(default=os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true")
+    # B-15: when true, a degraded limiter (Redis outage, circuit breaker open)
+    # REJECTS requests (429 with Retry-After) instead of letting them through
+    # unmetered. Default false preserves the availability-first behavior; enable
+    # per environment where unthrottled cost amplification is the bigger risk.
+    RATE_LIMIT_FAIL_CLOSED: bool = Field(default=os.getenv("RATE_LIMIT_FAIL_CLOSED", "false").lower() == "true")
     # Rate limit defaults and model groups are loaded from models/{env}_rate_limit.json
     # Model pricing is loaded from models/{env}_model_price.json
-    
 
+    @property
+    def is_production_like(self) -> bool:
+        """True for production, staging, or any unrecognized environment.
+
+        Fail-closed: only explicitly local/dev/test environments get development
+        conveniences (placeholder secrets, permissive CORS, debug endpoints).
+        """
+        return self.ENVIRONMENT.lower() not in NON_PRODUCTION_ENVIRONMENTS
+
+    @model_validator(mode="after")
+    def enforce_production_configuration(self) -> "Settings":
+        """Fail startup on unsafe configuration outside local/dev/test.
+
+        B-12: ENCRYPTION_SECRET_KEY must be explicitly set (and not the public
+        placeholder) in production-like environments — otherwise every stored
+        API key is encrypted with a key published in the source repo.
+        B-16: Cognito pool/client IDs must be explicitly set in production-like
+        environments — otherwise a misconfigured deploy silently authenticates
+        against the wrong (previously: hardcoded production) user pool.
+        """
+        if self.is_production_like:
+            errors = []
+            if not self.ENCRYPTION_SECRET_KEY or self.ENCRYPTION_SECRET_KEY == _PLACEHOLDER_ENCRYPTION_KEY:
+                errors.append(
+                    "ENCRYPTION_SECRET_KEY must be explicitly set to a strong secret"
+                )
+            if not self.COGNITO_USER_POOL_ID:
+                errors.append("COGNITO_USER_POOL_ID must be explicitly set")
+            if not self.COGNITO_CLIENT_ID:
+                errors.append("COGNITO_CLIENT_ID must be explicitly set")
+            if errors:
+                raise ValueError(
+                    f"Refusing to start with ENVIRONMENT={self.ENVIRONMENT!r}: "
+                    + "; ".join(errors)
+                    + ". Set the variables or run with a local/dev/test ENVIRONMENT."
+                )
+        elif not self.ENCRYPTION_SECRET_KEY:
+            # Local/dev/test convenience only — never reachable in production-like
+            # environments (guard above).
+            self.ENCRYPTION_SECRET_KEY = _PLACEHOLDER_ENCRYPTION_KEY
+
+        if not self.COGNITO_JWKS_URL and self.COGNITO_USER_POOL_ID:
+            self.COGNITO_JWKS_URL = (
+                f"https://cognito-idp.{self.COGNITO_REGION}.amazonaws.com/"
+                f"{self.COGNITO_USER_POOL_ID}/.well-known/jwks.json"
+            )
+        return self
 
     class Config:
         env_file = ".env"

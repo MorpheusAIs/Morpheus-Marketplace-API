@@ -1,3 +1,4 @@
+import hmac
 import secrets
 import string
 import hashlib
@@ -43,5 +44,8 @@ def verify_api_key(plain_api_key: str, hashed_api_key: str) -> bool:
     Fast verification (~0.001ms vs ~500ms with bcrypt).
     Secure for cryptographically random API keys (256 bits entropy).
     """
+    if not hashed_api_key:
+        return False
     computed_hash = hashlib.sha256(plain_api_key.encode()).hexdigest()
-    return computed_hash == hashed_api_key
+    # Constant-time comparison (B-21) — avoids leaking prefix-match timing.
+    return hmac.compare_digest(computed_hash, hashed_api_key)

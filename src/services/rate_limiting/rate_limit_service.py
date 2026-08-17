@@ -236,11 +236,12 @@ class RateLimitService:
                 model=model,
                 event_type="rate_limit_check_error",
             )
-            
-            # Fail open - allow the request
+
+            # B-15: fail open unless RATE_LIMIT_FAIL_CLOSED is configured.
             return RateLimitResult(
-                allowed=True,
+                allowed=not settings.RATE_LIMIT_FAIL_CLOSED,
                 status=RateLimitStatus.ERROR,
+                retry_after=30,
                 error_message=str(e),
             )
     
