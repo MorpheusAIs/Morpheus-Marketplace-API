@@ -12,6 +12,7 @@ from ....schemas.payment_link import (
     PaymentLinkResponse,
 )
 from ....core.logging_config import get_api_logger
+from ....utils.error_sanitizer import sanitize_error_message
 from ....services.coinbase_payment_link_service import coinbase_payment_link_service
 
 logger = get_api_logger()
@@ -69,7 +70,7 @@ async def create_payment_link(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error creating payment link: {str(e)}",
+            detail=sanitize_error_message(f"Error creating payment link: {str(e)}"),
         )
 
 

@@ -291,6 +291,16 @@ class ManualTopupRequest(BaseModel):
     description: Optional[str] = Field(None, max_length=500, description="Optional description/reason for adjustment")
     user_id: Optional[int] = Field(None, description="Target user ID (database primary key). If not provided, adjusts current user's credits.")
     cognito_user_id: Optional[uuid.UUID] = Field(None, description="Target Cognito user ID. Alternative to user_id.")
+    idempotency_key: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=200,
+        description=(
+            "Client-supplied idempotency key (e.g. 'stripe:{checkout_session_id}'). "
+            "Replays with the same key return the original ledger entry instead of "
+            "crediting again. Strongly recommended for any automated caller."
+        ),
+    )
 
 
 class ManualTopupResponse(BaseModel):
