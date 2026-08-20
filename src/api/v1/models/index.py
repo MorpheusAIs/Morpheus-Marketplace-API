@@ -10,6 +10,7 @@ from ....services import proxy_router_service
 from ....core.config import settings
 from ....core.direct_model_service import direct_model_service
 from ....core.logging_config import get_api_logger
+from ....utils.error_sanitizer import sanitize_error_message
 
 logger = get_api_logger()
 
@@ -91,7 +92,7 @@ async def list_models():
                                event_type="models_fetch_error")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error fetching active models: {str(e)}"
+                detail=sanitize_error_message(f"Error fetching active models: {str(e)}")
             )
 
 @router.get("/models/allmodels", response_model=None)
@@ -163,7 +164,7 @@ async def list_all_models():
                               event_type="all_models_fetch_error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error fetching all models: {str(e)}"
+            detail=sanitize_error_message(f"Error fetching all models: {str(e)}")
         )
 
 @router.get("/models/ratedbids")
@@ -212,5 +213,5 @@ async def get_rated_bids(
                          event_type="rated_bids_fetch_error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error fetching rated bids: {str(e)}"
+            detail=sanitize_error_message(f"Error fetching rated bids: {str(e)}")
         ) 

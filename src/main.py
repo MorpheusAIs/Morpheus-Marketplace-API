@@ -79,7 +79,11 @@ try:
             r"^https://.*\.mor\.org$",  # Any subdomain of mor.org
             r"^https://.*\.dev\.mor\.org$",  # Any subdomain of dev.mor.org
         ],
-        allow_direct_access=True  # Enable for ALB cookie stickiness from any client
+        # Reflecting ANY https origin with Allow-Credentials is a CSRF
+        # primitive the moment cookie auth exists. Only permitted in local/dev/
+        # test; production-like environments rely on the explicit allowlist and
+        # the *.mor.org trusted patterns above.
+        allow_direct_access=not settings.is_production_like
     )
     
     logger.info(f"CORS configured with allowed origins: {', '.join(allowed_origins)}")
@@ -1398,58 +1402,63 @@ def admin_swagger_ui_html():
         oauth_state="swagger-ui-admin-oauth2",
     ))
 
-@app.get("/exchange-token", include_in_schema=False)
-async def exchange_oauth_token(request: Request, code: str, state: str = None):
-    """
-    Exchange OAuth2 authorization code for access token
-    """
-    import httpx
-    
-    try:
-        # Exchange the authorization code for tokens
-        token_url = f"https://{settings.COGNITO_DOMAIN}/oauth2/token"
-        
-        data = {
-            "grant_type": "authorization_code",
-            "client_id": settings.COGNITO_CLIENT_ID,
-            "code": code,
-            "redirect_uri": f"{settings.BASE_URL}/docs/oauth2-redirect"
-        }
-        
-        # Add PKCE code_verifier if provided
-        code_verifier = request.query_params.get("code_verifier")
-        if code_verifier:
-            data["code_verifier"] = code_verifier
-        
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded"
-        }
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(token_url, data=data, headers=headers)
-            
-        if response.status_code == 200:
-            tokens = response.json()
-            return {
-                "success": True,
-                "access_token": tokens.get("access_token"),
-                "token_type": tokens.get("token_type"),
-                "expires_in": tokens.get("expires_in"),
-                "id_token": tokens.get("id_token"),
-                "message": "✅ Use the 'access_token' as your Bearer token in Swagger UI!"
+# Dev-only Swagger convenience. It accepts an authorization code from any
+# caller via GET query string (logged by proxies/ALBs) and returns raw tokens in
+# the JSON body, so it is not registered in production-like environments.
+# The real OAuth path for Swagger is /docs/oauth2-redirect above.
+if not settings.is_production_like:
+    @app.get("/exchange-token", include_in_schema=False)
+    async def exchange_oauth_token(request: Request, code: str, state: str = None):
+        """
+        Exchange OAuth2 authorization code for access token (non-production only).
+        """
+        import httpx
+
+        try:
+            # Exchange the authorization code for tokens
+            token_url = f"https://{settings.COGNITO_DOMAIN}/oauth2/token"
+
+            data = {
+                "grant_type": "authorization_code",
+                "client_id": settings.COGNITO_CLIENT_ID,
+                "code": code,
+                "redirect_uri": f"{settings.BASE_URL}/docs/oauth2-redirect"
             }
-        else:
+
+            # Add PKCE code_verifier if provided
+            code_verifier = request.query_params.get("code_verifier")
+            if code_verifier:
+                data["code_verifier"] = code_verifier
+
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(token_url, data=data, headers=headers)
+
+            if response.status_code == 200:
+                tokens = response.json()
+                return {
+                    "success": True,
+                    "access_token": tokens.get("access_token"),
+                    "token_type": tokens.get("token_type"),
+                    "expires_in": tokens.get("expires_in"),
+                    "id_token": tokens.get("id_token"),
+                    "message": "✅ Use the 'access_token' as your Bearer token in Swagger UI!"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": response.text,
+                    "status_code": response.status_code
+                }
+
+        except Exception as e:
             return {
                 "success": False,
-                "error": response.text,
-                "status_code": response.status_code
+                "error": str(e)
             }
-            
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
 
 # OAuth helper endpoint removed for security - no longer exposing client_id in helper tools
 
