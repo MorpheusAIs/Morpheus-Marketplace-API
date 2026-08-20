@@ -175,6 +175,10 @@ async def test_cheapest_bid_over_fuse_refused(service):
     # 0.01 * 1800 * 338 = 6084
     assert exc.value.stake_mor == pytest.approx(6084.0, rel=1e-3)
     assert exc.value.max_stake_mor == 700
+    # 700 * 3600 / (1800 * 338) ≈ 4.14 MOR/hr (active.mor.org unit)
+    assert "4.14 MOR/hr" in exc.value.message
+    assert "active.mor.org" in exc.value.message
+    assert "self-custody node" in exc.value.message
 
 
 @pytest.mark.asyncio
