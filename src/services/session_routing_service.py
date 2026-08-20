@@ -473,6 +473,21 @@ class SessionRoutingService:
         factor = float(settings.SESSION_STAKE_FACTOR or 338)
         return float(pps_mor) * float(session_duration) * factor
 
+    def _max_mor_per_hour_for_fuse(
+        self, max_stake_mor: float, session_duration: int
+    ) -> float:
+        """Hosted fuse as MOR/hr — same unit as active.mor.org bid table.
+
+        stake = pps × session_duration × SESSION_STAKE_FACTOR
+        ⇒ max_pps = max_stake / (duration × factor)
+        ⇒ max_mor_per_hour = max_pps × 3600
+        """
+        factor = float(settings.SESSION_STAKE_FACTOR or 338)
+        duration = float(session_duration or 0)
+        if max_stake_mor <= 0 or duration <= 0 or factor <= 0:
+            return 0.0
+        return float(max_stake_mor) * 3600.0 / (duration * factor)
+
     async def _list_rated_bids_cheapest_first(
         self,
         model_id: str,
@@ -643,8 +658,11 @@ class SessionRoutingService:
                 session_duration=session_duration,
                 event_type="session_stake_fuse_refused",
             )
+            mor_hr = self._max_mor_per_hour_for_fuse(max_stake, session_duration)
             raise SessionStakeFuseError(
-                "This model is too expensive for the hosted API Gateway right now. "
+                "We couldn't open a session — the lowest usable bid for this model "
+                f"is above the hosted gateway limit of ~{mor_hr:.2f} MOR/hr "
+                "(compare the MOR/hr column on https://active.mor.org). "
                 + P2P_OFFRAMP_HINT,
                 model_id=model_id,
                 stake_mor=stake,

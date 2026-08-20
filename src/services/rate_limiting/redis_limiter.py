@@ -279,8 +279,9 @@ class RedisRateLimiter:
         try:
             async with self._get_redis() as redis:
                 if redis is None:
-                    # Degraded (circuit open) - fail open
-                    return 0, config.rpm, True
+                    # Degraded (circuit open): fail closed when configured,
+                    # otherwise preserve the availability-first fail-open.
+                    return 0, config.rpm, not settings.RATE_LIMIT_FAIL_CLOSED
 
                 window_start = self._window_start(config)
                 key = self._get_key(user_id, "rpm", model_group, window_start)
@@ -300,14 +301,15 @@ class RedisRateLimiter:
 
         except Exception as e:
             self._note_op_error(e)
+            allowed = not settings.RATE_LIMIT_FAIL_CLOSED
             logger.warning(
-                "RPM check failed, allowing request",
+                "RPM check failed, allowing request" if allowed else "RPM check failed, rejecting request (fail-closed)",
                 error=str(e),
                 user_id=user_id,
                 event_type="rpm_check_error",
             )
-            # Fail open - allow the request if Redis fails
-            return 0, config.rpm, True
+            # Fail open unless RATE_LIMIT_FAIL_CLOSED is set.
+            return 0, config.rpm, allowed
 
     async def add_tokens(
         self,

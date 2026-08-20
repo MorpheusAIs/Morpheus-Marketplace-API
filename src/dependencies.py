@@ -75,8 +75,9 @@ async def get_current_user(
     
     try:
         # Add debug logging for JWT validation
+        # Never log token material, even truncated previews.
         auth_logger.debug("Starting JWT validation",
-                         token_preview=token.credentials[:20],
+                         token_length=len(token.credentials),
                          expected_audience=settings.COGNITO_CLIENT_ID,
                          expected_issuer=f"https://cognito-idp.{settings.COGNITO_REGION}.amazonaws.com/{settings.COGNITO_USER_POOL_ID}",
                          event_type="jwt_validation_start")
@@ -142,6 +143,17 @@ async def get_current_user(
                              received=token_client_id,
                              event_type="jwt_validation_error")
             raise credentials_exception
+
+        # Only Cognito *access* tokens may authenticate API calls. Rejects
+        # id tokens (different claim set/purpose) presented as bearer tokens.
+        token_use = payload.get('token_use')
+        if token_use != 'access':
+            auth_logger.error("Invalid token_use claim",
+                             expected="access",
+                             received=token_use,
+                             event_type="jwt_validation_error")
+            raise credentials_exception
+
         
         auth_logger.info("JWT decode successful",
                         subject=payload.get('sub'),
@@ -263,15 +275,17 @@ async def get_current_user(
                          event_type="auth_error",
                          exc_info=True)
         
-        # Provide more specific error details for debugging
-        error_detail = f"Authentication error: {str(e)}"
+        # Full details (with stack trace) are already logged above.
+        # The client only gets the failure category — raw exception text can
+        # carry connection strings, hostnames, and other internals.
+        error_detail = "Authentication error"
         if "database" in str(e).lower() or "connection" in str(e).lower():
-            error_detail = f"Database connection error during authentication: {str(e)}"
+            error_detail = "Database error during authentication"
         elif "cognito" in str(e).lower() or "jwks" in str(e).lower():
-            error_detail = f"Cognito/JWKS error during authentication: {str(e)}"
+            error_detail = "Identity provider error during authentication"
         elif "user" in str(e).lower():
-            error_detail = f"User lookup/creation error: {str(e)}"
-        
+            error_detail = "User lookup/creation error during authentication"
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=error_detail
@@ -378,7 +392,7 @@ async def get_api_key_auth(
                          event_type="api_key_auth_error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unexpected error validating API key: {str(e)}"
+            detail="Unexpected error validating API key"
         )
 
 
@@ -396,7 +410,7 @@ async def _build_auth_from_cache(
     # ── Key verification ────────────────────────────────────────────────
     # Always verify the SHA-256 hash. Legacy prefix-only authentication (rows
     # with encrypted_key IS NULL) has been removed: the displayed 9-char prefix
-    # must never be sufficient to authenticate (B-09).
+    # must never be sufficient to authenticate.
     if not verify_api_key(raw_key, cached_data.get("hashed_key")):
         auth_logger.error("Cached API key hash validation failed",
                          key_prefix=key_prefix,
@@ -496,7 +510,7 @@ async def _build_auth_from_db(
         # ── Verify hash ────────────────────────────────────────────────
         # Always verify the SHA-256 hash. Legacy prefix-only authentication has
         # been removed so the displayed prefix can never authenticate on its
-        # own (B-09).
+        # own.
         if not verify_api_key(raw_key, db_api_key.hashed_key):
             auth_logger.error("API key hash validation failed",
                              key_prefix=key_prefix,

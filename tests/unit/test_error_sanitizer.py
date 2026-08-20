@@ -30,6 +30,20 @@ def test_keeps_apidocs():
     assert "https://apidocs.mor.org/docs" in sanitize_error_message(raw)
 
 
+def test_keeps_active_mor_catalog_url():
+    raw = (
+        "We couldn't open a session — the lowest usable bid for this model "
+        "is above the hosted gateway limit of ~1.07 MOR/hr "
+        "(compare the MOR/hr column on https://active.mor.org). "
+        "For higher volume or the full marketplace catalog, run a self-custody node: "
+        "https://nodedocs.mor.org/consumers/quickstart"
+    )
+    out = sanitize_error_message(raw)
+    assert "https://active.mor.org" in out
+    assert "https://nodedocs.mor.org/consumers/quickstart" in out
+    assert "[redacted-url]" not in out
+
+
 def test_keeps_bare_nodedocs_host():
     raw = "Docs: nodedocs.mor.org/consumers/quickstart"
     out = sanitize_error_message(raw)
