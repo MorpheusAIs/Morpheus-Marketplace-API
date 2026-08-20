@@ -5,18 +5,21 @@ Strips URLs, IP addresses, hostnames with ports, API keys, and authorization
 headers from error text before it reaches API clients.  Raw (unsanitized)
 messages should still be written to logs for debugging.
 
-Public docs hosts (nodedocs / apidocs) are allowlisted so intentional
-off-ramp links in capacity/allowlist errors survive to the client.
+Public docs / catalog hosts (nodedocs, apidocs, active) are allowlisted so
+intentional off-ramp and MOR/hr comparison links in capacity errors survive
+to the client.
 """
 
 import re
 
-# Public documentation hosts that are safe (and intended) in client-facing
-# error copy — e.g. P2P / self-custody off-ramp on model_unavailable.
+# Public hosts that are safe (and intended) in client-facing error copy —
+# e.g. P2P off-ramp docs and active.mor.org MOR/hr catalog references.
 _ALLOWED_URL_HOSTS = (
     "nodedocs.mor.org",
     "nodedocs.dev",
     "apidocs.mor.org",
+    "active.mor.org",
+    "active.dev.mor.org",
 )
 
 _URL_RE = re.compile(
@@ -106,8 +109,8 @@ def sanitize_error_message(raw: str) -> str:
     safe to call on every error path.  Only the *client-facing* message
     should be sanitized -- keep writing the original to logs.
 
-    Public docs URLs/hosts (nodedocs.mor.org, apidocs.mor.org) are kept so
-    hosted-gateway off-ramp copy can point users at self-custody docs.
+    Public docs/catalog URLs (nodedocs, apidocs, active.mor.org) are kept so
+    hosted-gateway off-ramp and fuse copy can point users at safe destinations.
     """
     if not raw:
         return raw
