@@ -386,21 +386,6 @@ jobs:
           # Set database URL for migrations
           export DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
           export ENVIRONMENT="$ENV"
-
-          # Alembic imports Settings via env.py. Production-like ENVIRONMENT
-          # values fail-closed unless these exist — pull the *existing* values
-          # from the app secret (do not invent/rotate ENCRYPTION_SECRET_KEY).
-          APP_SECRET_VALUE=$(aws secretsmanager get-secret-value \
-            --secret-id "${ENV}-morpheus-api" \
-            --query SecretString --output text)
-          export ENCRYPTION_SECRET_KEY=$(echo "$APP_SECRET_VALUE" | jq -r '.ENCRYPTION_SECRET_KEY // empty')
-          export COGNITO_USER_POOL_ID=$(echo "$APP_SECRET_VALUE" | jq -r '.COGNITO_USER_POOL_ID // empty')
-          export COGNITO_CLIENT_ID=$(echo "$APP_SECRET_VALUE" | jq -r '.COGNITO_CLIENT_ID // empty')
-          if [ -z "$ENCRYPTION_SECRET_KEY" ] || [ -z "$COGNITO_USER_POOL_ID" ] || [ -z "$COGNITO_CLIENT_ID" ]; then
-            echo "❌ Missing ENCRYPTION_SECRET_KEY / COGNITO_* in ${ENV}-morpheus-api"
-            exit 1
-          fi
-          echo "✅ Loaded app Settings prerequisites from ${ENV}-morpheus-api (values not printed)"
           
           # Create backup point (get current revision before migration)
           echo "📋 Recording current database state before migration..."
@@ -833,19 +818,6 @@ jobs:
           echo "🔄 Target rollback revision: ${{ env.PRE_MIGRATION_REVISION }}"
           
           export DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
-          export ENVIRONMENT="$ENV"
-
-          # Same Settings prerequisites as the migrate step (reuse existing SM values).
-          APP_SECRET_VALUE=$(aws secretsmanager get-secret-value \
-            --secret-id "${ENV}-morpheus-api" \
-            --query SecretString --output text)
-          export ENCRYPTION_SECRET_KEY=$(echo "$APP_SECRET_VALUE" | jq -r '.ENCRYPTION_SECRET_KEY // empty')
-          export COGNITO_USER_POOL_ID=$(echo "$APP_SECRET_VALUE" | jq -r '.COGNITO_USER_POOL_ID // empty')
-          export COGNITO_CLIENT_ID=$(echo "$APP_SECRET_VALUE" | jq -r '.COGNITO_CLIENT_ID // empty')
-          if [ -z "$ENCRYPTION_SECRET_KEY" ] || [ -z "$COGNITO_USER_POOL_ID" ] || [ -z "$COGNITO_CLIENT_ID" ]; then
-            echo "❌ Missing ENCRYPTION_SECRET_KEY / COGNITO_* in ${ENV}-morpheus-api"
-            exit 1
-          fi
           
           # Check current revision before rollback
           CURRENT_REV=$(poetry run alembic current --verbose 2>/dev/null | grep "Current revision" | awk '{print $NF}' || echo "none")
