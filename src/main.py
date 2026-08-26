@@ -79,11 +79,7 @@ try:
             r"^https://.*\.mor\.org$",  # Any subdomain of mor.org
             r"^https://.*\.dev\.mor\.org$",  # Any subdomain of dev.mor.org
         ],
-        # Reflecting ANY https origin with Allow-Credentials is a CSRF
-        # primitive the moment cookie auth exists. Only permitted in local/dev/
-        # test; production-like environments rely on the explicit allowlist and
-        # the *.mor.org trusted patterns above.
-        allow_direct_access=not settings.is_production_like
+        allow_direct_access=True
     )
     
     logger.info(f"CORS configured with allowed origins: {', '.join(allowed_origins)}")
