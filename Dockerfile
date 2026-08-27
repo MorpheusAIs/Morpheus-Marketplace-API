@@ -20,8 +20,11 @@ COPY pyproject.toml poetry.lock* ./
 # Install dependencies
 # --no-root: Don't install the project itself yet
 # --only main: Exclude development dependencies (replaces deprecated --no-dev)
+# poetry.lock is currently stale vs pyproject (missing siwe/web3/…). CI/Docker
+# still re-lock when check fails. The abnf pin in pyproject.toml is what
+# stops a same-day PyPI break (abnf 2.9.0 vs siwe, 2026-08-27) from landing
+# in a PRD rebuild. After a committed lock refresh, drop the `|| poetry lock`.
 RUN poetry config virtualenvs.create false && \
-    # Check if lock file is out of sync and regenerate if needed \
     (poetry check --lock || poetry lock) && \
     poetry install --no-root --only main --no-interaction --no-ansi
 
