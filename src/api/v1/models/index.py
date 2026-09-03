@@ -10,6 +10,7 @@ from ....services import proxy_router_service
 from ....core.config import settings
 from ....core.direct_model_service import direct_model_service
 from ....core.logging_config import get_api_logger
+from ....core.model_types import is_audio_model
 from ....utils.error_sanitizer import sanitize_error_message
 
 logger = get_api_logger()
@@ -25,6 +26,7 @@ async def list_models():
     
     Response is in OpenAI API format with selected fields from the blockchain data.
     Only returns active models with available providers.
+    TTS/STT models are omitted while audio endpoints are disabled (410).
     """
     try:
         models_logger = logger.bind(endpoint="list_models", event_type="models_fetch_start")
@@ -43,7 +45,9 @@ async def list_models():
             # Get model tags and type
             tags = model.get("Tags", [])
             model_type = model.get("ModelType", "UNKNOWN")
-            
+            if is_audio_model(tags=tags, model_type=model_type, model_name=model_name):
+                continue
+
             # Create simplified OpenAI-compatible model
             openai_model = {
                 "id": model_name,
@@ -102,6 +106,7 @@ async def list_all_models():
     
     Response is in OpenAI API format with selected fields from the blockchain data.
     Only returns non-deleted models.
+    TTS/STT models are omitted while audio endpoints are disabled (410).
     """
     try:
         allmodels_logger = logger.bind(endpoint="list_all_models", event_type="all_models_fetch_start")
@@ -130,7 +135,9 @@ async def list_all_models():
             # Get model tags and type
             tags = model.get("Tags", [])
             model_type = model.get("ModelType", "UNKNOWN")
-            
+            if is_audio_model(tags=tags, model_type=model_type, model_name=model_name):
+                continue
+
             # Create simplified OpenAI-compatible model
             openai_model = {
                 "id": model_name,
