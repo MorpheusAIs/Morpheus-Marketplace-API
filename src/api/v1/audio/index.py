@@ -29,7 +29,18 @@ from ....db.models import User, APIKey
 from ....core.logging_config import get_api_logger
 from ....utils.error_sanitizer import sanitize_error_message
 
-router = APIRouter(tags=["Audio"])
+AUDIO_DISABLED_DETAIL = "Audio endpoints are disabled."
+
+
+async def audio_unavailable() -> None:
+    """Reject audio traffic until usage can be billed. Remove this dependency to restore."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=AUDIO_DISABLED_DETAIL,
+    )
+
+
+router = APIRouter(tags=["Audio"], dependencies=[Depends(audio_unavailable)])
 
 logger = get_api_logger()
 
@@ -43,7 +54,12 @@ class AudioSpeechRequest(BaseModel):
     session_id: Optional[str] = Field(None, description="Session ID (auto-created if not provided)")
     model: Optional[str] = Field(None, description="Model name")
 
-@router.post("/audio/transcriptions")
+@router.post(
+    "/audio/transcriptions",
+    responses={
+        410: {"description": AUDIO_DISABLED_DETAIL},
+    },
+)
 async def create_audio_transcription(
     file: Annotated[
         UploadFile | SkipJsonSchema[None], File(description="Audio file to transcribe")
@@ -63,12 +79,9 @@ async def create_audio_transcription(
 ):
     """
     Transcribe audio file to text.
-    
-    This endpoint transcribes audio files using the Morpheus Network providers.
-    It automatically manages sessions and routes requests to the appropriate transcription model.
-    
-    Supports both file upload and S3 pre-signed URLs.
-    Returns JSON or plain text responses based on response_format parameter.
+
+    Currently returns 410 Gone: audio usage cannot be billed yet.
+    Implementation is retained for when billing is added.
     """
     request_id = str(uuid.uuid4())[:8]  # Generate short request ID for tracing
     transcription_logger = logger.bind(
@@ -327,7 +340,8 @@ async def create_audio_transcription(
                 "audio/pcm": { "schema": { "type": "string", "format": "binary" } }
             },
             "description": "Binary audio file"
-        }
+        },
+        410: {"description": AUDIO_DISABLED_DETAIL},
     }
 )
 async def create_audio_speech(
@@ -338,15 +352,9 @@ async def create_audio_speech(
 ):
     """
     Generate audio speech from text.
-    
-    This endpoint converts text to speech using the Morpheus Network providers.
-    It automatically manages sessions and routes requests to the appropriate TTS model.
-    
-    Returns binary audio data in the specified format.
-    
-    **Note:** Swagger UI may not be able to play the audio directly. 
-    To test, click "Download" and play the file in your media player, 
-    or use curl to save the audio file.
+
+    Currently returns 410 Gone: audio usage cannot be billed yet.
+    Implementation is retained for when billing is added.
     """
     # Extract parameters from request
     input = request_data.input
