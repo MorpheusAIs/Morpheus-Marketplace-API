@@ -98,6 +98,35 @@ MODEL_TYPE_RULES = {
     )
 }
 
+# Catalog / feed type strings that mean TTS or STT.
+_AUDIO_MODEL_TYPES = {
+    "TTS",
+    "STT",
+    "TEXT_TO_SPEECH",
+    "SPEECH_TO_TEXT",
+    "AUDIO_GENERATION",
+}
+
+# Tags that classify_model_type already treats as TTS/STT.
+_AUDIO_TAGS = {"TTS", "tts", "transcribe", "s2t", "speech"}
+
+
+def is_audio_model(
+    tags: Optional[List[str]] = None,
+    model_type: Optional[str] = None,
+    model_name: str = "",
+) -> bool:
+    """True when a catalog row is TTS or STT.
+
+    Used to hide audio models from GET /models while those endpoints are disabled.
+    ``model_name`` is accepted for call-site symmetry with classify_model_type.
+    """
+    raw_type = (model_type or "").strip().upper().replace("-", "_")
+    if raw_type in _AUDIO_MODEL_TYPES:
+        return True
+    return bool(_AUDIO_TAGS.intersection(tags or []))
+
+
 # Fallback rules for single tags
 SINGLE_TAG_RULES = {
     "Embeddings": ModelType.EMBEDDINGS,
