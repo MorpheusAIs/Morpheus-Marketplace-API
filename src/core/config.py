@@ -168,6 +168,13 @@ class Settings(BaseSettings):
     PROXY_ROUTER_CHAT_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_CHAT_TIMEOUT", "300.0")))
     PROXY_ROUTER_STREAM_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_STREAM_TIMEOUT", "300.0")))
     CHAT_FAILOVER_ENABLED: bool = Field(default=os.getenv("CHAT_FAILOVER_ENABLED", "true").lower() == "true")
+    # Request translation: rewrite the canonical `reasoning` field into the
+    # provider-declared binding for the session's provider (see
+    # src/api/v1/chat/request_translation.py). Ships inert; enable per env.
+    REQUEST_TRANSLATION_ENABLED: bool = Field(default=os.getenv("REQUEST_TRANSLATION_ENABLED", "false").lower() == "true")
+    # How long a provider's per-model API spec (fetched via the proxy-router
+    # ping) is reused before re-fetching.
+    PROVIDER_API_SPEC_TTL_SECONDS: int = Field(default=int(os.getenv("PROVIDER_API_SPEC_TTL_SECONDS", "600")))
 
     # AWS settings (credentials come from ECS task role; no explicit keys needed)
     AWS_REGION: str = os.getenv("AWS_REGION", "us-east-2")
