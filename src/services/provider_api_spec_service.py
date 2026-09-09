@@ -11,6 +11,14 @@ that report through its own consumer proxy-router:
 Results are cached per provider (the whole report) for
 PROVIDER_API_SPEC_TTL_SECONDS; failures are negative-cached briefly so a dead
 provider does not add a ping to every request.
+
+Concurrency: the cache is read lock-free, so an already-cached lookup never
+waits on anything. A miss/refresh for a given provider is serialized with a
+per-provider `asyncio.Lock` (created on demand) so concurrent lookups for the
+*same* provider ping it once, while lookups for unrelated providers never
+wait on each other. The providers-list refresh (`getProviders()`) has its own
+separate lock; a failure there backs off for `negative_ttl_seconds` instead
+of being retried on every miss during an outage.
 """
 import asyncio
 import time
@@ -42,13 +50,21 @@ class ProviderApiSpecService:
         # provider address (lowercase) -> the checksum-cased address as reported
         # by the proxy-router, kept per-instance so tests don't leak state.
         self._display: Dict[str, str] = {}
-        self._lock = asyncio.Lock()
+        # Per-provider locks (created on demand) so a miss/refresh for one
+        # provider never blocks lookups for another. Dict access itself needs
+        # no lock: asyncio is single-threaded and get_spec never awaits
+        # between checking for a lock and creating one.
+        self._provider_locks: Dict[str, asyncio.Lock] = {}
+        # Guards refreshing the shared providers list, independent of any
+        # per-provider lock.
+        self._providers_lock = asyncio.Lock()
 
     def clear(self) -> None:
         self._reports.clear()
         self._endpoints.clear()
         self._endpoints_expire_at = 0.0
         self._display.clear()
+        self._provider_locks.clear()
 
     async def get_spec(self, provider_address: str, model_id: str) -> Optional[dict]:
         """Return the provider-declared `api` block for model_id, or None."""
@@ -57,7 +73,16 @@ class ProviderApiSpecService:
         if not addr or not mid:
             return None
 
-        async with self._lock:
+        # Lock-free fast path: an already-fresh cache entry is returned
+        # immediately, so a slow/dead provider elsewhere can never delay it.
+        entry = self._reports.get(addr)
+        if entry is not None and entry[0] > self._clock():
+            return entry[1].get(mid)
+
+        lock = self._provider_locks.setdefault(addr, asyncio.Lock())
+        async with lock:
+            # Re-check: another waiter may have just filled the cache while
+            # we were acquiring the lock.
             entry = self._reports.get(addr)
             if entry is not None and entry[0] > self._clock():
                 return entry[1].get(mid)
@@ -88,25 +113,35 @@ class ProviderApiSpecService:
             return specs.get(mid)
 
     async def _endpoint_for(self, addr: str) -> Optional[str]:
-        if self._endpoints_expire_at <= self._clock() or addr not in self._endpoints:
-            try:
-                providers: List[Any] = await proxy_router_service.getProviders()
-            except Exception as exc:
-                logger.warning("provider list fetch failed", error=str(exc),
-                               event_type="provider_api_spec_providers_failed")
-                providers = []
-            fresh: Dict[str, str] = {}
-            for p in providers:
-                if not isinstance(p, dict):
-                    continue
-                a = str(p.get("Address") or p.get("address") or "").strip().lower()
-                e = str(p.get("Endpoint") or p.get("endpoint") or "").strip()
-                if a and e:
-                    fresh[a] = e
-                    self._display[a] = str(p.get("Address") or p.get("address")).strip()
-            if fresh:
-                self._endpoints = fresh
-                self._endpoints_expire_at = self._clock() + self._ttl
+        if self._endpoints_expire_at <= self._clock():
+            async with self._providers_lock:
+                # Re-check: another waiter may have just refreshed the list.
+                if self._endpoints_expire_at <= self._clock():
+                    try:
+                        providers: List[Any] = await proxy_router_service.getProviders()
+                    except Exception as exc:
+                        logger.warning("provider list fetch failed", error=str(exc),
+                                       event_type="provider_api_spec_providers_failed")
+                        # Back off instead of retrying on every miss during an
+                        # outage; keep whatever endpoints/display we already know.
+                        self._endpoints_expire_at = self._clock() + self._negative_ttl
+                        return self._endpoints.get(addr)
+
+                    fresh: Dict[str, str] = {}
+                    display: Dict[str, str] = {}
+                    for p in providers:
+                        if not isinstance(p, dict):
+                            continue
+                        a = str(p.get("Address") or p.get("address") or "").strip().lower()
+                        e = str(p.get("Endpoint") or p.get("endpoint") or "").strip()
+                        if a and e:
+                            fresh[a] = e
+                            display[a] = str(p.get("Address") or p.get("address")).strip()
+                    # Replace (not accumulate) so providers that disappeared
+                    # from this refresh are pruned rather than kept forever.
+                    self._endpoints = fresh
+                    self._display = display
+                    self._endpoints_expire_at = self._clock() + self._ttl
         return self._endpoints.get(addr)
 
     # Keep the address exactly as the proxy-router reported it (checksum case)

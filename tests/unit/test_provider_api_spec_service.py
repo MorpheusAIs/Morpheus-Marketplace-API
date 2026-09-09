@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 from unittest.mock import AsyncMock, patch
@@ -68,3 +69,72 @@ async def test_get_spec_unknown_provider_or_missing_inputs():
         assert await svc.get_spec("", "0x01") is None
         assert await svc.get_spec("0xAAAA", "") is None
         pp.assert_not_awaited()
+
+
+async def test_concurrent_lookups_for_same_provider_ping_once():
+    now = [1000.0]
+    svc = _svc(now)
+    ping = {"models": [{"modelId": "0x01", "api": VENICE_API}]}
+    release = asyncio.Event()
+
+    async def slow_ping(*args, **kwargs):
+        await release.wait()
+        return ping
+
+    with patch.object(mod.proxy_router_service, "getProviders", new_callable=AsyncMock, return_value=PROVIDERS), \
+         patch.object(mod.proxy_router_service, "pingProvider", new_callable=AsyncMock, side_effect=slow_ping) as pp:
+        t1 = asyncio.create_task(svc.get_spec("0xaaaa", "0x01"))
+        t2 = asyncio.create_task(svc.get_spec("0xaaaa", "0x01"))
+        await asyncio.sleep(0.05)  # let both tasks reach the ping call
+        release.set()
+        spec1, spec2 = await asyncio.gather(t1, t2)
+        assert spec1 == VENICE_API
+        assert spec2 == VENICE_API
+        assert pp.await_count == 1, "concurrent lookups for the same provider must ping once"
+
+
+async def test_slow_provider_does_not_block_cached_lookup():
+    now = [1000.0]
+    svc = _svc(now)
+    ping_b = {"models": [{"modelId": "0x01", "api": VENICE_API}]}
+    block = asyncio.Event()
+
+    async def routed_ping(address, endpoint):
+        if address == "0xAAAA":
+            await block.wait()
+            return {"models": [{"modelId": "0x01", "api": VENICE_API}]}
+        return ping_b
+
+    with patch.object(mod.proxy_router_service, "getProviders", new_callable=AsyncMock, return_value=PROVIDERS), \
+         patch.object(mod.proxy_router_service, "pingProvider", new_callable=AsyncMock, side_effect=routed_ping):
+        # warm the cache for provider B
+        spec_b = await svc.get_spec("0xbbbb", "0x01")
+        assert spec_b == VENICE_API
+
+        # provider A's ping is blocked on `block`
+        task_a = asyncio.create_task(svc.get_spec("0xaaaa", "0x01"))
+        await asyncio.sleep(0.05)  # let task_a reach and block on the ping
+
+        # provider B's lookup must be served from cache without waiting on A
+        result_b = await asyncio.wait_for(svc.get_spec("0xbbbb", "0x01"), timeout=0.5)
+        assert result_b == VENICE_API
+        assert not task_a.done()
+
+        block.set()
+        spec_a = await task_a
+        assert spec_a == VENICE_API
+
+
+async def test_get_providers_failure_is_backed_off():
+    now = [1000.0]
+    svc = _svc(now)
+    with patch.object(mod.proxy_router_service, "getProviders", new_callable=AsyncMock, side_effect=RuntimeError("down")) as gp, \
+         patch.object(mod.proxy_router_service, "pingProvider", new_callable=AsyncMock) as pp:
+        assert await svc.get_spec("0xAAAA", "0x01") is None
+        assert await svc.get_spec("0xBBBB", "0x01") is None
+        assert gp.await_count == 1, "providers-list fetch must be backed off within the negative TTL"
+        pp.assert_not_awaited()
+
+        now[0] += 61
+        assert await svc.get_spec("0xAAAA", "0x01") is None
+        assert gp.await_count == 2, "past the negative TTL, the providers list must be re-fetched"
