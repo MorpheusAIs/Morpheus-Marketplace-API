@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 from typing import Optional
 import asyncio
+import copy
 import json
 import uuid
 
@@ -42,13 +43,12 @@ from ....core.config import settings
 from ....core.logging_config import get_api_logger
 from .chat_models import ChatCompletionRequest
 from .chat_utils import (
-    fix_tool_choice_structure,
-    remove_tool_choice_from_tools,
-    normalize_assistant_tool_call_messages,
     log_tool_request_details,
+    finalize_request_body,
 )
 from .chat_streaming import build_stream_generator, StreamingBillingParams
 from .chat_non_streaming import handle_non_streaming_request
+from .request_translation import translate_for_session
 from .chat_exceptions import (
     ChatError,
     InsufficientBalanceError,
@@ -154,8 +154,6 @@ async def create_chat_completion(
             event_type="tool_choice_detected",
         )
     
-    body = json.dumps(json_body).encode("utf-8")
-        
     # Create billing hold
     ledger_entry_id, model_id, token_estimate, real_model_name = await _create_billing_hold(
         request_id=request_id,
@@ -208,12 +206,21 @@ async def create_chat_completion(
         event_type="request_details",
     )
     
-    # Apply request fixes for tool calling compatibility
-    fix_tool_choice_structure(json_body, chat_logger)
-    remove_tool_choice_from_tools(json_body, chat_logger)
-    normalize_assistant_tool_call_messages(json_body, chat_logger)
+    # Apply request fixes for tool calling compatibility, then serialize the
+    # canonical (post-normalizer) body. Serialization must happen after the
+    # normalizers run, or their fixes never reach the wire.
+    body = finalize_request_body(json_body, chat_logger)
     log_tool_request_details(json_body, session_id, chat_logger)
-    
+
+    # Translation preview for the response headers only: the handlers
+    # translate the canonical body per attempt (initial and failover)
+    # themselves, so the body forwarded here stays untranslated.
+    translation_headers = {}
+    if settings.REQUEST_TRANSLATION_ENABLED:
+        preview = copy.deepcopy(json_body)
+        translation = await translate_for_session(preview, session_id, model_id)
+        translation_headers = translation.headers()
+
     # Handle request based on streaming preference
     if should_stream:
         return _handle_streaming_request(
@@ -228,6 +235,7 @@ async def create_chat_completion(
             ledger_entry_id=ledger_entry_id,
             token_estimate=token_estimate,
             rate_limit_result=rate_limit_result,
+            extra_headers=translation_headers,
         )
     else:
         return await _handle_non_streaming_request(
@@ -241,6 +249,7 @@ async def create_chat_completion(
             user=user,
             ledger_entry_id=ledger_entry_id,
             rate_limit_result=rate_limit_result,
+            extra_headers=translation_headers,
         )
 
 
@@ -464,6 +473,7 @@ def _handle_streaming_request(
     ledger_entry_id: uuid.UUID,
     token_estimate,
     rate_limit_result: Optional[RateLimitResult] = None,
+    extra_headers: Optional[dict] = None,
 ) -> StreamingResponse:
     """Handle streaming chat completion request (hold already created)."""
     chat_logger.info(
@@ -515,7 +525,10 @@ def _handle_streaming_request(
     if rate_limit_result and rate_limit_result.rpm_limit > 0:
         rate_headers = rate_limit_service.create_rate_limit_headers(rate_limit_result)
         headers.update(rate_headers.to_dict())
-    
+
+    if extra_headers:
+        headers.update(extra_headers)
+
     return StreamingResponse(
         stream_generator(),
         media_type="text/event-stream",
@@ -534,6 +547,7 @@ async def _handle_non_streaming_request(
     user: User,
     ledger_entry_id: uuid.UUID,
     rate_limit_result: Optional[RateLimitResult] = None,
+    extra_headers: Optional[dict] = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion request (hold already created)."""
     chat_logger.info(
@@ -589,6 +603,9 @@ async def _handle_non_streaming_request(
                     response.headers[key] = value
         
         response.headers["X-Request-Id"] = request_id
+        if extra_headers:
+            for k, v in extra_headers.items():
+                response.headers[k] = v
         return response
 
     except asyncio.CancelledError:

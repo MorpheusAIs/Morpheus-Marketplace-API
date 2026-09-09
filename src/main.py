@@ -73,7 +73,8 @@ try:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Requested-With", "X-API-Key"],
-        expose_headers=["Content-Length", "Content-Type"],
+        expose_headers=["Content-Length", "Content-Type", "X-Request-Id",
+                        "X-Morpheus-Provider-Stack", "X-Morpheus-Translated", "X-Morpheus-Unsupported"],
         max_age=86400,  # 24 hours for preflight cache
         trusted_domain_patterns=[
             r"^https://.*\.mor\.org$",  # Any subdomain of mor.org
