@@ -1253,6 +1253,74 @@ async def getRatedBids(model_id: str) -> httpx.Response:
         raise ProxyRouterServiceError(f"Failed to get rated bids for model {model_id}: {str(e)}")
 
 
+async def getProviders() -> list:
+    """
+    Fetch all on-chain providers from the proxy-router (GET blockchain/providers).
+
+    Returns the raw `providers` list; items carry the proxy-router's Go field
+    names (Address, Endpoint, Stake, CreatedAt, IsDeleted).
+
+    Raises:
+        ProxyRouterServiceError: If the request fails
+    """
+    logger.info("Getting providers from blockchain",
+               event_type="get_providers_start")
+
+    try:
+        response = await _execute_request(
+            "GET",
+            "blockchain/providers",
+            timeout=10.0,
+            max_retries=2
+        )
+        data = response.json()
+        providers = data.get("providers") if isinstance(data, dict) else None
+        return providers or []
+    except Exception as e:
+        logger.error("Error getting providers from blockchain",
+                    error=str(e),
+                    event_type="get_providers_error")
+        if isinstance(e, ProxyRouterServiceError):
+            raise
+        raise ProxyRouterServiceError(f"Failed to get providers: {str(e)}")
+
+
+async def pingProvider(provider_addr: str, provider_url: str) -> dict:
+    """
+    Ping a provider through the proxy-router (POST proxy/provider/ping) and
+    return its self-report: {"ping": ms, "version": str, "models": [...]}.
+    Each model entry may carry an `api` block (provider-declared API spec).
+
+    Raises:
+        ProxyRouterServiceError: If the request fails
+    """
+    logger.info("Pinging provider via proxy router",
+               provider_addr=provider_addr,
+               provider_url=provider_url,
+               event_type="ping_provider_start")
+
+    try:
+        response = await _execute_request(
+            "POST",
+            "proxy/provider/ping",
+            headers={"Content-Type": "application/json"},
+            json_data={"providerAddr": provider_addr, "providerUrl": provider_url},
+            timeout=10.0,
+            max_retries=2
+        )
+        data = response.json()
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.error("Error pinging provider via proxy router",
+                    provider_addr=provider_addr,
+                    provider_url=provider_url,
+                    error=str(e),
+                    event_type="ping_provider_error")
+        if isinstance(e, ProxyRouterServiceError):
+            raise
+        raise ProxyRouterServiceError(f"Failed to ping provider {provider_addr}: {str(e)}")
+
+
 async def getBlockchainBalance() -> httpx.Response:
     """
     Get ETH and MOR balance of the proxy-router's configured wallet.
