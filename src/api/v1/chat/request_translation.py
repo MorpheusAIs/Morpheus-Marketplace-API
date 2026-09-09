@@ -69,7 +69,7 @@ def extract_intents(body: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(budget, int) and not isinstance(budget, bool) and budget >= 0:
             intents[INTENT_BUDGET] = budget
     alias = body.get("reasoning_effort")
-    if isinstance(alias, str) and alias and INTENT_EFFORT not in intents and INTENT_DISABLE not in intents:
+    if isinstance(alias, str) and alias and not intents:
         if alias.lower() == "none":
             intents[INTENT_DISABLE] = True
         else:
@@ -126,6 +126,8 @@ def apply_spec(body: Dict[str, Any], spec: Optional[Dict[str, Any]]) -> Translat
 async def translate_for_session(body: Dict[str, Any], session_id: Optional[str], model_id: Optional[str]) -> TranslationResult:
     """Apply the session provider's spec to body (in place). No-op when disabled or unknown."""
     if not settings.REQUEST_TRANSLATION_ENABLED or not session_id or not model_id:
+        return TranslationResult()
+    if not extract_intents(body):
         return TranslationResult()
     try:
         async with get_db() as db:

@@ -173,3 +173,24 @@ async def test_translate_for_session_without_provider_is_noop():
         res = await rt.translate_for_session(body, "0xsess", "0x01")
     gs.assert_not_awaited()
     assert body == {"reasoning": {"enabled": False}} and res.touched is False
+
+
+async def test_translate_for_session_without_intents_skips_lookups():
+    body = {"messages": []}
+    with patch.object(rt.settings, "REQUEST_TRANSLATION_ENABLED", True), \
+         patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock) as mock_get_session, \
+         patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock) as mock_get_spec:
+        res = await rt.translate_for_session(body, "0xsess", "0x01")
+    mock_get_session.assert_not_awaited()
+    mock_get_spec.assert_not_awaited()
+    assert body == {"messages": []} and res.touched is False
+
+
+def test_alias_ignored_when_object_present():
+    # reasoning object contributes intents, so alias should be ignored
+    result = rt.extract_intents({"reasoning": {"enabled": True}, "reasoning_effort": "none"})
+    assert result == {"reasoning.enable": True}, f"Expected only reasoning.enable, got {result}"
+
+    # reasoning object contributes intents (budget), so alias should be ignored
+    result = rt.extract_intents({"reasoning": {"max_tokens": 100}, "reasoning_effort": "high"})
+    assert result == {"reasoning.budget": 100}, f"Expected only reasoning.budget, got {result}"
