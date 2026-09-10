@@ -152,6 +152,32 @@ async def test_translate_for_session_resolves_provider_and_applies():
     gs.assert_awaited_once_with("0xAAAA", "0x01")
     assert body == {"venice_parameters": {"disable_thinking": True}}
     assert res.applied == {"reasoning.disable": "venice_parameters.disable_thinking"}
+    # success path must mutate the caller's dict in place (handlers rely on this)
+    assert "reasoning" not in body and "venice_parameters" in body
+
+
+async def test_translate_for_session_never_raises_on_malformed_binding():
+    # provider-reported spec with a non-string param: set_path would raise AttributeError
+    bad_spec = {"stack": "vllm", "bindings": {"reasoning.disable": {
+        "kind": "body_param", "param": 123, "paramType": "boolean", "value": True}}}
+    body = {"messages": [], "reasoning": {"enabled": False}}
+    row = MagicMock()
+    row.provider_address = "0xprov"
+
+    class FakeGetDb:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return False
+
+    with patch.object(rt.settings, "REQUEST_TRANSLATION_ENABLED", True), \
+         patch.object(rt, "get_db", lambda: FakeGetDb()), \
+         patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock, return_value=row), \
+         patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock, return_value=bad_spec):
+        result = await rt.translate_for_session(body, "0xsess", "0x01")
+    assert result.applied == {} and result.unsupported == [] and not result.touched
+    assert body == {"messages": [], "reasoning": {"enabled": False}}, "body must be untouched on failure"
 
 
 async def test_translate_for_session_without_provider_is_noop():

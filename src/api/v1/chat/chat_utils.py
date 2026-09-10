@@ -112,4 +112,3 @@ def finalize_request_body(json_body: Dict[str, Any], chat_logger) -> bytes:
     remove_tool_choice_from_tools(json_body, chat_logger)
     normalize_assistant_tool_call_messages(json_body, chat_logger)
     return json.dumps(json_body).encode("utf-8")
-

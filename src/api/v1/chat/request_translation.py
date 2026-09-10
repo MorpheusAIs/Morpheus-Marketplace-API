@@ -13,6 +13,7 @@ proxy-router worktree):
 - canonical fields are removed only when at least one intent was applied;
 - no spec / no provider / flag off -> the body is left exactly as sent.
 """
+import copy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -140,7 +141,16 @@ async def translate_for_session(body: Dict[str, Any], session_id: Optional[str],
         logger.warning("request translation lookup failed", session_id=session_id, error=str(exc),
                        event_type="request_translation_lookup_failed")
         return TranslationResult()
-    result = apply_spec(body, spec)
+    work = copy.deepcopy(body)
+    try:
+        result = apply_spec(work, spec)
+    except Exception as exc:  # translation must never break a request
+        logger.warning("request translation apply failed", session_id=session_id, error=str(exc),
+                       event_type="request_translation_apply_failed")
+        return TranslationResult()
+    if result.touched:
+        body.clear()
+        body.update(work)
     if result.touched or result.unsupported:
         logger.info("request translation applied", session_id=session_id, stack=result.stack,
                     applied=result.applied, unsupported=result.unsupported,
