@@ -19,7 +19,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from src.api.v1.chat import chat_non_streaming, chat_streaming  # noqa: E402
 from src.api.v1.chat import request_translation as rt  # noqa: E402
-from src.db.models import SessionState  # noqa: E402
 from src.services.proxy_router_service import ProxyRouterServiceError  # noqa: E402
 
 VENICE = {"stack": "venice", "bindings": {"reasoning.disable": {"kind": "body_param", "param": "venice_parameters.disable_thinking", "paramType": "boolean", "value": True}}}
@@ -206,6 +205,35 @@ async def test_streaming_translates_session_renewal_retry(mock_user):
     assert first["session_id"] == "0xold" and first["venice_parameters"] == {"disable_thinking": True}
     assert second["session_id"] == "0xnew" and second["chat_template_kwargs"] == {"enable_thinking": False}
     assert "venice_parameters" not in second and "reasoning" not in second
+
+
+async def test_wire_params_skips_deepcopy_when_no_canonical_fields():
+    # No `reasoning`/`reasoning_effort` key: translation would be a no-op
+    # either way, so wire_params must return the caller's dict as-is (same
+    # object identity) instead of deepcopying it, flag on or off.
+    chat_params = {"temperature": 0.7}
+    with patch.object(chat_non_streaming, "translate_for_session", new_callable=AsyncMock) as tfs:
+        result = await chat_non_streaming.wire_params(chat_params, "0xsess", "0x01")
+    assert result is chat_params
+    tfs.assert_not_awaited()
+
+    with patch.object(chat_streaming, "translate_for_session", new_callable=AsyncMock) as tfs2:
+        result2 = await chat_streaming.wire_params(chat_params, "0xsess", "0x01")
+    assert result2 is chat_params
+    tfs2.assert_not_awaited()
+
+
+async def test_wire_params_deepcopies_when_canonical_field_present():
+    chat_params = {"reasoning": {"enabled": False}}
+    with patch.object(chat_non_streaming, "translate_for_session", new_callable=AsyncMock) as tfs:
+        result = await chat_non_streaming.wire_params(chat_params, "0xsess", "0x01")
+    assert result is not chat_params
+    tfs.assert_awaited_once()
+
+    with patch.object(chat_streaming, "translate_for_session", new_callable=AsyncMock) as tfs2:
+        result2 = await chat_streaming.wire_params(chat_params, "0xsess", "0x01")
+    assert result2 is not chat_params
+    tfs2.assert_awaited_once()
 
 
 async def test_streaming_translates_failover_retry(mock_user):

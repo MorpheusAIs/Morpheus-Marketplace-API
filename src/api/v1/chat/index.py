@@ -48,7 +48,7 @@ from .chat_utils import (
 )
 from .chat_streaming import build_stream_generator, StreamingBillingParams
 from .chat_non_streaming import handle_non_streaming_request
-from .request_translation import translate_for_session
+from .request_translation import translate_for_session, extract_intents, CANONICAL_FIELDS
 from .chat_exceptions import (
     ChatError,
     InsufficientBalanceError,
@@ -214,10 +214,12 @@ async def create_chat_completion(
 
     # Translation preview for the response headers only: the handlers
     # translate the canonical body per attempt (initial and failover)
-    # themselves, so the body forwarded here stays untranslated.
+    # themselves, so the body forwarded here stays untranslated. Only the
+    # canonical fields are copied for the preview (translation never reads
+    # anything else), so this stays cheap even for large tool/message bodies.
     translation_headers = {}
-    if settings.REQUEST_TRANSLATION_ENABLED:
-        preview = copy.deepcopy(json_body)
+    if settings.REQUEST_TRANSLATION_ENABLED and extract_intents(json_body):
+        preview = {k: copy.deepcopy(json_body[k]) for k in CANONICAL_FIELDS if k in json_body}
         translation = await translate_for_session(preview, session_id, model_id)
         translation_headers = translation.headers()
 

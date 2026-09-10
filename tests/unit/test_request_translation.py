@@ -125,6 +125,36 @@ def test_headers():
     assert rt.TranslationResult().headers() == {}
 
 
+def test_headers_sanitizes_untrusted_provider_values():
+    # spec["stack"] and binding["param"] come from an untrusted provider
+    # report; CRLF/non-latin-1 characters must never reach the header dict.
+    res = rt.TranslationResult(
+        stack="vllm\r\nX-Injected: 1é",
+        applied={"reasoning.disable": "chat_template_kwargs.enable_thinking"},
+        unsupported=["reasoning.budget"],
+        touched=True,
+    )
+    headers = res.headers()
+    assert headers["X-Morpheus-Provider-Stack"] == "vllmX-Injected1"
+    assert headers["X-Morpheus-Translated"] == "reasoning.disable=chat_template_kwargs.enable_thinking"
+    assert headers["X-Morpheus-Unsupported"] == "reasoning.budget"
+
+
+def test_headers_omits_stack_header_when_all_chars_unsafe():
+    res = rt.TranslationResult(stack="日本語")
+    assert "X-Morpheus-Provider-Stack" not in res.headers()
+
+
+def test_headers_caps_element_length():
+    res = rt.TranslationResult(stack="a" * 200)
+    assert res.headers()["X-Morpheus-Provider-Stack"] == "a" * 128
+
+
+def test_headers_omits_applied_pair_when_intent_or_param_all_unsafe():
+    res = rt.TranslationResult(applied={"reasoning.disable": "日本語"}, touched=True)
+    assert "X-Morpheus-Translated" not in res.headers()
+
+
 async def test_translate_for_session_disabled_is_noop():
     body = {"reasoning": {"enabled": False}}
     with patch.object(rt.settings, "REQUEST_TRANSLATION_ENABLED", False):
@@ -157,7 +187,9 @@ async def test_translate_for_session_resolves_provider_and_applies():
 
 
 async def test_translate_for_session_never_raises_on_malformed_binding():
-    # provider-reported spec with a non-string param: set_path would raise AttributeError
+    # provider-reported spec with a non-string param: set_path would raise AttributeError.
+    # apply_spec now catches this per-binding, so it's reported unsupported rather than
+    # discarding the whole translation via the outer guard.
     bad_spec = {"stack": "vllm", "bindings": {"reasoning.disable": {
         "kind": "body_param", "param": 123, "paramType": "boolean", "value": True}}}
     body = {"messages": [], "reasoning": {"enabled": False}}
@@ -176,8 +208,56 @@ async def test_translate_for_session_never_raises_on_malformed_binding():
          patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock, return_value=row), \
          patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock, return_value=bad_spec):
         result = await rt.translate_for_session(body, "0xsess", "0x01")
-    assert result.applied == {} and result.unsupported == [] and not result.touched
-    assert body == {"messages": [], "reasoning": {"enabled": False}}, "body must be untouched on failure"
+    assert result.applied == {} and result.unsupported == ["reasoning.disable"] and not result.touched
+    assert body == {"messages": [], "reasoning": {"enabled": False}}, "canonical field is only popped when something applied"
+
+
+def test_apply_spec_tolerates_malformed_binding_alongside_valid_one():
+    # One good binding applies cleanly; a malformed sibling binding (non-string
+    # param) is reported unsupported instead of discarding the whole result.
+    mixed_spec = {
+        "stack": "vllm",
+        "bindings": {
+            "reasoning.enable": {"kind": "body_param", "param": "reasoning_mode", "paramType": "string", "value": "on"},
+            "reasoning.budget": {"kind": "body_param", "param": 123, "paramType": "number"},
+        },
+    }
+    body = {"messages": [], "reasoning": {"enabled": True, "max_tokens": 100}}
+    res = rt.apply_spec(body, mixed_spec)
+    assert res.applied == {"reasoning.enable": "reasoning_mode"}
+    assert res.unsupported == ["reasoning.budget"]
+    assert res.touched is True
+    assert body == {"messages": [], "reasoning_mode": "on"}, "canonical reasoning key removed: at least one intent applied"
+
+
+def test_apply_spec_rejects_protected_root_param():
+    spec = {"stack": "evil", "bindings": {"reasoning.disable": {
+        "kind": "body_param", "param": "messages", "paramType": "string", "value": "override"}}}
+    body = {"messages": [{"role": "user", "content": "hi"}], "reasoning": {"enabled": False}}
+    res = rt.apply_spec(body, spec)
+    assert res.unsupported == ["reasoning.disable"]
+    assert res.applied == {}
+    assert res.touched is False
+    assert body["messages"] == [{"role": "user", "content": "hi"}], "protected root must never be overwritten"
+
+
+def test_apply_spec_rejects_template_kwarg_without_chat_template_kwargs_prefix():
+    spec = {"stack": "evil", "bindings": {"reasoning.disable": {
+        "kind": "template_kwarg", "param": "enable_thinking", "paramType": "boolean", "value": False}}}
+    body = {"reasoning": {"enabled": False}}
+    res = rt.apply_spec(body, spec)
+    assert res.unsupported == ["reasoning.disable"]
+    assert res.touched is False
+    assert body == {"reasoning": {"enabled": False}}
+
+
+def test_apply_spec_still_applies_prefixed_vllm_template_kwarg():
+    # Regression: a legitimately-prefixed template_kwarg binding (the existing
+    # vLLM fixture) must keep applying after the prefix check is added.
+    body = {"reasoning": {"enabled": False}}
+    res = rt.apply_spec(body, VLLM_QWEN)
+    assert res.applied == {"reasoning.disable": "chat_template_kwargs.enable_thinking"}
+    assert body == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 async def test_translate_for_session_without_provider_is_noop():

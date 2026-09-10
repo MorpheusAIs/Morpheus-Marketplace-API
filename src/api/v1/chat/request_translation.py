@@ -14,6 +14,7 @@ proxy-router worktree):
 - no spec / no provider / flag off -> the body is left exactly as sent.
 """
 import copy
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -34,6 +35,19 @@ INTENT_ENABLE = "reasoning.enable"
 INTENT_EFFORT = "reasoning.effort"
 INTENT_BUDGET = "reasoning.budget"
 
+# Roots a binding must never redirect: overwriting any of these could reroute
+# messages, disable streaming, or hijack session/model/tool routing embedded
+# in the request. Provider specs are untrusted data (see apply_spec).
+PROTECTED_ROOTS = frozenset({"messages", "stream", "session_id", "request_id", "model", "tools", "tool_choice"})
+
+_HEADER_SAFE = re.compile(r"[^A-Za-z0-9._/-]")
+_HEADER_ELEMENT_MAX = 128
+
+
+def _header_token(value: Any) -> str:
+    """Reduce an untrusted string to a header-safe token (may be empty)."""
+    return _HEADER_SAFE.sub("", str(value))[:_HEADER_ELEMENT_MAX]
+
 
 @dataclass
 class TranslationResult:
@@ -43,13 +57,27 @@ class TranslationResult:
     touched: bool = False
 
     def headers(self) -> Dict[str, str]:
+        # spec["stack"], intent names and binding["param"] all originate from
+        # an untrusted provider report — sanitize every element before it can
+        # reach StreamingResponse's header encoding (UnicodeEncodeError) or a
+        # raw socket write (CRLF header injection).
         out: Dict[str, str] = {}
         if self.stack:
-            out["X-Morpheus-Provider-Stack"] = self.stack
+            stack = _header_token(self.stack)
+            if stack:
+                out["X-Morpheus-Provider-Stack"] = stack
         if self.applied:
-            out["X-Morpheus-Translated"] = ";".join(f"{k}={v}" for k, v in self.applied.items())
+            pairs = []
+            for intent, param in self.applied.items():
+                intent_tok, param_tok = _header_token(intent), _header_token(param)
+                if intent_tok and param_tok:
+                    pairs.append(f"{intent_tok}={param_tok}")
+            if pairs:
+                out["X-Morpheus-Translated"] = ";".join(pairs)
         if self.unsupported:
-            out["X-Morpheus-Unsupported"] = ";".join(self.unsupported)
+            tokens = [t for t in (_header_token(u) for u in self.unsupported) if t]
+            if tokens:
+                out["X-Morpheus-Unsupported"] = ";".join(tokens)
         return out
 
 
@@ -105,13 +133,26 @@ def apply_spec(body: Dict[str, Any], spec: Optional[Dict[str, Any]]) -> Translat
         if not isinstance(binding, dict) or binding.get("kind") not in APPLIED_KINDS or not binding.get("param"):
             result.unsupported.append(intent)
             continue
-        value = binding["value"] if binding.get("value") is not None else requested
-        enum_values = binding.get("enumValues")
-        if binding.get("paramType") == "enum" and isinstance(enum_values, list) and value not in enum_values:
+        # A malformed binding (e.g. a non-string param) must only take down
+        # its own intent, not the intents that apply cleanly.
+        try:
+            param = binding["param"]
+            parts = [p for p in param.split(".") if p]
+            if not parts or parts[0] in PROTECTED_ROOTS:
+                result.unsupported.append(intent)
+                continue
+            if binding.get("kind") == "template_kwarg" and not param.startswith("chat_template_kwargs."):
+                result.unsupported.append(intent)
+                continue
+            value = binding["value"] if binding.get("value") is not None else requested
+            enum_values = binding.get("enumValues")
+            if binding.get("paramType") == "enum" and isinstance(enum_values, list) and value not in enum_values:
+                result.unsupported.append(intent)
+                continue
+            set_path(body, param, value)
+            result.applied[intent] = param
+        except Exception:
             result.unsupported.append(intent)
-            continue
-        set_path(body, binding["param"], value)
-        result.applied[intent] = binding["param"]
 
     if result.applied:
         # Don't clear a canonical field that a binding just wrote into (e.g.

@@ -32,7 +32,7 @@ from .chat_exceptions import (
     ProxyError,
     GatewayError,
 )
-from .request_translation import translate_for_session
+from .request_translation import translate_for_session, extract_intents
 
 
 def _parse_request(body: bytes) -> Tuple[list, dict]:
@@ -50,7 +50,15 @@ def _parse_request(body: bytes) -> Tuple[list, dict]:
 
 
 async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str]) -> dict:
-    """Translate a copy of the canonical params for this session's provider."""
+    """Translate a copy of the canonical params for this session's provider.
+
+    Returns ``chat_params`` itself (no copy) when it carries no canonical
+    field — translation would be a no-op either way, so this skips the
+    per-attempt deepcopy for all traffic that doesn't use reasoning controls,
+    flag on or off.
+    """
+    if not extract_intents(chat_params):
+        return chat_params
     params = copy.deepcopy(chat_params)
     await translate_for_session(params, session_id, model_id)
     return params
