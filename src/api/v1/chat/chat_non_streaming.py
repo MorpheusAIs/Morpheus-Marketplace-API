@@ -12,6 +12,7 @@ This module provides non-streaming response handling with:
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from typing import Optional, Tuple
 
@@ -31,6 +32,7 @@ from .chat_exceptions import (
     ProxyError,
     GatewayError,
 )
+from .request_translation import translate_for_session
 
 
 def _parse_request(body: bytes) -> Tuple[list, dict]:
@@ -39,12 +41,19 @@ def _parse_request(body: bytes) -> Tuple[list, dict]:
         request_data = json.loads(body.decode("utf-8"))
         messages = request_data.get("messages", [])
         chat_params = {
-            k: v for k, v in request_data.items() 
-            if k not in ["messages", "stream", "session_id"]
+            k: v for k, v in request_data.items()
+            if k not in ["messages", "stream", "session_id", "request_id"]
         }
         return messages, chat_params
     except Exception as e:
         raise RequestParseError(message=f"Invalid JSON in request body: {e}") from e
+
+
+async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str]) -> dict:
+    """Translate a copy of the canonical params for this session's provider."""
+    params = copy.deepcopy(chat_params)
+    await translate_for_session(params, session_id, model_id)
+    return params
 
 
 def _parse_response(response: httpx.Response, logger, request_id: str) -> Tuple[Optional[dict], Optional[str]]:
@@ -90,13 +99,24 @@ async def _release_session_quiet(session_id: str, logger) -> None:
         )
 
 
-async def _make_proxy_request(session_id: str, messages: list, chat_params: dict, request_id: str = None) -> httpx.Response:
-    """Make a chat completion request to the proxy router."""
+async def _make_proxy_request(
+    session_id: str,
+    messages: list,
+    chat_params: dict,
+    model_id: Optional[str] = None,
+    request_id: str = None,
+) -> httpx.Response:
+    """Make a chat completion request to the proxy router.
+
+    Translates a fresh copy of the canonical ``chat_params`` for this attempt's
+    session/provider; ``chat_params`` itself is never mutated, so a later
+    retry can translate again for a different provider.
+    """
     return await proxy_router_service.chatCompletions(
         session_id=session_id,
         messages=messages,
         request_id=request_id,
-        **chat_params,
+        **(await wire_params(chat_params, session_id, model_id)),
     )
 
 
@@ -204,7 +224,7 @@ async def handle_non_streaming_request(
 
     # First attempt
     try:
-        response = await _make_proxy_request(session_id, messages, chat_params, request_id=request_id)
+        response = await _make_proxy_request(session_id, messages, chat_params, model_id=model_id, request_id=request_id)
     except proxy_router_service.ProxyRouterServiceError as e:
         logger.error(
             "Proxy router error on initial request",
@@ -231,6 +251,7 @@ async def handle_non_streaming_request(
                     original_session_id=session_id,
                     messages=messages,
                     chat_params=chat_params,
+                    model_id=model_id,
                     logger=logger,
                     request_id=request_id,
                 )
@@ -251,6 +272,7 @@ async def handle_non_streaming_request(
                     original_session_id=session_id,
                     messages=messages,
                     chat_params=chat_params,
+                    model_id=model_id,
                     logger=logger,
                     request_id=request_id,
                 )
@@ -299,6 +321,7 @@ async def _retry_with_new_session(
     messages: list,
     chat_params: dict,
     logger,
+    model_id: Optional[str] = None,
     request_id: str = None,
 ) -> JSONResponse:
     """Retry the request once with a new session. Releases the new session."""
@@ -311,7 +334,7 @@ async def _retry_with_new_session(
 
     try:
         try:
-            response = await _make_proxy_request(new_session_id, messages, chat_params, request_id=request_id)
+            response = await _make_proxy_request(new_session_id, messages, chat_params, model_id=model_id, request_id=request_id)
         except proxy_router_service.ProxyRouterServiceError as e:
             logger.error(
                 "Retry request failed",
