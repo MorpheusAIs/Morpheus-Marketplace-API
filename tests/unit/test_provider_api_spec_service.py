@@ -171,3 +171,37 @@ async def test_unknown_address_forces_refresh_after_30s_but_not_more_often():
         now[0] += 5
         assert await svc.get_spec("0xdddd", "0x01") is None
         assert gp.await_count == 2, "a second unknown address within 30s must not force another refresh"
+
+
+async def test_forced_refresh_is_bounded_during_outage():
+    now = [1000.0]
+    svc = _svc(now)
+    ping = {"models": [{"modelId": "0x01", "api": VENICE_API}]}
+    providers_a_only = [{"Address": "0xAAAA", "Endpoint": "1.2.3.4:3333"}]
+    with patch.object(mod.proxy_router_service, "getProviders", new_callable=AsyncMock,
+                       return_value=providers_a_only) as gp, \
+         patch.object(mod.proxy_router_service, "pingProvider", new_callable=AsyncMock, return_value=ping):
+        # One successful refresh: provider A resolves and is cached.
+        assert await svc.get_spec("0xaaaa", "0x01") == VENICE_API
+        assert gp.await_count == 1
+
+        # Outage begins: every getProviders call from here on fails.
+        gp.side_effect = RuntimeError("down")
+
+        # Past the 30s force-refresh window, lookups for 5 distinct unknown
+        # addresses must trigger at most one additional getProviders call,
+        # not one per address (the refresh-storm this fix bounds).
+        now[0] += 31
+        for addr in ("0xbbbb", "0xcccc", "0xdddd", "0xeeee", "0xffff"):
+            assert await svc.get_spec(addr, "0x01") is None
+            now[0] += 1
+        assert gp.await_count == 2, "only the first forced attempt during the outage window may call getProviders"
+
+        # Known endpoints must still resolve despite the ongoing outage.
+        assert await svc.get_spec("0xaaaa", "0x01") == VENICE_API
+
+        # Once another 30s have elapsed since that forced attempt, exactly
+        # one more forced attempt is allowed on the next unknown lookup.
+        now[0] += 30
+        assert await svc.get_spec("0x1111", "0x01") is None
+        assert gp.await_count == 3

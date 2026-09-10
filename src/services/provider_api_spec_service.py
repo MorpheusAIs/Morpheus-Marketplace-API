@@ -52,11 +52,14 @@ class ProviderApiSpecService:
         # provider address (lowercase) -> endpoint; refreshed with the report TTL
         self._endpoints: Dict[str, str] = {}
         self._endpoints_expire_at: float = 0.0
-        # Monotonic time of the last successful (not negative-cached) refresh,
-        # or None if none has ever succeeded. Lets an unknown address force an
-        # early refresh (a provider may have registered on-chain since the
-        # last refresh) without fighting the negative-cache backoff on failure.
-        self._endpoints_refreshed_at: Optional[float] = None
+        # Monotonic time of the last getProviders() attempt, success or
+        # failure. Lets an unknown address force an early refresh (a provider
+        # may have registered on-chain since the last refresh) without
+        # fighting the negative-cache backoff: bounding this by the last
+        # *attempt* (not the last success) keeps a burst of lookups for
+        # distinct unknown addresses during an outage from each forcing their
+        # own getProviders() call.
+        self._endpoints_attempted_at: float = 0.0
         # provider address (lowercase) -> the checksum-cased address as reported
         # by the proxy-router, kept per-instance so tests don't leak state.
         self._display: Dict[str, str] = {}
@@ -73,7 +76,7 @@ class ProviderApiSpecService:
         self._reports.clear()
         self._endpoints.clear()
         self._endpoints_expire_at = 0.0
-        self._endpoints_refreshed_at = None
+        self._endpoints_attempted_at = 0.0
         self._display.clear()
         self._provider_locks.clear()
 
@@ -126,13 +129,13 @@ class ProviderApiSpecService:
     def _unknown_provider_needs_forced_refresh(self, addr: str, now: float) -> bool:
         """An address absent from an otherwise-fresh list may simply be new
         on-chain since the last refresh. Force a refresh at most once per
-        UNKNOWN_PROVIDER_FORCE_REFRESH_SECONDS so a burst of lookups for the
-        same (or other) unknown providers doesn't hammer getProviders(); never
-        fires while the last refresh failed (that's the negative-cache path)."""
+        UNKNOWN_PROVIDER_FORCE_REFRESH_SECONDS, measured from the last
+        getProviders() *attempt* (success or failure) so a burst of lookups
+        for distinct unknown addresses during an outage can't each force
+        their own call and defeat the negative-cache backoff."""
         return (
             addr not in self._endpoints
-            and self._endpoints_refreshed_at is not None
-            and now - self._endpoints_refreshed_at >= UNKNOWN_PROVIDER_FORCE_REFRESH_SECONDS
+            and now - self._endpoints_attempted_at >= UNKNOWN_PROVIDER_FORCE_REFRESH_SECONDS
         )
 
     async def _endpoint_for(self, addr: str) -> Optional[str]:
@@ -143,6 +146,7 @@ class ProviderApiSpecService:
                 # Re-check: another waiter may have just refreshed the list.
                 now = self._clock()
                 if self._endpoints_expire_at <= now or self._unknown_provider_needs_forced_refresh(addr, now):
+                    self._endpoints_attempted_at = self._clock()
                     try:
                         providers: List[Any] = await proxy_router_service.getProviders()
                     except Exception as exc:
@@ -169,9 +173,7 @@ class ProviderApiSpecService:
                     # from this refresh are pruned rather than kept forever.
                     self._endpoints = fresh
                     self._display = display
-                    now = self._clock()
-                    self._endpoints_expire_at = now + self._ttl
-                    self._endpoints_refreshed_at = now
+                    self._endpoints_expire_at = self._clock() + self._ttl
         return self._endpoints.get(addr)
 
     # Keep the address exactly as the proxy-router reported it (checksum case)
