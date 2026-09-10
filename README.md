@@ -464,13 +464,13 @@ curl http://localhost:8000/api/v1/models
 `POST /api/v1/chat/completions` accepts a canonical reasoning field alongside any provider-native parameters:
 
 - `reasoning`: `{"enabled": bool, "effort": str, "max_tokens": int}`
-- `reasoning_effort` (top-level alias, e.g. `"none"` to disable) — ignored whenever `reasoning` is present.
+- `reasoning_effort` (top-level alias, e.g. `"none"` to disable) — ignored when the `reasoning` object itself yields an instruction (`enabled`, `effort` or `max_tokens`).
 
 When `REQUEST_TRANSLATION_ENABLED=true` (default `false`) **and** the provider serving the session declares an API spec (fetched by the gateway through its proxy-router and cached for `PROVIDER_API_SPEC_TTL_SECONDS`, default `600`), the gateway rewrites these canonical fields into that provider's own parameters — e.g. vLLM's `chat_template_kwargs.enable_thinking=false`, Venice's `venice_parameters.disable_thinking=true`, OpenRouter's `reasoning.effort="none"`. If the flag is off, the provider declares no spec, or there is no provider, the request body is forwarded unchanged.
 
-Translation is re-done on every attempt, so a failover or session renewal to a different provider re-translates the same canonical request against the new provider's spec.
+Translation is re-done on every attempt, so a failover or session renewal to a different provider re-translates the same canonical request against the new provider's spec. The `X-Morpheus-*` response headers reflect the provider of the *initial* attempt only — a failover or session renewal re-translates the request but does not update the headers.
 
-Provider-native fields (`venice_parameters`, `chat_template_kwargs`, `reasoning_effort` for OpenAI-compatible backends, …) always pass through unchanged — translation only adds the bound parameter and removes the canonical field it consumed.
+Provider-native fields (`venice_parameters`, `chat_template_kwargs`, …) always pass through unchanged — translation only adds the bound parameter and removes the canonical field it consumed.
 
 The response carries (and CORS exposes) these headers when translation ran:
 
@@ -483,8 +483,11 @@ Settings (`src/core/config.py`, see `env.example`):
 - `REQUEST_TRANSLATION_ENABLED` (default `false`)
 - `PROVIDER_API_SPEC_TTL_SECONDS` (default `600`)
 
+The first request to a provider after that spec cache expires may wait for the spec fetch (a single attempt, up to the proxy-router timeout) before the request proceeds.
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-3.5-turbo",

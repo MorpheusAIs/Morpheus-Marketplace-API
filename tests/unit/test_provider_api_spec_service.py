@@ -8,7 +8,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.services import provider_api_spec_service as mod  # noqa: E402
 
 VENICE_API = {"stack": "venice", "bindings": {"reasoning.disable": {"kind": "body_param", "param": "venice_parameters.disable_thinking", "paramType": "boolean", "value": True}}}
-PROVIDERS = [{"Address": "0xAAAA", "Endpoint": "1.2.3.4:3333"}, {"Address": "0xBBBB", "Endpoint": "5.6.7.8:3333"}]
+PROVIDERS = [
+    {"Address": "0xAAAA", "Endpoint": "1.2.3.4:3333"},
+    {"Address": "0xBBBB", "Endpoint": "5.6.7.8:3333"},
+    {"Address": "0xDEAD", "Endpoint": "9.9.9.9:3333", "IsDeleted": True},
+]
 
 
 def _svc(now):
@@ -33,6 +37,10 @@ async def test_get_spec_resolves_endpoint_then_pings_and_caches():
         # a different model on the same provider: no new ping either (report cached per provider)
         assert await svc.get_spec("0xaaaa", "0x02") is None
         assert pp.await_count == 1
+
+        # a deleted provider must never resolve to an endpoint (and so is never pinged)
+        assert await svc.get_spec("0xdead", "0x01") is None
+        assert pp.await_count == 1, "deleted provider must never be pinged"
 
 
 async def test_get_spec_expires_after_ttl():
@@ -138,3 +146,28 @@ async def test_get_providers_failure_is_backed_off():
         now[0] += 61
         assert await svc.get_spec("0xAAAA", "0x01") is None
         assert gp.await_count == 2, "past the negative TTL, the providers list must be re-fetched"
+
+
+async def test_unknown_address_forces_refresh_after_30s_but_not_more_often():
+    now = [1000.0]
+    svc = _svc(now)
+    ping = {"models": [{"modelId": "0x01", "api": VENICE_API}]}
+    updated_providers = PROVIDERS + [{"Address": "0xCCCC", "Endpoint": "9.9.9.9:4444"}]
+    with patch.object(mod.proxy_router_service, "getProviders", new_callable=AsyncMock,
+                       side_effect=[PROVIDERS, updated_providers]) as gp, \
+         patch.object(mod.proxy_router_service, "pingProvider", new_callable=AsyncMock, return_value=ping) as pp:
+        # Populate a fresh, successfully-refreshed endpoint list (well within TTL=600s).
+        assert await svc.get_spec("0xaaaa", "0x01") == VENICE_API
+        assert gp.await_count == 1
+
+        # "0xCCCC" is unknown to that still-TTL-fresh list. More than 30s
+        # since the last successful refresh forces a re-fetch that picks it up.
+        now[0] += 31
+        assert await svc.get_spec("0xcccc", "0x01") == VENICE_API
+        assert gp.await_count == 2, "an address unknown to a fresh list must be found after a forced refresh"
+
+        # A second unknown address within 30s of that forced refresh must not
+        # trigger another getProviders call.
+        now[0] += 5
+        assert await svc.get_spec("0xdddd", "0x01") is None
+        assert gp.await_count == 2, "a second unknown address within 30s must not force another refresh"

@@ -26,6 +26,8 @@ async def test_get_providers_returns_list():
     assert providers == [{"Address": "0xAbC", "Endpoint": "1.2.3.4:3333", "IsDeleted": False}]
     called = ex.await_args
     assert "blockchain/providers" in str(called.args)
+    assert called.kwargs.get("max_retries") == 1, "getProviders must be a single attempt (negative-cached on failure)"
+    assert called.kwargs.get("timeout") == 10.0
 
 
 async def test_ping_provider_posts_body_and_returns_models():
@@ -37,3 +39,5 @@ async def test_ping_provider_posts_body_and_returns_models():
     assert "proxy/provider/ping" in str(called.args)
     body = called.kwargs.get("json_data")
     assert body == {"providerAddr": "0xabc", "providerUrl": "1.2.3.4:3333"}
+    assert called.kwargs.get("max_retries") == 1, "pingProvider must be a single attempt (negative-cached on failure)"
+    assert called.kwargs.get("timeout") == 10.0

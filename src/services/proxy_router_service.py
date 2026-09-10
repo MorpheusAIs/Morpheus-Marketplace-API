@@ -1267,11 +1267,14 @@ async def getProviders() -> list:
                event_type="get_providers_start")
 
     try:
+        # Single attempt: the spec service negative-caches failures for 60s
+        # (see ProviderApiSpecService), so retries here only add request-path
+        # latency without improving success odds within that window.
         response = await _execute_request(
             "GET",
             "blockchain/providers",
             timeout=10.0,
-            max_retries=2
+            max_retries=1
         )
         data = response.json()
         providers = data.get("providers") if isinstance(data, dict) else None
@@ -1300,13 +1303,16 @@ async def pingProvider(provider_addr: str, provider_url: str) -> dict:
                event_type="ping_provider_start")
 
     try:
+        # Single attempt: the spec service negative-caches failures for 60s
+        # (see ProviderApiSpecService), so retries here only add request-path
+        # latency without improving success odds within that window.
         response = await _execute_request(
             "POST",
             "proxy/provider/ping",
             headers={"Content-Type": "application/json"},
             json_data={"providerAddr": provider_addr, "providerUrl": provider_url},
             timeout=10.0,
-            max_retries=2
+            max_retries=1
         )
         data = response.json()
         return data if isinstance(data, dict) else {}
