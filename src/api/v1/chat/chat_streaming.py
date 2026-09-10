@@ -434,6 +434,7 @@ def build_stream_generator(
                                 user=user,
                                 requested_model=requested_model,
                                 logger=stream_logger,
+                                model_id=model_id,
                                 accumulator=accumulator,
                                 request_id=billing_params.request_id if billing_params else None,
                             )
@@ -514,13 +515,6 @@ def build_stream_generator(
     return stream_generator
 
 
-async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str]) -> dict:
-    """Translate a copy of the canonical params for this session's provider."""
-    params = copy.deepcopy(chat_params)
-    await translate_for_session(params, session_id, model_id)
-    return params
-
-
 def _parse_request_body(body: bytes, logger: "BoundLogger") -> tuple[list, dict]:
     """Parse request body for messages and chat params."""
     try:
@@ -552,6 +546,13 @@ def _parse_request_body(body: bytes, logger: "BoundLogger") -> tuple[list, dict]
             event_type="stream_body_parse_error",
         )
         return [], {}
+
+
+async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str]) -> dict:
+    """Translate a copy of the canonical params for this session's provider."""
+    params = copy.deepcopy(chat_params)
+    await translate_for_session(params, session_id, model_id)
+    return params
 
 
 async def _process_stream_request(
@@ -717,6 +718,7 @@ async def _handle_session_retry(
     user,
     requested_model: Optional[str],
     logger: "BoundLogger",
+    model_id: Optional[str] = None,
     accumulator: Optional[StreamingUsageAccumulator] = None,
     request_id: Optional[str] = None,
 ) -> AsyncIterator[bytes | StreamResult]:
@@ -785,6 +787,7 @@ async def _handle_session_retry(
             logger=logger.bind(retry_session_id=new_session_id),
             accumulator=accumulator,
             request_id=request_id,
+            model_id=model_id,
         ):
             if isinstance(chunk, StreamResult) and (chunk.needs_retry or chunk.needs_failover):
                 yield _format_sse_error(

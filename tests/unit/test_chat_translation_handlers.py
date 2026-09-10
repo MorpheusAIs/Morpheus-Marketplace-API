@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from src.api.v1.chat import chat_non_streaming, chat_streaming  # noqa: E402
 from src.api.v1.chat import request_translation as rt  # noqa: E402
+from src.db.models import SessionState  # noqa: E402
 from src.services.proxy_router_service import ProxyRouterServiceError  # noqa: E402
 
 VENICE = {"stack": "venice", "bindings": {"reasoning.disable": {"kind": "body_param", "param": "venice_parameters.disable_thinking", "paramType": "boolean", "value": True}}}
@@ -30,10 +31,18 @@ PROVIDER_DOWN = ProxyRouterServiceError(
     status_code=500,
     error_type="server_error",
 )
+SESSION_EXPIRED = ProxyRouterServiceError(
+    'HTTP 500: {"error":"session expired"}', status_code=500, error_type="server_error",
+)
+GOOD_CHUNKS = [b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n', b"data: [DONE]\n\n"]
 
 
 def _spec_by_session(mapping):
     async def fake(body, session_id, model_id):
+        # Mirror translate_for_session's own short-circuit so tests can catch
+        # a missing model_id threading bug (a falsy model_id must no-op).
+        if not model_id:
+            return rt.TranslationResult()
         return rt.apply_spec(body, mapping.get(session_id))
     return fake
 
@@ -158,3 +167,63 @@ async def test_streaming_translates_initial_attempt(mock_user):
     kwargs = stream.calls[0]
     assert kwargs["venice_parameters"] == {"disable_thinking": True}
     assert "reasoning" not in kwargs
+
+
+def _stream_generator(mock_user):
+    return chat_streaming.build_stream_generator(
+        logger=MagicMock(),
+        session_id="0xold",
+        body=BODY,
+        requested_model="llama-3.3-70b",
+        model_id="0x01",
+        db_api_key=MagicMock(),
+        user=mock_user,
+    )
+
+
+async def test_streaming_translates_session_renewal_retry(mock_user):
+    outcomes = [SESSION_EXPIRED, FakeStreamResponse(GOOD_CHUNKS)]
+    with patch.object(chat_streaming.proxy_router_service, "chatCompletionsStream",
+                      _stream_cm_factory(outcomes)) as stream, \
+         patch.object(chat_streaming.chat_failover, "attempt_failover",
+                      new_callable=AsyncMock) as failover, \
+         patch.object(chat_streaming.session_routing_service, "invalidate_session",
+                      new_callable=AsyncMock, return_value=True), \
+         patch.object(chat_streaming.session_routing_service, "route_request",
+                      new_callable=AsyncMock, return_value="0xnew"), \
+         patch.object(chat_streaming.session_routing_service, "release_session",
+                      new_callable=AsyncMock), \
+         patch.object(chat_streaming, "get_db", _fake_get_db()), \
+         patch.object(chat_streaming, "_stream_cleanup", new_callable=AsyncMock), \
+         patch.object(chat_streaming, "translate_for_session",
+                      _spec_by_session({"0xold": VENICE, "0xnew": VLLM})), \
+         patch("asyncio.sleep", new_callable=AsyncMock):
+        async for _ in _stream_generator(mock_user)():
+            pass
+
+    failover.assert_not_awaited()
+    first, second = stream.calls[0], stream.calls[1]
+    assert first["session_id"] == "0xold" and first["venice_parameters"] == {"disable_thinking": True}
+    assert second["session_id"] == "0xnew" and second["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "venice_parameters" not in second and "reasoning" not in second
+
+
+async def test_streaming_translates_failover_retry(mock_user):
+    outcomes = [PROVIDER_DOWN, FakeStreamResponse(GOOD_CHUNKS)]
+    with patch.object(chat_streaming.proxy_router_service, "chatCompletionsStream",
+                      _stream_cm_factory(outcomes)) as stream, \
+         patch.object(chat_streaming.chat_failover, "attempt_failover",
+                      new_callable=AsyncMock, return_value="0xnew"), \
+         patch.object(chat_streaming.session_routing_service, "release_session",
+                      new_callable=AsyncMock), \
+         patch.object(chat_streaming, "get_db", _fake_get_db()), \
+         patch.object(chat_streaming, "_stream_cleanup", new_callable=AsyncMock), \
+         patch.object(chat_streaming, "translate_for_session",
+                      _spec_by_session({"0xold": VENICE, "0xnew": VLLM})):
+        async for _ in _stream_generator(mock_user)():
+            pass
+
+    first, second = stream.calls[0], stream.calls[1]
+    assert first["session_id"] == "0xold" and first["venice_parameters"] == {"disable_thinking": True}
+    assert second["session_id"] == "0xnew" and second["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "venice_parameters" not in second and "reasoning" not in second
