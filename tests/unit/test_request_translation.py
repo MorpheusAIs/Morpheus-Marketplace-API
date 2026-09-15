@@ -348,6 +348,19 @@ def test_translation_requested_mode_always_decision_table():
         assert rt.translation_requested({"X-Morpheus-Translate": "maybe"}) is True, "garbage counts as absent -> on"
 
 
+def test_translation_requested_is_case_insensitive_with_real_headers():
+    # In production translation_requested() is called with the incoming
+    # Request's real Starlette Headers object (case-insensitive, and keyed by
+    # lowercased wire header names), not a plain dict -- verify the lookup
+    # still finds a lowercase wire header via that object, not just via dict.get().
+    from starlette.datastructures import Headers
+
+    headers = Headers(raw=[(b"x-morpheus-translate", b"1")])
+    with patch.object(rt.settings, "REQUEST_TRANSLATION_MODE", "header"), \
+         patch.object(rt.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"):
+        assert rt.translation_requested(headers) is True
+
+
 # --- request_translation_active() ContextVar (H2) ---
 
 async def test_request_translation_active_defaults_false():
@@ -377,3 +390,30 @@ async def test_request_translation_active_defaults_false_in_a_fresh_task():
         return rt.request_translation_active()
 
     assert await asyncio.create_task(check()) is False
+
+
+async def test_request_translation_active_isolated_from_concurrent_in_flight_task():
+    # Stronger than the fresh-task test above: task B must not see task A's
+    # write even while task A is still in flight (blocked mid-request), not
+    # merely after A has already finished -- proving real per-task Context
+    # isolation rather than a value that just happens to reset between tasks.
+    ready = asyncio.Event()
+    release = asyncio.Event()
+
+    async def task_a():
+        rt.set_request_translation(True)
+        ready.set()
+        await release.wait()
+        return rt.request_translation_active()
+
+    async def task_b():
+        await ready.wait()
+        return rt.request_translation_active()
+
+    a = asyncio.create_task(task_a())
+    b = asyncio.create_task(task_b())
+    try:
+        assert await b is False, "unrelated task must not see task A's in-flight ContextVar write"
+    finally:
+        release.set()
+    assert await a is True, "task A must still see its own write"

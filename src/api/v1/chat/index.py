@@ -54,6 +54,7 @@ from .request_translation import (
     CANONICAL_FIELDS,
     translation_requested,
     set_request_translation,
+    translation_gate_headers,
 )
 from .chat_exceptions import (
     ChatError,
@@ -276,10 +277,7 @@ async def _prepare_translation_headers(
     translation_active = translation_requested(request.headers)
     set_request_translation(translation_active)
 
-    headers: dict = {}
-    if settings.REQUEST_TRANSLATION_MODE != "off":
-        headers["X-Morpheus-Translation"] = "on" if translation_active else "off"
-        headers["X-Morpheus-Translation-Mode"] = settings.REQUEST_TRANSLATION_MODE
+    headers: dict = translation_gate_headers()
 
     if translation_active and extract_intents(json_body):
         preview = {k: copy.deepcopy(json_body[k]) for k in CANONICAL_FIELDS if k in json_body}

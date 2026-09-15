@@ -116,6 +116,24 @@ def request_translation_active() -> bool:
     return _TRANSLATION_ACTIVE.get()
 
 
+def translation_gate_headers() -> Dict[str, str]:
+    """The X-Morpheus-Translation* gate headers for this request, or {} when
+    settings.REQUEST_TRANSLATION_MODE == "off" (translation fully disabled).
+
+    Single source for both the success path (index.py's
+    _prepare_translation_headers) and the ChatError error path (main.py's
+    chat_error_handler) -- both must report the same gate headers for a
+    given request, and both run in the request's own task/context, so
+    request_translation_active() reads back whatever this request already
+    published via set_request_translation()."""
+    if settings.REQUEST_TRANSLATION_MODE == "off":
+        return {}
+    return {
+        "X-Morpheus-Translation": "on" if request_translation_active() else "off",
+        "X-Morpheus-Translation-Mode": settings.REQUEST_TRANSLATION_MODE,
+    }
+
+
 @dataclass
 class TranslationResult:
     applied: Dict[str, str] = field(default_factory=dict)   # intent -> param path written

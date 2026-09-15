@@ -19,6 +19,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from src.api.v1.chat import index as chat_index  # noqa: E402
 from src.api.v1.chat import request_translation as rt  # noqa: E402
+from src.api.v1.chat.chat_exceptions import GatewayError  # noqa: E402
+from src import main as main_module  # noqa: E402
 
 
 def test_translation_result_headers_sanitizes_untrusted_provider_values():
@@ -158,3 +160,28 @@ async def test_prepare_translation_headers_reach_streaming_response_when_header_
 
     assert response.headers["X-Morpheus-Translation"] == "off"
     assert response.headers["X-Morpheus-Translation-Mode"] == "header"
+
+
+# --- chat_error_handler: the gate headers must also reach the ChatError error
+#     path (H3 above only covers the success path) ---
+
+async def test_chat_error_handler_adds_gate_headers_when_translation_active():
+    request = MagicMock()
+    token = rt.set_request_translation(True)
+    try:
+        with patch.object(main_module.settings, "REQUEST_TRANSLATION_MODE", "header"):
+            response = await main_module.chat_error_handler(request, GatewayError(message="boom"))
+    finally:
+        rt._TRANSLATION_ACTIVE.reset(token)
+
+    assert response.headers["X-Morpheus-Translation"] == "on"
+    assert response.headers["X-Morpheus-Translation-Mode"] == "header"
+
+
+async def test_chat_error_handler_omits_gate_headers_when_mode_off():
+    request = MagicMock()
+    with patch.object(main_module.settings, "REQUEST_TRANSLATION_MODE", "off"):
+        response = await main_module.chat_error_handler(request, GatewayError(message="boom"))
+
+    assert "X-Morpheus-Translation" not in response.headers
+    assert "X-Morpheus-Translation-Mode" not in response.headers
