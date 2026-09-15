@@ -84,3 +84,77 @@ def test_streaming_handler_forwards_extra_headers_without_iterating_body():
 
     assert isinstance(response, StreamingResponse)
     assert response.headers["X-Morpheus-Provider-Stack"] == "vllm"
+
+
+# --- _prepare_translation_headers: the per-request decision (H2) + its response headers (H3) ---
+
+async def test_prepare_translation_headers_mode_off_yields_no_headers():
+    request = MagicMock(headers={"X-Morpheus-Translate": "1"})
+    with patch.object(chat_index.settings, "REQUEST_TRANSLATION_MODE", "off"):
+        headers = await chat_index._prepare_translation_headers(request, {"messages": []}, "0xsess", "0x01")
+    assert headers == {}
+
+
+async def test_prepare_translation_headers_mode_header_present_vs_absent():
+    with patch.object(chat_index.settings, "REQUEST_TRANSLATION_MODE", "header"), \
+         patch.object(chat_index.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"):
+        present = MagicMock(headers={"X-Morpheus-Translate": "1"})
+        headers_on = await chat_index._prepare_translation_headers(present, {"messages": []}, "0xsess", "0x01")
+
+        absent = MagicMock(headers={})
+        headers_off = await chat_index._prepare_translation_headers(absent, {"messages": []}, "0xsess", "0x01")
+
+    assert headers_on == {"X-Morpheus-Translation": "on", "X-Morpheus-Translation-Mode": "header"}
+    assert headers_off == {"X-Morpheus-Translation": "off", "X-Morpheus-Translation-Mode": "header"}
+
+
+async def test_prepare_translation_headers_reach_non_streaming_response():
+    request = MagicMock(headers={"X-Morpheus-Translate": "1"})
+    with patch.object(chat_index.settings, "REQUEST_TRANSLATION_MODE", "header"), \
+         patch.object(chat_index.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"):
+        extra_headers = await chat_index._prepare_translation_headers(request, {"messages": []}, "0xsess", "0x01")
+
+    success = JSONResponse(content={"ok": True}, status_code=200)
+    with patch.object(chat_index, "handle_non_streaming_request", new_callable=AsyncMock, return_value=success), \
+         patch.object(chat_index, "_finalize_billing", new_callable=AsyncMock, return_value=None), \
+         patch.object(chat_index, "_release_session", new_callable=AsyncMock):
+        response = await chat_index._handle_non_streaming_request(
+            chat_logger=MagicMock(),
+            request_id="req-3",
+            session_id="0xsess",
+            body=b'{"messages": []}',
+            requested_model="llama-3.3-70b",
+            model_id="0x01",
+            db_api_key=MagicMock(key_prefix="abc"),
+            user=MagicMock(id=1),
+            ledger_entry_id=uuid.uuid4(),
+            extra_headers=extra_headers,
+        )
+
+    assert response.headers["X-Morpheus-Translation"] == "on"
+    assert response.headers["X-Morpheus-Translation-Mode"] == "header"
+
+
+async def test_prepare_translation_headers_reach_streaming_response_when_header_absent():
+    request = MagicMock(headers={})
+    with patch.object(chat_index.settings, "REQUEST_TRANSLATION_MODE", "header"), \
+         patch.object(chat_index.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"):
+        extra_headers = await chat_index._prepare_translation_headers(request, {"messages": []}, "0xsess", "0x01")
+
+    with patch.object(chat_index, "build_stream_generator", return_value=_trivial_stream_generator_factory):
+        response = chat_index._handle_streaming_request(
+            chat_logger=MagicMock(),
+            request_id="req-4",
+            session_id="0xsess",
+            body=b'{"messages": []}',
+            requested_model="llama-3.3-70b",
+            model_id="0x01",
+            db_api_key=MagicMock(key_prefix="abc"),
+            user=MagicMock(id=1),
+            ledger_entry_id=uuid.uuid4(),
+            token_estimate=MagicMock(),
+            extra_headers=extra_headers,
+        )
+
+    assert response.headers["X-Morpheus-Translation"] == "off"
+    assert response.headers["X-Morpheus-Translation-Mode"] == "header"

@@ -1,6 +1,7 @@
 import os
 from decimal import Decimal
 from typing import List, Union, Optional, Any
+import structlog
 from pydantic_settings import BaseSettings
 from pydantic import PostgresDsn, Field, AnyHttpUrl, field_validator
 from dotenv import load_dotenv
@@ -8,9 +9,14 @@ from dotenv import load_dotenv
 # Load .env file variables
 load_dotenv()
 
+_config_logger = structlog.get_logger(__name__)
+
 # Environments that get development conveniences (permissive CORS, debug
 # helpers). Anything else is treated as production-like for those gates.
 NON_PRODUCTION_ENVIRONMENTS = {"local", "development", "dev", "test"}
+
+# Valid src.core.config.Settings.REQUEST_TRANSLATION_MODE values.
+_VALID_REQUEST_TRANSLATION_MODES = frozenset({"off", "header", "always"})
 
 class Settings(BaseSettings):
     # Project Settings
@@ -170,11 +176,36 @@ class Settings(BaseSettings):
     CHAT_FAILOVER_ENABLED: bool = Field(default=os.getenv("CHAT_FAILOVER_ENABLED", "true").lower() == "true")
     # Request translation: rewrite the canonical `reasoning` field into the
     # provider-declared binding for the session's provider (see
-    # src/api/v1/chat/request_translation.py). Ships inert; enable per env.
-    REQUEST_TRANSLATION_ENABLED: bool = Field(default=os.getenv("REQUEST_TRANSLATION_ENABLED", "false").lower() == "true")
+    # src/api/v1/chat/request_translation.py). Ships inert (mode "off").
+    #   off     - never translate (default).
+    #   header  - translate only when the request carries
+    #             REQUEST_TRANSLATION_HEADER with a truthy value.
+    #   always  - translate every request, except when that header carries a
+    #             falsy value (opt-out, for A/B comparisons).
+    # Truthy: 1/true/yes/on. Falsy: 0/false/no/off (case-insensitive, trimmed).
+    # Any other value counts as absent. Unknown modes fall back to "off"
+    # (warning logged once at settings load).
+    REQUEST_TRANSLATION_MODE: str = Field(default=os.getenv("REQUEST_TRANSLATION_MODE", "off"))
+    # Header a client sets to opt in (mode "header") or opt out (mode
+    # "always") of request translation for a single request.
+    REQUEST_TRANSLATION_HEADER: str = Field(default=os.getenv("REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"))
     # How long a provider's per-model API spec (fetched via the proxy-router
     # ping) is reused before re-fetching.
     PROVIDER_API_SPEC_TTL_SECONDS: int = Field(default=int(os.getenv("PROVIDER_API_SPEC_TTL_SECONDS", "600")))
+
+    @field_validator("REQUEST_TRANSLATION_MODE", mode="before")
+    def _normalize_request_translation_mode(cls, v: Any) -> str:
+        """Unknown values fall back to 'off' (ships inert) with one warning
+        logged at settings load, per ruling H1."""
+        normalized = str(v).strip().lower() if v is not None else "off"
+        if normalized not in _VALID_REQUEST_TRANSLATION_MODES:
+            _config_logger.warning(
+                "invalid REQUEST_TRANSLATION_MODE, falling back to 'off'",
+                value=v,
+                event_type="request_translation_mode_invalid",
+            )
+            return "off"
+        return normalized
 
     # AWS settings (credentials come from ECS task role; no explicit keys needed)
     AWS_REGION: str = os.getenv("AWS_REGION", "us-east-2")

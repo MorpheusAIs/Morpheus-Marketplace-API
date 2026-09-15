@@ -1,10 +1,25 @@
+import asyncio
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from src.api.v1.chat import request_translation as rt  # noqa: E402
+
+
+@pytest.fixture
+def translation_enabled():
+    """Activate request translation for a test via the same ContextVar the
+    gateway sets once per request in index.py (ruling H2) -- replaces
+    patching the old boolean translation-enabled setting."""
+    token = rt.set_request_translation(True)
+    try:
+        yield
+    finally:
+        rt._TRANSLATION_ACTIVE.reset(token)
 
 VENICE = {
     "stack": "venice",
@@ -155,14 +170,19 @@ def test_headers_omits_applied_pair_when_intent_or_param_all_unsafe():
     assert "X-Morpheus-Translated" not in res.headers()
 
 
-async def test_translate_for_session_disabled_is_noop():
+async def test_translate_for_session_inactive_is_noop_without_db_or_spec_calls():
+    # Default context: request_translation_active() is False without the
+    # translation_enabled fixture (ruling H2 replaces the old boolean guard).
     body = {"reasoning": {"enabled": False}}
-    with patch.object(rt.settings, "REQUEST_TRANSLATION_ENABLED", False):
+    with patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock) as mock_get_session, \
+         patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock) as mock_get_spec:
         res = await rt.translate_for_session(body, "0xsess", "0x01")
+    mock_get_session.assert_not_awaited()
+    mock_get_spec.assert_not_awaited()
     assert body == {"reasoning": {"enabled": False}} and res.touched is False
 
 
-async def test_translate_for_session_resolves_provider_and_applies():
+async def test_translate_for_session_resolves_provider_and_applies(translation_enabled):
     body = {"reasoning": {"enabled": False}}
     row = MagicMock()
     row.provider_address = "0xAAAA"
@@ -174,8 +194,7 @@ async def test_translate_for_session_resolves_provider_and_applies():
         async def __aexit__(self, *args):
             return False
 
-    with patch.object(rt.settings, "REQUEST_TRANSLATION_ENABLED", True), \
-         patch.object(rt, "get_db", lambda: FakeGetDb()), \
+    with patch.object(rt, "get_db", lambda: FakeGetDb()), \
          patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock, return_value=row), \
          patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock, return_value=VENICE) as gs:
         res = await rt.translate_for_session(body, "0xsess", "0x01")
@@ -186,7 +205,7 @@ async def test_translate_for_session_resolves_provider_and_applies():
     assert "reasoning" not in body and "venice_parameters" in body
 
 
-async def test_translate_for_session_never_raises_on_malformed_binding():
+async def test_translate_for_session_never_raises_on_malformed_binding(translation_enabled):
     # provider-reported spec with a non-string param: set_path would raise AttributeError.
     # apply_spec now catches this per-binding, so it's reported unsupported rather than
     # discarding the whole translation via the outer guard.
@@ -203,8 +222,7 @@ async def test_translate_for_session_never_raises_on_malformed_binding():
         async def __aexit__(self, *args):
             return False
 
-    with patch.object(rt.settings, "REQUEST_TRANSLATION_ENABLED", True), \
-         patch.object(rt, "get_db", lambda: FakeGetDb()), \
+    with patch.object(rt, "get_db", lambda: FakeGetDb()), \
          patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock, return_value=row), \
          patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock, return_value=bad_spec):
         result = await rt.translate_for_session(body, "0xsess", "0x01")
@@ -260,7 +278,7 @@ def test_apply_spec_still_applies_prefixed_vllm_template_kwarg():
     assert body == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
-async def test_translate_for_session_without_provider_is_noop():
+async def test_translate_for_session_without_provider_is_noop(translation_enabled):
     body = {"reasoning": {"enabled": False}}
     row = MagicMock()
     row.provider_address = None
@@ -272,8 +290,7 @@ async def test_translate_for_session_without_provider_is_noop():
         async def __aexit__(self, *args):
             return False
 
-    with patch.object(rt.settings, "REQUEST_TRANSLATION_ENABLED", True), \
-         patch.object(rt, "get_db", lambda: FakeGetDb()), \
+    with patch.object(rt, "get_db", lambda: FakeGetDb()), \
          patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock, return_value=row), \
          patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock) as gs:
         res = await rt.translate_for_session(body, "0xsess", "0x01")
@@ -281,10 +298,9 @@ async def test_translate_for_session_without_provider_is_noop():
     assert body == {"reasoning": {"enabled": False}} and res.touched is False
 
 
-async def test_translate_for_session_without_intents_skips_lookups():
+async def test_translate_for_session_without_intents_skips_lookups(translation_enabled):
     body = {"messages": []}
-    with patch.object(rt.settings, "REQUEST_TRANSLATION_ENABLED", True), \
-         patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock) as mock_get_session, \
+    with patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock) as mock_get_session, \
          patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock) as mock_get_spec:
         res = await rt.translate_for_session(body, "0xsess", "0x01")
     mock_get_session.assert_not_awaited()
@@ -300,3 +316,64 @@ def test_alias_ignored_when_object_present():
     # reasoning object contributes intents (budget), so alias should be ignored
     result = rt.extract_intents({"reasoning": {"max_tokens": 100}, "reasoning_effort": "high"})
     assert result == {"reasoning.budget": 100}, f"Expected only reasoning.budget, got {result}"
+
+
+# --- translation_requested: settings.REQUEST_TRANSLATION_MODE x header decision table (H1) ---
+
+def test_translation_requested_mode_off_ignores_header_entirely():
+    with patch.object(rt.settings, "REQUEST_TRANSLATION_MODE", "off"), \
+         patch.object(rt.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"):
+        assert rt.translation_requested({}) is False
+        assert rt.translation_requested({"X-Morpheus-Translate": "1"}) is False
+        assert rt.translation_requested({"X-Morpheus-Translate": "0"}) is False
+
+
+def test_translation_requested_mode_header_decision_table():
+    with patch.object(rt.settings, "REQUEST_TRANSLATION_MODE", "header"), \
+         patch.object(rt.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"):
+        assert rt.translation_requested({}) is False, "absent -> off"
+        assert rt.translation_requested({"X-Morpheus-Translate": "1"}) is True, "truthy -> on"
+        assert rt.translation_requested({"X-Morpheus-Translate": " YES "}) is True, "truthy, trimmed+cased"
+        assert rt.translation_requested({"X-Morpheus-Translate": "0"}) is False, "falsy -> off"
+        assert rt.translation_requested({"X-Morpheus-Translate": "maybe"}) is False, "garbage counts as absent -> off"
+
+
+def test_translation_requested_mode_always_decision_table():
+    with patch.object(rt.settings, "REQUEST_TRANSLATION_MODE", "always"), \
+         patch.object(rt.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"):
+        assert rt.translation_requested({}) is True, "absent -> still on"
+        assert rt.translation_requested({"X-Morpheus-Translate": "1"}) is True, "truthy -> on"
+        assert rt.translation_requested({"X-Morpheus-Translate": "0"}) is False, "falsy -> opt out"
+        assert rt.translation_requested({"X-Morpheus-Translate": " False "}) is False, "falsy, trimmed+cased"
+        assert rt.translation_requested({"X-Morpheus-Translate": "maybe"}) is True, "garbage counts as absent -> on"
+
+
+# --- request_translation_active() ContextVar (H2) ---
+
+async def test_request_translation_active_defaults_false():
+    assert rt.request_translation_active() is False
+
+
+async def test_request_translation_active_visible_from_nested_coroutine_same_task():
+    # wire_params (called from the handlers and their failover / session
+    # renewal retries) reads this without the flag being threaded through
+    # its signature -- this is the property that makes that possible.
+    async def nested():
+        assert rt.request_translation_active() is True
+
+    token = rt.set_request_translation(True)
+    try:
+        await nested()
+    finally:
+        rt._TRANSLATION_ACTIVE.reset(token)
+
+
+async def test_request_translation_active_defaults_false_in_a_fresh_task():
+    # A fresh asyncio.create_task stands in for an unrelated incoming
+    # request: in production each ASGI request is its own task rooted from
+    # the server's own context, never a child of another request's task, so
+    # it never inherits a value set there.
+    async def check():
+        return rt.request_translation_active()
+
+    assert await asyncio.create_task(check()) is False
