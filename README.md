@@ -466,13 +466,13 @@ curl http://localhost:8000/api/v1/models
 - `reasoning`: `{"enabled": bool, "effort": str, "max_tokens": int}`
 - `reasoning_effort` (top-level alias, e.g. `"none"` to disable) — ignored when the `reasoning` object itself yields an instruction (`enabled`, `effort` or `max_tokens`).
 
-Translation is gated by `REQUEST_TRANSLATION_MODE` (default `off`):
+Translation is gated by `REQUEST_TRANSLATION_MODE` (default `header`):
 
 - `off` (default) — never translate.
 - `header` — translate only when the request carries `REQUEST_TRANSLATION_HEADER` (default `X-Morpheus-Translate`) with a truthy value.
 - `always` — translate every request, unless that header carries a falsy value (opt-out, for A/B comparisons).
 
-Truthy values: `1`, `true`, `yes`, `on`. Falsy values: `0`, `false`, `no`, `off`. Both are matched case-insensitively after trimming whitespace; any other value is treated as if the header were absent. An unrecognized `REQUEST_TRANSLATION_MODE` falls back to `off` (warning logged once at startup).
+Truthy values: `1`, `true`, `yes`, `on`. Falsy values: `0`, `false`, `no`, `off`. Both are matched case-insensitively after trimming whitespace; any other value is treated as if the header were absent. An unrecognized `REQUEST_TRANSLATION_MODE` is treated as unset and falls back to `header` (warning logged once at startup).
 
 When the mode qualifies the request **and** the provider serving the session declares an API spec (fetched by the gateway through its proxy-router and cached for `PROVIDER_API_SPEC_TTL_SECONDS`, default `600`), the gateway rewrites these canonical fields into that provider's own parameters — e.g. vLLM's `chat_template_kwargs.enable_thinking=false`, Venice's `venice_parameters.disable_thinking=true`, OpenRouter's `reasoning.effort="none"`. If the request doesn't qualify, the provider declares no spec, or there is no provider, the request body is forwarded unchanged.
 
@@ -493,7 +493,7 @@ And these headers only when translation actually ran and found a provider spec:
 
 Settings (`src/core/config.py`, see `env.example`):
 
-- `REQUEST_TRANSLATION_MODE` (default `off`) — `off` / `header` / `always`
+- `REQUEST_TRANSLATION_MODE` (default `header`) — `off` / `header` / `always`
 - `REQUEST_TRANSLATION_HEADER` (default `X-Morpheus-Translate`) — the opt-in/opt-out header name
 - `PROVIDER_API_SPEC_TTL_SECONDS` (default `600`)
 
