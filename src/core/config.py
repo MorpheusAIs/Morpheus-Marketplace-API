@@ -1,6 +1,7 @@
 import os
 from decimal import Decimal
 from typing import List, Union, Optional, Any
+import structlog
 from pydantic_settings import BaseSettings
 from pydantic import PostgresDsn, Field, AnyHttpUrl, field_validator
 from dotenv import load_dotenv
@@ -8,9 +9,13 @@ from dotenv import load_dotenv
 # Load .env file variables
 load_dotenv()
 
+_config_logger = structlog.get_logger(__name__)
+
 # Environments that get development conveniences (permissive CORS, debug
 # helpers). Anything else is treated as production-like for those gates.
 NON_PRODUCTION_ENVIRONMENTS = {"local", "development", "dev", "test"}
+
+_VALID_REQUEST_TRANSLATION_MODES = frozenset({"off", "header", "always"})
 
 class Settings(BaseSettings):
     # Project Settings
@@ -168,6 +173,21 @@ class Settings(BaseSettings):
     PROXY_ROUTER_CHAT_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_CHAT_TIMEOUT", "300.0")))
     PROXY_ROUTER_STREAM_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_STREAM_TIMEOUT", "300.0")))
     CHAT_FAILOVER_ENABLED: bool = Field(default=os.getenv("CHAT_FAILOVER_ENABLED", "true").lower() == "true")
+    REQUEST_TRANSLATION_MODE: str = Field(default=os.getenv("REQUEST_TRANSLATION_MODE", "header"))
+    REQUEST_TRANSLATION_HEADER: str = Field(default=os.getenv("REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"))
+    PROVIDER_API_SPEC_TTL_SECONDS: int = Field(default=int(os.getenv("PROVIDER_API_SPEC_TTL_SECONDS", "600")))
+
+    @field_validator("REQUEST_TRANSLATION_MODE", mode="before")
+    def _normalize_request_translation_mode(cls, v: Any) -> str:
+        normalized = str(v).strip().lower() if v is not None else "header"
+        if normalized not in _VALID_REQUEST_TRANSLATION_MODES:
+            _config_logger.warning(
+                "invalid REQUEST_TRANSLATION_MODE, falling back to 'header'",
+                value=v,
+                event_type="request_translation_mode_invalid",
+            )
+            return "header"
+        return normalized
 
     # AWS settings (credentials come from ECS task role; no explicit keys needed)
     AWS_REGION: str = os.getenv("AWS_REGION", "us-east-2")
