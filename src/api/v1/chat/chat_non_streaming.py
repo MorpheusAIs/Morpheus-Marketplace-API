@@ -50,15 +50,9 @@ def _parse_request(body: bytes) -> Tuple[list, dict]:
 
 
 async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str]) -> dict:
-    """Translate a copy of the canonical params for this session's provider.
-
-    Returns ``chat_params`` itself (no copy) when it carries no canonical
-    field — translation would be a no-op either way, so this skips the
-    per-attempt deepcopy for all traffic that doesn't use reasoning controls,
-    flag on or off.
-    """
     if not extract_intents(chat_params):
         return chat_params
+    # Copy: a retry re-translates the canonical params for another provider
     params = copy.deepcopy(chat_params)
     await translate_for_session(params, session_id, model_id)
     return params
@@ -114,12 +108,7 @@ async def _make_proxy_request(
     model_id: Optional[str] = None,
     request_id: str = None,
 ) -> httpx.Response:
-    """Make a chat completion request to the proxy router.
-
-    Translates a fresh copy of the canonical ``chat_params`` for this attempt's
-    session/provider; ``chat_params`` itself is never mutated, so a later
-    retry can translate again for a different provider.
-    """
+    """Make a chat completion request to the proxy router."""
     return await proxy_router_service.chatCompletions(
         session_id=session_id,
         messages=messages,

@@ -15,7 +15,6 @@ _config_logger = structlog.get_logger(__name__)
 # helpers). Anything else is treated as production-like for those gates.
 NON_PRODUCTION_ENVIRONMENTS = {"local", "development", "dev", "test"}
 
-# Valid src.core.config.Settings.REQUEST_TRANSLATION_MODE values.
 _VALID_REQUEST_TRANSLATION_MODES = frozenset({"off", "header", "always"})
 
 class Settings(BaseSettings):
@@ -174,31 +173,12 @@ class Settings(BaseSettings):
     PROXY_ROUTER_CHAT_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_CHAT_TIMEOUT", "300.0")))
     PROXY_ROUTER_STREAM_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_STREAM_TIMEOUT", "300.0")))
     CHAT_FAILOVER_ENABLED: bool = Field(default=os.getenv("CHAT_FAILOVER_ENABLED", "true").lower() == "true")
-    # Request translation: rewrite the canonical `reasoning` field into the
-    # provider-declared binding for the session's provider (see
-    # src/api/v1/chat/request_translation.py). Default mode "header": inert
-    # unless a request opts in.
-    #   off     - never translate.
-    #   header  - translate only when the request carries (default)
-    #             REQUEST_TRANSLATION_HEADER with a truthy value.
-    #   always  - translate every request, except when that header carries a
-    #             falsy value (opt-out, for A/B comparisons).
-    # Truthy: 1/true/yes/on. Falsy: 0/false/no/off (case-insensitive, trimmed).
-    # Any other value counts as absent. Unknown modes fall back to "header"
-    # (warning logged once at settings load).
     REQUEST_TRANSLATION_MODE: str = Field(default=os.getenv("REQUEST_TRANSLATION_MODE", "header"))
-    # Header a client sets to opt in (mode "header") or opt out (mode
-    # "always") of request translation for a single request.
     REQUEST_TRANSLATION_HEADER: str = Field(default=os.getenv("REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"))
-    # How long a provider's per-model API spec (fetched via the proxy-router
-    # ping) is reused before re-fetching.
     PROVIDER_API_SPEC_TTL_SECONDS: int = Field(default=int(os.getenv("PROVIDER_API_SPEC_TTL_SECONDS", "600")))
 
     @field_validator("REQUEST_TRANSLATION_MODE", mode="before")
     def _normalize_request_translation_mode(cls, v: Any) -> str:
-        """Unknown values are treated as unset and fall back to the default
-        'header' (opt-in per request) with one warning logged at settings
-        load."""
         normalized = str(v).strip().lower() if v is not None else "header"
         if normalized not in _VALID_REQUEST_TRANSLATION_MODES:
             _config_logger.warning(

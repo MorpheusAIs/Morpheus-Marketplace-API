@@ -1,12 +1,3 @@
-"""Handlers translate canonical reasoning params per attempt (initial + failover).
-
-Covers:
-- both parsers drop a client-supplied `request_id` (it collides with the
-  handlers' own `request_id=` keyword)
-- the non-streaming handler translates the initial attempt AND the failover
-  retry from the canonical params (not from the previous attempt's wire params)
-- the streaming handler translates the initial attempt from the canonical params
-"""
 import json
 import os
 import sys
@@ -38,8 +29,7 @@ GOOD_CHUNKS = [b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n', b"data: [D
 
 def _spec_by_session(mapping):
     async def fake(body, session_id, model_id):
-        # Mirror translate_for_session's own short-circuit so tests can catch
-        # a missing model_id threading bug (a falsy model_id must no-op).
+        # No-op on a falsy model_id so an unthreaded model_id fails the assertions
         if not model_id:
             return rt.TranslationResult()
         return rt.apply_spec(body, mapping.get(session_id))
@@ -69,11 +59,7 @@ def mock_user():
     return user
 
 
-# --- streaming fakes (copied from tests/unit/test_chat_streaming_failover.py) ---
-
 class FakeStreamResponse:
-    """Mimics httpx streaming response."""
-
     def __init__(self, chunks):
         self.status_code = 200
         self.headers = {}
@@ -98,8 +84,6 @@ class FakeStreamCM:
 
 
 def _stream_cm_factory(outcomes):
-    """Like the failover tests' factory, but also records each call's kwargs
-    so translation can be asserted on."""
     it = iter(outcomes)
     calls = []
 
@@ -208,9 +192,6 @@ async def test_streaming_translates_session_renewal_retry(mock_user):
 
 
 async def test_wire_params_skips_deepcopy_when_no_canonical_fields():
-    # No `reasoning`/`reasoning_effort` key: translation would be a no-op
-    # either way, so wire_params must return the caller's dict as-is (same
-    # object identity) instead of deepcopying it, flag on or off.
     chat_params = {"temperature": 0.7}
     with patch.object(chat_non_streaming, "translate_for_session", new_callable=AsyncMock) as tfs:
         result = await chat_non_streaming.wire_params(chat_params, "0xsess", "0x01")

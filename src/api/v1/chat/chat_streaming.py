@@ -549,15 +549,9 @@ def _parse_request_body(body: bytes, logger: "BoundLogger") -> tuple[list, dict]
 
 
 async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str]) -> dict:
-    """Translate a copy of the canonical params for this session's provider.
-
-    Returns ``chat_params`` itself (no copy) when it carries no canonical
-    field — translation would be a no-op either way, so this skips the
-    per-attempt deepcopy for all traffic that doesn't use reasoning controls,
-    flag on or off.
-    """
     if not extract_intents(chat_params):
         return chat_params
+    # Copy: a retry re-translates the canonical params for another provider
     params = copy.deepcopy(chat_params)
     await translate_for_session(params, session_id, model_id)
     return params
@@ -574,10 +568,6 @@ async def _process_stream_request(
 ) -> AsyncIterator[bytes | StreamResult]:
     """
     Process a single streaming request attempt.
-
-    Translates a fresh copy of the canonical ``chat_params`` for this attempt's
-    session/provider; ``chat_params`` itself is never mutated, so a later
-    retry can translate again for a different provider.
 
     Yields:
         - bytes: Chunk data to send to client

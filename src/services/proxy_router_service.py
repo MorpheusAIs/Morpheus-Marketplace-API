@@ -1254,22 +1254,11 @@ async def getRatedBids(model_id: str) -> httpx.Response:
 
 
 async def getProviders() -> list:
-    """
-    Fetch all on-chain providers from the proxy-router (GET blockchain/providers).
-
-    Returns the raw `providers` list; items carry the proxy-router's Go field
-    names (Address, Endpoint, Stake, CreatedAt, IsDeleted).
-
-    Raises:
-        ProxyRouterServiceError: If the request fails
-    """
     logger.info("Getting providers from blockchain",
                event_type="get_providers_start")
 
     try:
-        # Single attempt: the spec service negative-caches failures for 60s
-        # (see ProviderApiSpecService), so retries here only add request-path
-        # latency without improving success odds within that window.
+        # Single attempt: the caller negative-caches failures, so retries only add latency
         response = await _execute_request(
             "GET",
             "blockchain/providers",
@@ -1289,23 +1278,12 @@ async def getProviders() -> list:
 
 
 async def pingProvider(provider_addr: str, provider_url: str) -> dict:
-    """
-    Ping a provider through the proxy-router (POST proxy/provider/ping) and
-    return its self-report: {"ping": ms, "version": str, "models": [...]}.
-    Each model entry may carry an `api` block (provider-declared API spec).
-
-    Raises:
-        ProxyRouterServiceError: If the request fails
-    """
     logger.info("Pinging provider via proxy router",
                provider_addr=provider_addr,
                provider_url=provider_url,
                event_type="ping_provider_start")
 
     try:
-        # Single attempt: the spec service negative-caches failures for 60s
-        # (see ProviderApiSpecService), so retries here only add request-path
-        # latency without improving success odds within that window.
         response = await _execute_request(
             "POST",
             "proxy/provider/ping",

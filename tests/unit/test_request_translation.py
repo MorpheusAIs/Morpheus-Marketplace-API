@@ -12,9 +12,6 @@ from src.api.v1.chat import request_translation as rt  # noqa: E402
 
 @pytest.fixture
 def translation_enabled():
-    """Activate request translation for a test via the same ContextVar the
-    gateway sets once per request in index.py (ruling H2) -- replaces
-    patching the old boolean translation-enabled setting."""
     token = rt.set_request_translation(True)
     try:
         yield
@@ -51,7 +48,6 @@ def test_extract_intents():
     assert rt.extract_intents({"reasoning": {"effort": "low", "max_tokens": 2048}}) == {"reasoning.effort": "low", "reasoning.budget": 2048}
     assert rt.extract_intents({"reasoning_effort": "none"}) == {"reasoning.disable": True}
     assert rt.extract_intents({"reasoning_effort": "high"}) == {"reasoning.effort": "high"}
-    # object wins over the alias when both present
     assert rt.extract_intents({"reasoning": {"effort": "low"}, "reasoning_effort": "high"}) == {"reasoning.effort": "low"}
     assert rt.extract_intents({"messages": []}) == {}
     assert rt.extract_intents({"reasoning": "garbage"}) == {}
@@ -63,7 +59,6 @@ def test_set_path_creates_nested_objects():
     rt.set_path(body, "chat_template_kwargs.enable_thinking", False)
     rt.set_path(body, "top_k", 5)
     assert body == {"venice_parameters": {"disable_thinking": True}, "chat_template_kwargs": {"enable_thinking": False}, "top_k": 5}
-    # existing sibling keys are preserved
     body = {"venice_parameters": {"enable_web_search": "on"}}
     rt.set_path(body, "venice_parameters.disable_thinking", True)
     assert body["venice_parameters"] == {"enable_web_search": "on", "disable_thinking": True}
@@ -85,7 +80,7 @@ def test_apply_caller_value_with_enum_check():
     assert body == {"reasoning_effort": "low"}
     assert res.applied == {"reasoning.effort": "reasoning_effort"}
 
-    body = {"reasoning": {"effort": "xhigh"}}  # not in enumValues
+    body = {"reasoning": {"effort": "xhigh"}}
     res = rt.apply_spec(body, VENICE)
     assert body == {"reasoning": {"effort": "xhigh"}}, "unsupported value: body untouched"
     assert res.unsupported == ["reasoning.effort"]
@@ -141,8 +136,6 @@ def test_headers():
 
 
 def test_headers_sanitizes_untrusted_provider_values():
-    # spec["stack"] and binding["param"] come from an untrusted provider
-    # report; CRLF/non-latin-1 characters must never reach the header dict.
     res = rt.TranslationResult(
         stack="vllm\r\nX-Injected: 1é",
         applied={"reasoning.disable": "chat_template_kwargs.enable_thinking"},
@@ -171,8 +164,6 @@ def test_headers_omits_applied_pair_when_intent_or_param_all_unsafe():
 
 
 async def test_translate_for_session_inactive_is_noop_without_db_or_spec_calls():
-    # Default context: request_translation_active() is False without the
-    # translation_enabled fixture (ruling H2 replaces the old boolean guard).
     body = {"reasoning": {"enabled": False}}
     with patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock) as mock_get_session, \
          patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock) as mock_get_spec:
@@ -201,14 +192,10 @@ async def test_translate_for_session_resolves_provider_and_applies(translation_e
     gs.assert_awaited_once_with("0xAAAA", "0x01")
     assert body == {"venice_parameters": {"disable_thinking": True}}
     assert res.applied == {"reasoning.disable": "venice_parameters.disable_thinking"}
-    # success path must mutate the caller's dict in place (handlers rely on this)
     assert "reasoning" not in body and "venice_parameters" in body
 
 
 async def test_translate_for_session_never_raises_on_malformed_binding(translation_enabled):
-    # provider-reported spec with a non-string param: set_path would raise AttributeError.
-    # apply_spec now catches this per-binding, so it's reported unsupported rather than
-    # discarding the whole translation via the outer guard.
     bad_spec = {"stack": "vllm", "bindings": {"reasoning.disable": {
         "kind": "body_param", "param": 123, "paramType": "boolean", "value": True}}}
     body = {"messages": [], "reasoning": {"enabled": False}}
@@ -231,8 +218,6 @@ async def test_translate_for_session_never_raises_on_malformed_binding(translati
 
 
 def test_apply_spec_tolerates_malformed_binding_alongside_valid_one():
-    # One good binding applies cleanly; a malformed sibling binding (non-string
-    # param) is reported unsupported instead of discarding the whole result.
     mixed_spec = {
         "stack": "vllm",
         "bindings": {
@@ -270,8 +255,6 @@ def test_apply_spec_rejects_template_kwarg_without_chat_template_kwargs_prefix()
 
 
 def test_apply_spec_still_applies_prefixed_vllm_template_kwarg():
-    # Regression: a legitimately-prefixed template_kwarg binding (the existing
-    # vLLM fixture) must keep applying after the prefix check is added.
     body = {"reasoning": {"enabled": False}}
     res = rt.apply_spec(body, VLLM_QWEN)
     assert res.applied == {"reasoning.disable": "chat_template_kwargs.enable_thinking"}
@@ -309,16 +292,12 @@ async def test_translate_for_session_without_intents_skips_lookups(translation_e
 
 
 def test_alias_ignored_when_object_present():
-    # reasoning object contributes intents, so alias should be ignored
     result = rt.extract_intents({"reasoning": {"enabled": True}, "reasoning_effort": "none"})
     assert result == {"reasoning.enable": True}, f"Expected only reasoning.enable, got {result}"
 
-    # reasoning object contributes intents (budget), so alias should be ignored
     result = rt.extract_intents({"reasoning": {"max_tokens": 100}, "reasoning_effort": "high"})
     assert result == {"reasoning.budget": 100}, f"Expected only reasoning.budget, got {result}"
 
-
-# --- translation_requested: settings.REQUEST_TRANSLATION_MODE x header decision table (H1) ---
 
 def test_translation_requested_mode_off_ignores_header_entirely():
     with patch.object(rt.settings, "REQUEST_TRANSLATION_MODE", "off"), \
@@ -349,10 +328,6 @@ def test_translation_requested_mode_always_decision_table():
 
 
 def test_translation_requested_is_case_insensitive_with_real_headers():
-    # In production translation_requested() is called with the incoming
-    # Request's real Starlette Headers object (case-insensitive, and keyed by
-    # lowercased wire header names), not a plain dict -- verify the lookup
-    # still finds a lowercase wire header via that object, not just via dict.get().
     from starlette.datastructures import Headers
 
     headers = Headers(raw=[(b"x-morpheus-translate", b"1")])
@@ -361,16 +336,11 @@ def test_translation_requested_is_case_insensitive_with_real_headers():
         assert rt.translation_requested(headers) is True
 
 
-# --- request_translation_active() ContextVar (H2) ---
-
 async def test_request_translation_active_defaults_false():
     assert rt.request_translation_active() is False
 
 
 async def test_request_translation_active_visible_from_nested_coroutine_same_task():
-    # wire_params (called from the handlers and their failover / session
-    # renewal retries) reads this without the flag being threaded through
-    # its signature -- this is the property that makes that possible.
     async def nested():
         assert rt.request_translation_active() is True
 
@@ -382,10 +352,6 @@ async def test_request_translation_active_visible_from_nested_coroutine_same_tas
 
 
 async def test_request_translation_active_defaults_false_in_a_fresh_task():
-    # A fresh asyncio.create_task stands in for an unrelated incoming
-    # request: in production each ASGI request is its own task rooted from
-    # the server's own context, never a child of another request's task, so
-    # it never inherits a value set there.
     async def check():
         return rt.request_translation_active()
 
@@ -393,10 +359,6 @@ async def test_request_translation_active_defaults_false_in_a_fresh_task():
 
 
 async def test_request_translation_active_isolated_from_concurrent_in_flight_task():
-    # Stronger than the fresh-task test above: task B must not see task A's
-    # write even while task A is still in flight (blocked mid-request), not
-    # merely after A has already finished -- proving real per-task Context
-    # isolation rather than a value that just happens to reset between tasks.
     ready = asyncio.Event()
     release = asyncio.Event()
 

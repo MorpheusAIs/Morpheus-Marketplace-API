@@ -25,7 +25,7 @@ async def test_get_spec_resolves_endpoint_then_pings_and_caches():
     ping = {"models": [{"modelId": "0x01", "api": VENICE_API}, {"modelId": "0x02"}]}
     with patch.object(mod.proxy_router_service, "getProviders", new_callable=AsyncMock, return_value=PROVIDERS) as gp, \
          patch.object(mod.proxy_router_service, "pingProvider", new_callable=AsyncMock, return_value=ping) as pp:
-        spec = await svc.get_spec("0xaaaa", "0x01")  # lowercase address must still match
+        spec = await svc.get_spec("0xaaaa", "0x01")
         assert spec == VENICE_API
         pp.assert_awaited_once_with("0xAAAA", "1.2.3.4:3333")
 
@@ -34,11 +34,9 @@ async def test_get_spec_resolves_endpoint_then_pings_and_caches():
         assert pp.await_count == 1, "second lookup must be served from cache"
         assert gp.await_count == 1
 
-        # a different model on the same provider: no new ping either (report cached per provider)
         assert await svc.get_spec("0xaaaa", "0x02") is None
         assert pp.await_count == 1
 
-        # a deleted provider must never resolve to an endpoint (and so is never pinged)
         assert await svc.get_spec("0xdead", "0x01") is None
         assert pp.await_count == 1, "deleted provider must never be pinged"
 
@@ -73,7 +71,7 @@ async def test_get_spec_unknown_provider_or_missing_inputs():
     svc = _svc(now)
     with patch.object(mod.proxy_router_service, "getProviders", new_callable=AsyncMock, return_value=PROVIDERS), \
          patch.object(mod.proxy_router_service, "pingProvider", new_callable=AsyncMock) as pp:
-        assert await svc.get_spec("0xCCCC", "0x01") is None  # not in providers list
+        assert await svc.get_spec("0xCCCC", "0x01") is None
         assert await svc.get_spec("", "0x01") is None
         assert await svc.get_spec("0xAAAA", "") is None
         pp.assert_not_awaited()
@@ -93,7 +91,7 @@ async def test_concurrent_lookups_for_same_provider_ping_once():
          patch.object(mod.proxy_router_service, "pingProvider", new_callable=AsyncMock, side_effect=slow_ping) as pp:
         t1 = asyncio.create_task(svc.get_spec("0xaaaa", "0x01"))
         t2 = asyncio.create_task(svc.get_spec("0xaaaa", "0x01"))
-        await asyncio.sleep(0.05)  # let both tasks reach the ping call
+        await asyncio.sleep(0.05)
         release.set()
         spec1, spec2 = await asyncio.gather(t1, t2)
         assert spec1 == VENICE_API
@@ -115,15 +113,12 @@ async def test_slow_provider_does_not_block_cached_lookup():
 
     with patch.object(mod.proxy_router_service, "getProviders", new_callable=AsyncMock, return_value=PROVIDERS), \
          patch.object(mod.proxy_router_service, "pingProvider", new_callable=AsyncMock, side_effect=routed_ping):
-        # warm the cache for provider B
         spec_b = await svc.get_spec("0xbbbb", "0x01")
         assert spec_b == VENICE_API
 
-        # provider A's ping is blocked on `block`
         task_a = asyncio.create_task(svc.get_spec("0xaaaa", "0x01"))
-        await asyncio.sleep(0.05)  # let task_a reach and block on the ping
+        await asyncio.sleep(0.05)
 
-        # provider B's lookup must be served from cache without waiting on A
         result_b = await asyncio.wait_for(svc.get_spec("0xbbbb", "0x01"), timeout=0.5)
         assert result_b == VENICE_API
         assert not task_a.done()
@@ -156,18 +151,13 @@ async def test_unknown_address_forces_refresh_after_30s_but_not_more_often():
     with patch.object(mod.proxy_router_service, "getProviders", new_callable=AsyncMock,
                        side_effect=[PROVIDERS, updated_providers]) as gp, \
          patch.object(mod.proxy_router_service, "pingProvider", new_callable=AsyncMock, return_value=ping) as pp:
-        # Populate a fresh, successfully-refreshed endpoint list (well within TTL=600s).
         assert await svc.get_spec("0xaaaa", "0x01") == VENICE_API
         assert gp.await_count == 1
 
-        # "0xCCCC" is unknown to that still-TTL-fresh list. More than 30s
-        # since the last successful refresh forces a re-fetch that picks it up.
         now[0] += 31
         assert await svc.get_spec("0xcccc", "0x01") == VENICE_API
         assert gp.await_count == 2, "an address unknown to a fresh list must be found after a forced refresh"
 
-        # A second unknown address within 30s of that forced refresh must not
-        # trigger another getProviders call.
         now[0] += 5
         assert await svc.get_spec("0xdddd", "0x01") is None
         assert gp.await_count == 2, "a second unknown address within 30s must not force another refresh"
@@ -181,27 +171,19 @@ async def test_forced_refresh_is_bounded_during_outage():
     with patch.object(mod.proxy_router_service, "getProviders", new_callable=AsyncMock,
                        return_value=providers_a_only) as gp, \
          patch.object(mod.proxy_router_service, "pingProvider", new_callable=AsyncMock, return_value=ping):
-        # One successful refresh: provider A resolves and is cached.
         assert await svc.get_spec("0xaaaa", "0x01") == VENICE_API
         assert gp.await_count == 1
 
-        # Outage begins: every getProviders call from here on fails.
         gp.side_effect = RuntimeError("down")
 
-        # Past the 30s force-refresh window, lookups for 5 distinct unknown
-        # addresses must trigger at most one additional getProviders call,
-        # not one per address (the refresh-storm this fix bounds).
         now[0] += 31
         for addr in ("0xbbbb", "0xcccc", "0xdddd", "0xeeee", "0xffff"):
             assert await svc.get_spec(addr, "0x01") is None
             now[0] += 1
         assert gp.await_count == 2, "only the first forced attempt during the outage window may call getProviders"
 
-        # Known endpoints must still resolve despite the ongoing outage.
         assert await svc.get_spec("0xaaaa", "0x01") == VENICE_API
 
-        # Once another 30s have elapsed since that forced attempt, exactly
-        # one more forced attempt is allowed on the next unknown lookup.
         now[0] += 30
         assert await svc.get_spec("0x1111", "0x01") is None
         assert gp.await_count == 3

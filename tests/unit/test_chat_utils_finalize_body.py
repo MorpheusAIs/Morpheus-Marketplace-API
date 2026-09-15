@@ -9,7 +9,6 @@ from src.api.v1.chat import chat_utils  # noqa: E402
 
 
 def test_finalize_request_body_applies_normalizers_before_serializing():
-    # tool_choice wrongly nested inside a tool's parameters (the shape from .ai-docs/toolcallingissue.md)
     json_body = {
         "messages": [{"role": "user", "content": "price?"}],
         "tools": [{"type": "function", "function": {"name": "get_price", "parameters": {"type": "object", "properties": {}, "tool_choice": "auto"}}}],

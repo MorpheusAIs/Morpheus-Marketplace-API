@@ -1,13 +1,3 @@
-"""Translation header propagation onto the chat completion response.
-
-Covers:
-- TranslationResult.headers() sanitizes untrusted provider-report values
-  (see request_translation.TranslationResult.headers, section A of the fix wave)
-- index.py's non-streaming response helper forwards extra_headers onto the
-  JSONResponse it returns, alongside X-Request-Id
-- index.py's streaming response helper forwards extra_headers onto the
-  StreamingResponse it returns, without needing to iterate the body
-"""
 import os
 import sys
 import uuid
@@ -35,7 +25,6 @@ def test_translation_result_headers_sanitizes_untrusted_provider_values():
     assert headers["X-Morpheus-Translated"] == "reasoning.disable=chat_template_kwargs.enable_thinking"
     assert headers["X-Morpheus-Unsupported"] == "reasoning.budget"
 
-    # an all-unsafe stack yields no X-Morpheus-Provider-Stack key at all
     assert "X-Morpheus-Provider-Stack" not in rt.TranslationResult(stack="日本語").headers()
 
 
@@ -87,8 +76,6 @@ def test_streaming_handler_forwards_extra_headers_without_iterating_body():
     assert isinstance(response, StreamingResponse)
     assert response.headers["X-Morpheus-Provider-Stack"] == "vllm"
 
-
-# --- _prepare_translation_headers: the per-request decision (H2) + its response headers (H3) ---
 
 async def test_prepare_translation_headers_mode_off_yields_no_headers():
     request = MagicMock(headers={"X-Morpheus-Translate": "1"})
@@ -161,9 +148,6 @@ async def test_prepare_translation_headers_reach_streaming_response_when_header_
     assert response.headers["X-Morpheus-Translation"] == "off"
     assert response.headers["X-Morpheus-Translation-Mode"] == "header"
 
-
-# --- chat_error_handler: the gate headers must also reach the ChatError error
-#     path (H3 above only covers the success path) ---
 
 async def test_chat_error_handler_adds_gate_headers_when_translation_active():
     request = MagicMock()

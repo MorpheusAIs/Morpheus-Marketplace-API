@@ -213,9 +213,7 @@ async def create_chat_completion(
         event_type="request_details",
     )
     
-    # Apply request fixes for tool calling compatibility, then serialize the
-    # canonical (post-normalizer) body. Serialization must happen after the
-    # normalizers run, or their fixes never reach the wire.
+    # Apply request fixes for tool calling compatibility
     body = finalize_request_body(json_body, chat_logger)
     log_tool_request_details(json_body, session_id, chat_logger)
 
@@ -259,26 +257,12 @@ async def _prepare_translation_headers(
     session_id: str,
     model_id: Optional[str],
 ) -> dict:
-    """Decide once whether to translate this request and return its
-    X-Morpheus-Translation* response headers.
-
-    The decision (ruling H2) is made HERE because this is the only place
-    with access to the incoming Request; it is published via a ContextVar
-    (request_translation.set_request_translation) so every per-attempt
-    wire_params call inside the handlers and their failover / session-
-    renewal retries -- which never see the request -- agrees with it
-    without needing it threaded through their signatures.
-
-    Only a preview of the canonical fields is translated here, for the
-    response headers: the handlers translate the actual body they forward
-    per attempt themselves, so the body returned to the caller of this
-    function stays untranslated.
-    """
     translation_active = translation_requested(request.headers)
     set_request_translation(translation_active)
 
     headers: dict = translation_gate_headers()
 
+    # Translate a throwaway preview only for the headers; handlers translate the forwarded body per attempt
     if translation_active and extract_intents(json_body):
         preview = {k: copy.deepcopy(json_body[k]) for k in CANONICAL_FIELDS if k in json_body}
         translation = await translate_for_session(preview, session_id, model_id)

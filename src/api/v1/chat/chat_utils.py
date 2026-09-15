@@ -103,11 +103,6 @@ def log_tool_request_details(json_body: Dict[str, Any], session_id: str, logger)
 
 
 def finalize_request_body(json_body: Dict[str, Any], chat_logger) -> bytes:
-    """Run the tool-calling normalizers on json_body and serialize the result.
-
-    Serialization must happen after the normalizers: they mutate json_body in
-    place, so bytes produced earlier would silently miss their fixes.
-    """
     fix_tool_choice_structure(json_body, chat_logger)
     remove_tool_choice_from_tools(json_body, chat_logger)
     normalize_assistant_tool_call_messages(json_body, chat_logger)

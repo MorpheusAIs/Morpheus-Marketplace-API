@@ -20,7 +20,6 @@ def test_request_translation_mode_parses_header_and_always():
         assert Settings().REQUEST_TRANSLATION_MODE == "header"
     with patch.dict(os.environ, {"REQUEST_TRANSLATION_MODE": "always"}):
         assert Settings().REQUEST_TRANSLATION_MODE == "always"
-    # case-insensitive, trimmed
     with patch.dict(os.environ, {"REQUEST_TRANSLATION_MODE": " Header "}):
         assert Settings().REQUEST_TRANSLATION_MODE == "header"
 
