@@ -70,7 +70,8 @@ def apply_context_limits(
     """Clamp max_tokens / max_completion_tokens in body to what the provider spec allows.
 
     The ceiling is capabilities.maxOutput, or context minus the prompt estimate when maxOutput is absent and
-    that leaves at least one token. A prompt estimate above context is only reported, never rewritten.
+    that leaves at least one token. A prompt estimate above context is reported, not rewritten; max_tokens is
+    still clamped to maxOutput so a retry that forwards the body anyway respects the provider's output cap.
     """
     result = ContextLimitResult()
     result.context, result.max_output = read_limits(spec)
@@ -81,7 +82,6 @@ def apply_context_limits(
         result.estimated_prompt_tokens = estimate_prompt_tokens(messages)
         if result.context is not None and result.estimated_prompt_tokens > result.context:
             result.prompt_exceeds = True
-            return result
 
     ceiling = result.max_output
     if ceiling is None and result.context is not None and result.estimated_prompt_tokens is not None:

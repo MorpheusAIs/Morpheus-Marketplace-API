@@ -13,10 +13,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.api.v1.chat import context_limits as cl  # noqa: E402
 from src.api.v1.chat import request_translation as rt  # noqa: E402
 from src.api.v1.chat import index as chat_index  # noqa: E402
-from src.api.v1.chat import chat_non_streaming  # noqa: E402
+from src.api.v1.chat import chat_non_streaming, chat_streaming  # noqa: E402
 from src.api.v1.chat.chat_exceptions import ContextLengthError  # noqa: E402
 from src import main as main_module  # noqa: E402
 from src.services.proxy_router_service import ProxyRouterServiceError  # noqa: E402
+from tests.unit.test_chat_translation_handlers import FakeStreamResponse, _stream_cm_factory  # noqa: E402
 
 MESSAGES = [{"role": "user", "content": "hello there"}]
 ESTIMATE = math.ceil(len(json.dumps(MESSAGES, ensure_ascii=False)) / 4)
@@ -107,14 +108,24 @@ def test_context_only_clamp_skipped_without_messages():
     assert result.estimated_prompt_tokens is None and result.touched is False
 
 
-def test_prompt_exceeding_context_is_reported_not_rewritten():
+def test_prompt_exceeding_context_is_reported_and_max_output_still_clamps():
     spec = {"capabilities": {"context": ESTIMATE - 1, "maxOutput": 5}}
     body = {"max_tokens": 4096}
     result = cl.apply_context_limits(body, spec, MESSAGES)
     assert result.prompt_exceeds is True
     assert result.estimated_prompt_tokens == ESTIMATE
-    assert body == {"max_tokens": 4096}
-    assert result.headers() == {"X-Morpheus-Context-Window": str(ESTIMATE - 1)}
+    assert body == {"max_tokens": 5}, "a retry that forwards the body anyway must respect maxOutput"
+    assert result.clamped == [("max_tokens", 4096, 5)]
+    assert result.headers() == {"X-Morpheus-Context-Window": str(ESTIMATE - 1), "X-Morpheus-Max-Tokens-Clamped": "4096->5"}
+
+
+def test_prompt_exceeding_context_without_max_output_is_not_rewritten():
+    spec = {"capabilities": {"context": ESTIMATE - 1}}
+    body = {"max_tokens": 4096}
+    result = cl.apply_context_limits(body, spec, MESSAGES)
+    assert result.prompt_exceeds is True
+    assert body == {"max_tokens": 4096}, "context minus an oversize prompt is no ceiling"
+    assert result.touched is False and result.clamped == []
 
 
 def test_no_capabilities_is_a_noop():
@@ -204,7 +215,7 @@ async def test_translate_for_session_reports_prompt_exceeding_context(translatio
         result = await rt.translate_for_session(body, "0xsess", "0x01", messages=MESSAGES)
 
     assert result.context_limits.prompt_exceeds is True
-    assert body == {"max_tokens": 50}, "an oversize prompt is reported, the body is never rewritten"
+    assert body == {"max_tokens": 50}, "an oversize prompt is reported; without maxOutput there is nothing to clamp to"
 
 
 async def test_translate_for_session_plain_body_without_messages_skips_lookups(translation_enabled):
@@ -360,4 +371,103 @@ async def test_non_streaming_reclamps_per_attempt_against_the_new_provider_spec(
     first, second = chat.await_args_list[0].kwargs, chat.await_args_list[1].kwargs
     assert first["session_id"] == "0xold" and first["max_tokens"] == 1024
     assert second["session_id"] == "0xnew" and second["max_tokens"] == 2048, "retry clamps the canonical value, not the previous clamp"
+    assert second["messages"] == MESSAGES
+
+
+async def test_non_streaming_retry_against_an_oversize_context_still_clamps_to_max_output():
+    body = json.dumps({"messages": MESSAGES, "max_tokens": 9000}).encode()
+    specs = {"0xold": {"capabilities": {"context": 8192, "maxOutput": 1024}},
+             "0xnew": {"capabilities": {"context": ESTIMATE - 1, "maxOutput": 512}}}
+    ok = httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+    with patch.object(chat_non_streaming.proxy_router_service, "chatCompletions", new_callable=AsyncMock,
+                      side_effect=[PROVIDER_DOWN, ok]) as chat, \
+         patch.object(chat_non_streaming.chat_failover, "attempt_failover", new_callable=AsyncMock, return_value="0xnew"), \
+         patch.object(chat_non_streaming, "get_db", _fake_get_db()), \
+         patch.object(chat_non_streaming, "translate_for_session", _spec_by_session(specs)):
+        response = await chat_non_streaming.handle_non_streaming_request(
+            logger=MagicMock(),
+            request_id="req-1",
+            body=body,
+            db_api_key=MagicMock(),
+            user=MagicMock(id=42),
+            requested_model="llama-3.3-70b",
+            model_id="0x01",
+            session_id="0xold",
+        )
+
+    assert response.status_code == 200
+    second = chat.await_args_list[1].kwargs
+    assert second["session_id"] == "0xnew" and second["messages"] == MESSAGES
+    assert second["max_tokens"] == 512, "the oversize prompt is the provider's call; the output cap is still ours"
+
+
+def _stream_generator(body: bytes):
+    return chat_streaming.build_stream_generator(
+        logger=MagicMock(),
+        session_id="0xold",
+        body=body,
+        requested_model="llama-3.3-70b",
+        model_id="0x01",
+        db_api_key=MagicMock(),
+        user=MagicMock(id=42),
+    )
+
+
+STREAM_BODY = json.dumps({"messages": MESSAGES, "max_tokens": 9000}).encode()
+# Context-only specs: the clamp is context minus the prompt estimate, so it only happens when messages are threaded
+STREAM_SPECS = {"0xold": {"capabilities": {"context": 1024 + ESTIMATE}},
+                "0xnew": {"capabilities": {"context": 2048 + ESTIMATE}}}
+SESSION_EXPIRED = ProxyRouterServiceError('HTTP 500: {"error":"session expired"}', status_code=500, error_type="server_error")
+GOOD_CHUNKS = [b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n', b"data: [DONE]\n\n"]
+
+
+async def test_streaming_clamps_initial_attempt_and_threads_messages():
+    with patch.object(chat_streaming.proxy_router_service, "chatCompletionsStream",
+                      _stream_cm_factory([FakeStreamResponse(GOOD_CHUNKS)])) as stream, \
+         patch.object(chat_streaming, "_stream_cleanup", new_callable=AsyncMock), \
+         patch.object(chat_streaming, "translate_for_session", _spec_by_session(STREAM_SPECS)):
+        async for _ in _stream_generator(STREAM_BODY)():
+            pass
+
+    kwargs = stream.calls[0]
+    assert kwargs["session_id"] == "0xold" and kwargs["max_tokens"] == 1024
+    assert kwargs["messages"] == MESSAGES
+
+
+async def test_streaming_reclamps_on_session_renewal_retry():
+    with patch.object(chat_streaming.proxy_router_service, "chatCompletionsStream",
+                      _stream_cm_factory([SESSION_EXPIRED, FakeStreamResponse(GOOD_CHUNKS)])) as stream, \
+         patch.object(chat_streaming.chat_failover, "attempt_failover", new_callable=AsyncMock) as failover, \
+         patch.object(chat_streaming.session_routing_service, "invalidate_session", new_callable=AsyncMock, return_value=True), \
+         patch.object(chat_streaming.session_routing_service, "route_request", new_callable=AsyncMock, return_value="0xnew"), \
+         patch.object(chat_streaming.session_routing_service, "release_session", new_callable=AsyncMock), \
+         patch.object(chat_streaming, "get_db", _fake_get_db()), \
+         patch.object(chat_streaming, "_stream_cleanup", new_callable=AsyncMock), \
+         patch.object(chat_streaming, "translate_for_session", _spec_by_session(STREAM_SPECS)), \
+         patch("asyncio.sleep", new_callable=AsyncMock):
+        async for _ in _stream_generator(STREAM_BODY)():
+            pass
+
+    failover.assert_not_awaited()
+    first, second = stream.calls[0], stream.calls[1]
+    assert first["session_id"] == "0xold" and first["max_tokens"] == 1024
+    assert second["session_id"] == "0xnew" and second["max_tokens"] == 2048, "retry clamps the canonical value, not the previous clamp"
+    assert second["messages"] == MESSAGES
+
+
+async def test_streaming_reclamps_on_failover_retry():
+    with patch.object(chat_streaming.proxy_router_service, "chatCompletionsStream",
+                      _stream_cm_factory([PROVIDER_DOWN, FakeStreamResponse(GOOD_CHUNKS)])) as stream, \
+         patch.object(chat_streaming.chat_failover, "attempt_failover", new_callable=AsyncMock, return_value="0xnew") as failover, \
+         patch.object(chat_streaming.session_routing_service, "release_session", new_callable=AsyncMock), \
+         patch.object(chat_streaming, "get_db", _fake_get_db()), \
+         patch.object(chat_streaming, "_stream_cleanup", new_callable=AsyncMock), \
+         patch.object(chat_streaming, "translate_for_session", _spec_by_session(STREAM_SPECS)):
+        async for _ in _stream_generator(STREAM_BODY)():
+            pass
+
+    failover.assert_awaited_once()
+    first, second = stream.calls[0], stream.calls[1]
+    assert first["session_id"] == "0xold" and first["max_tokens"] == 1024
+    assert second["session_id"] == "0xnew" and second["max_tokens"] == 2048
     assert second["messages"] == MESSAGES
