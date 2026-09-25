@@ -500,3 +500,42 @@ async def test_translate_for_session_spec_without_limits_still_names_the_stack(t
         result = await rt.translate_for_session(body, "0xsess", "0x01", messages=MESSAGES)
     assert result.headers() == {}, "no spec, no stack"
 
+
+async def test_create_chat_completion_voids_the_hold_and_releases_the_session_on_context_length_exceeded():
+    from src.api.v1.chat.chat_models import ChatCompletionRequest
+
+    request_data = ChatCompletionRequest.model_validate({"model": "m", "messages": MESSAGES, "max_tokens": 5})
+    request = MagicMock(headers={"X-Morpheus-Translate": "1"})
+    user = MagicMock(id=7)
+    db_api_key = MagicMock(id=3)
+    ledger_entry_id = object()
+
+    async def fake_translate(body, session_id, model_id, messages=None):
+        result = rt.TranslationResult()
+        result.context_limits = cl.apply_context_limits(body, {"capabilities": {"context": ESTIMATE - 1}}, messages)
+        return result
+
+    with patch.object(chat_index.settings, "REQUEST_TRANSLATION_MODE", "header"), \
+         patch.object(chat_index.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"), \
+         patch.object(chat_index, "_check_rate_limits", new_callable=AsyncMock, return_value=MagicMock()), \
+         patch.object(chat_index, "_create_billing_hold", new_callable=AsyncMock,
+                      return_value=(ledger_entry_id, "0x01", 12, "real-model")), \
+         patch.object(chat_index, "_resolve_session", new_callable=AsyncMock, return_value="0xsess"), \
+         patch.object(chat_index, "_void_billing_hold", new_callable=AsyncMock) as void_hold, \
+         patch.object(chat_index, "_release_session", new_callable=AsyncMock) as release, \
+         patch.object(chat_index, "translate_for_session", fake_translate), \
+         patch.object(chat_index, "_handle_streaming_request") as streaming, \
+         patch.object(chat_index, "_handle_non_streaming_request", new_callable=AsyncMock) as non_streaming:
+        with pytest.raises(ContextLengthError) as excinfo:
+            await chat_index.create_chat_completion(request_data, request, user=user, db_api_key=db_api_key)
+
+    assert excinfo.value.code == "context_length_exceeded"
+    void_hold.assert_awaited_once()
+    assert void_hold.await_args.kwargs["ledger_entry_id"] is ledger_entry_id
+    assert void_hold.await_args.kwargs["user_id"] == 7
+    assert void_hold.await_args.kwargs["failure_code"] == "context_length_exceeded"
+    release.assert_awaited_once()
+    assert release.await_args.args[0] == "0xsess"
+    streaming.assert_not_called()
+    non_streaming.assert_not_awaited()
+    rt.set_context_window(None)
