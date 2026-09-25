@@ -9,7 +9,6 @@ WEB_SEARCH_FIELDS = (CANONICAL_FIELD, ALIAS_FIELD)
 
 INTENT_ENABLE = "web_search.enable"
 INTENT_CITATIONS = "web_search.citations"
-WEB_SEARCH_INTENTS = frozenset({INTENT_ENABLE, INTENT_CITATIONS})
 
 KIND_BODY_PARAM = "body_param"
 KIND_TEMPLATE_KWARG = "template_kwarg"
