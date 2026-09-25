@@ -37,6 +37,52 @@ class ModelList(BaseModel):
     data: List[Model]
 
 
+class ModelModalities(BaseModel):
+    input: Optional[List[str]] = Field(None, description="Accepted input kinds: text, image, audio, video, pdf")
+    output: Optional[List[str]] = Field(None, description="Produced output kinds: text, image, audio, embeddings")
+
+
+class ModelCapabilities(BaseModel):
+    """Provider-reported facts about the model as served; an absent field is unknown, never false."""
+    model_config = ConfigDict(extra="allow")
+
+    context: Optional[int] = Field(None, description="Served context window in tokens (prompt + completion)")
+    contextTrained: Optional[int] = Field(None, description="Trained context window when the backend reports both")
+    maxOutput: Optional[int] = Field(None, description="Maximum completion tokens")
+    modalities: Optional[ModelModalities] = None
+    tools: Optional[bool] = Field(None, description="Function/tool calling accepted")
+    toolsParallel: Optional[bool] = None
+    structured: Optional[List[str]] = Field(None, description="Subset of json_object, json_schema, grammar, regex, choice")
+    reasoning: Optional[bool] = Field(None, description="The model can reason; control is in thinking")
+    webSearch: Optional[bool] = Field(None, description="The backend can search the web for this model on request")
+    embeddings: Optional[bool] = None
+    promptCache: Optional[bool] = None
+    quantization: Optional[str] = Field(None, description="Backend's own label (fp8, Q4_K_M, bf16, ...)")
+
+
+class ModelThinking(BaseModel):
+    mode: str = Field(..., description="always_on | controllable | tunable")
+    default: Optional[str] = Field(None, description="on, off or an effort level name; absent when unknown")
+
+
+class MarketplaceModel(BaseModel):
+    """A marketplace model row; capabilities, model_family and thinking come from the provider-spec cache
+    and are present only when every cached provider spec for the model agrees."""
+    id: str
+    blockchainID: str
+    created: int = Field(..., description="Unix timestamp (seconds)")
+    tags: List[str]
+    modelType: str
+    capabilities: Optional[ModelCapabilities] = None
+    model_family: Optional[str] = None
+    thinking: Optional[ModelThinking] = None
+
+
+class MarketplaceModelList(BaseModel):
+    object: str = "list"
+    data: List[MarketplaceModel]
+
+
 class ChatMessageRole(str, Enum):
     """Roles in a chat conversation"""
     SYSTEM = "system"
