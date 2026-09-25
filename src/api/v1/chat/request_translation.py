@@ -10,7 +10,14 @@ from src.core.config import settings
 from ....db.database import get_db
 from ....services.session_routing_service import session_routing_service
 from src.services.provider_api_spec_service import provider_api_spec_service
+from src.core.direct_model_service import direct_model_service
 from .context_limits import ContextLimitResult, apply_context_limits, has_max_token_fields
+from .web_search_translation import (
+    MISMATCH_TOKEN,
+    apply_web_search,
+    extract_web_search_intents,
+    web_search_disabled,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -21,6 +28,7 @@ INTENT_DISABLE = "reasoning.disable"
 INTENT_ENABLE = "reasoning.enable"
 INTENT_EFFORT = "reasoning.effort"
 INTENT_BUDGET = "reasoning.budget"
+REASONING_INTENTS = frozenset({INTENT_DISABLE, INTENT_ENABLE, INTENT_EFFORT, INTENT_BUDGET})
 
 # Untrusted provider specs must never rewrite these routing fields
 PROTECTED_ROOTS = frozenset({"messages", "stream", "session_id", "request_id", "model", "tools", "tool_choice"})
@@ -100,6 +108,8 @@ class TranslationResult:
     stack: Optional[str] = None
     touched: bool = False
     context_limits: Optional[ContextLimitResult] = None
+    # Capabilities the on-chain tags promise but the provider spec denies (web_search); the body stays as sent
+    mismatch: List[str] = field(default_factory=list)
 
     def headers(self) -> Dict[str, str]:
         # Untrusted provider values: sanitize against CRLF header injection and encoding errors
@@ -120,6 +130,10 @@ class TranslationResult:
             tokens = [t for t in (_header_token(u) for u in self.unsupported) if t]
             if tokens:
                 out["X-Morpheus-Unsupported"] = ";".join(tokens)
+        if self.mismatch:
+            tokens = [t for t in (_header_token(m) for m in self.mismatch) if t]
+            if tokens:
+                out["X-Morpheus-Capability-Mismatch"] = ";".join(tokens)
         if self.context_limits is not None:
             out.update(self.context_limits.headers())
         return out
@@ -146,6 +160,7 @@ def extract_intents(body: Dict[str, Any]) -> Dict[str, Any]:
             intents[INTENT_DISABLE] = True
         else:
             intents[INTENT_EFFORT] = alias
+    intents.update(extract_web_search_intents(body))
     return intents
 
 
@@ -163,7 +178,7 @@ def set_path(obj: Dict[str, Any], dotted: str, value: Any) -> None:
 
 def apply_spec(body: Dict[str, Any], spec: Optional[Dict[str, Any]]) -> TranslationResult:
     result = TranslationResult()
-    intents = extract_intents(body)
+    intents = {k: v for k, v in extract_intents(body).items() if k in REASONING_INTENTS}
     if not intents or not isinstance(spec, dict):
         return result
     result.stack = spec.get("stack") or None
@@ -203,7 +218,16 @@ def apply_spec(body: Dict[str, Any], spec: Optional[Dict[str, Any]]) -> Translat
 
 
 def needs_translation(body: Dict[str, Any]) -> bool:
-    return bool(extract_intents(body)) or has_max_token_fields(body)
+    return bool(extract_intents(body)) or web_search_disabled(body) or has_max_token_fields(body)
+
+
+async def _model_tags(model_id: str) -> Optional[List[str]]:
+    try:
+        return await direct_model_service.get_model_tags(model_id)
+    except Exception as exc:  # unknown tags: the mismatch check simply does not fire
+        logger.warning("model tags lookup for request translation failed", model_id=model_id, error=str(exc),
+                       event_type="request_translation_tags_lookup_failed")
+        return None
 
 
 async def translate_for_session(
@@ -232,23 +256,34 @@ async def translate_for_session(
         logger.warning("request translation lookup failed", session_id=session_id, error=str(exc),
                        event_type="request_translation_lookup_failed")
         return TranslationResult()
+    tags = await _model_tags(model_id) if extract_web_search_intents(body) else None
     work = copy.deepcopy(body)
     try:
         result = apply_spec(work, spec)
+        web_search = apply_web_search(work, spec, PROTECTED_ROOTS, tags)
         limits = apply_context_limits(work, spec, messages)
     except Exception as exc:
         logger.warning("request translation apply failed", session_id=session_id, error=str(exc),
                        event_type="request_translation_apply_failed")
         return TranslationResult()
+    if web_search.applied or web_search.unsupported:
+        result.stack = result.stack or spec.get("stack") or None
+    result.applied.update(web_search.applied)
+    result.unsupported.extend(web_search.unsupported)
+    if web_search.mismatch:
+        result.mismatch.append(MISMATCH_TOKEN)
+        logger.warning("model tagged web-search-enabled but the provider spec denies web search",
+                       session_id=session_id, model_id=model_id, stack=result.stack,
+                       event_type="request_translation_capability_mismatch")
     result.context_limits = limits
     set_context_window(limits.context)
-    if result.touched or limits.touched:
+    if result.touched or web_search.touched or limits.touched:
         body.clear()
         body.update(work)
         result.touched = True
     if result.touched or result.unsupported or limits.prompt_exceeds:
         logger.info("request translation applied", session_id=session_id, stack=result.stack,
-                    applied=result.applied, unsupported=result.unsupported,
+                    applied=result.applied, unsupported=result.unsupported, mismatch=result.mismatch,
                     context_window=limits.context, max_output=limits.max_output,
                     estimated_prompt_tokens=limits.estimated_prompt_tokens,
                     prompt_exceeds_context=limits.prompt_exceeds, clamped=limits.clamped,

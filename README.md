@@ -490,6 +490,14 @@ And these headers only when translation actually ran and found a provider spec:
 - `X-Morpheus-Provider-Stack` — the provider's declared stack, e.g. `vllm`
 - `X-Morpheus-Translated` — `intent=param;intent=param`, e.g. `reasoning.disable=chat_template_kwargs.enable_thinking`
 - `X-Morpheus-Unsupported` — `intent;intent` for intents the provider declares no usable binding for
+- `X-Morpheus-Capability-Mismatch` — `web_search` when the model is tagged `web-search-enabled` on chain but the provider's spec reports `capabilities.webSearch: false`; the web-search field is then forwarded unchanged
+
+### Web search (request translation)
+
+Under the same gate, `POST /api/v1/chat/completions` also accepts a canonical web-search field:
+
+- `web_search`: `{"enabled": bool, "citations": bool}` — `enabled: true` maps to the provider's `web_search.enable` binding (e.g. Venice `venice_parameters.enable_web_search="on"`, OpenRouter `plugins=[{"id":"web"}]` appended to any plugins already sent, Anthropic `{"type":"web_search_20250305","name":"web_search"}` appended to `tools`), `citations: true` to `web_search.citations` where the provider has one; `enabled: false` only removes the field.
+- `web_search_options` (top-level OpenAI field) counts as `enabled: true` and is never rewritten or removed.
 
 Settings (`src/core/config.py`, see `env.example`):
 

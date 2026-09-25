@@ -171,3 +171,27 @@ async def test_chat_error_handler_omits_gate_headers_when_mode_off():
 
     assert "X-Morpheus-Translation" not in response.headers
     assert "X-Morpheus-Translation-Mode" not in response.headers
+
+
+async def test_prepare_translation_headers_previews_web_search_fields_and_reports_mismatch():
+    seen = {}
+
+    async def fake_translate(body, session_id, model_id, messages=None):
+        seen.update(body)
+        return rt.TranslationResult(stack="vllm", unsupported=["web_search.enable"], mismatch=["web_search"])
+
+    request = MagicMock(headers={"X-Morpheus-Translate": "1"})
+    json_body = {"messages": [], "web_search": {"enabled": True}, "web_search_options": {}, "tools": [{"type": "function"}]}
+    with patch.object(chat_index.settings, "REQUEST_TRANSLATION_MODE", "header"), \
+         patch.object(chat_index.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"), \
+         patch.object(chat_index, "translate_for_session", fake_translate):
+        headers = await chat_index._prepare_translation_headers(request, json_body, "0xsess", "0x01")
+
+    assert seen == {"web_search": {"enabled": True}, "web_search_options": {}}, "preview carries only translatable fields"
+    assert headers["X-Morpheus-Capability-Mismatch"] == "web_search"
+    assert headers["X-Morpheus-Unsupported"] == "web_search.enable"
+
+
+def test_cors_exposes_capability_mismatch_header():
+    exposed = [m.kwargs.get("expose_headers", []) for m in main_module.app.user_middleware]
+    assert any("X-Morpheus-Capability-Mismatch" in headers for headers in exposed)

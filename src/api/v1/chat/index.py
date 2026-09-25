@@ -56,6 +56,7 @@ from .request_translation import (
     translation_gate_headers,
 )
 from .context_limits import MAX_TOKEN_FIELDS
+from .web_search_translation import WEB_SEARCH_FIELDS
 from .chat_exceptions import (
     ChatError,
     InsufficientBalanceError,
@@ -276,7 +277,8 @@ async def _prepare_translation_headers(
         return translation_gate_headers()
 
     # Translate a throwaway preview only for the headers; handlers translate the forwarded body per attempt
-    preview = {k: copy.deepcopy(json_body[k]) for k in (*CANONICAL_FIELDS, *MAX_TOKEN_FIELDS) if k in json_body}
+    preview = {k: copy.deepcopy(json_body[k])
+               for k in (*CANONICAL_FIELDS, *WEB_SEARCH_FIELDS, *MAX_TOKEN_FIELDS) if k in json_body}
     translation = await translate_for_session(preview, session_id, model_id, messages=json_body.get("messages") or [])
     limits = translation.context_limits
     if limits is not None and limits.prompt_exceeds:
