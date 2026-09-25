@@ -271,7 +271,7 @@ async def translate_for_session(
         logger.warning("request translation apply failed", session_id=session_id, error=str(exc),
                        event_type="request_translation_apply_failed")
         return TranslationResult()
-    if web_search.applied or web_search.unsupported:
+    if isinstance(spec, dict):  # a spec was found: name its stack even when only the clamp ran
         result.stack = result.stack or spec.get("stack") or None
     result.applied.update(web_search.applied)
     result.unsupported.extend(web_search.unsupported)

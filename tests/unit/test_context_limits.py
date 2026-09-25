@@ -2,7 +2,6 @@ import json
 import math
 import os
 import sys
-import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -175,7 +174,9 @@ async def test_translate_for_session_clamps_without_reasoning_intents(translatio
     assert body == {"max_tokens": 1024, "temperature": 0.2}
     assert result.touched is True
     assert result.applied == {} and result.unsupported == []
-    assert result.headers() == {"X-Morpheus-Context-Window": "8192", "X-Morpheus-Max-Tokens-Clamped": "9000->1024"}
+    assert result.headers() == {"X-Morpheus-Provider-Stack": "vllm", "X-Morpheus-Context-Window": "8192",
+                                "X-Morpheus-Max-Tokens-Clamped": "9000->1024"}, \
+        "a found spec names its stack even when only the clamp ran"
     assert rt._CONTEXT_WINDOW.get() == 8192
     assert rt.translation_gate_headers()["X-Morpheus-Context-Window"] == "8192"
 
@@ -471,3 +472,18 @@ async def test_streaming_reclamps_on_failover_retry():
     assert first["session_id"] == "0xold" and first["max_tokens"] == 1024
     assert second["session_id"] == "0xnew" and second["max_tokens"] == 2048
     assert second["messages"] == MESSAGES
+
+
+async def test_translate_for_session_spec_without_limits_still_names_the_stack(translation_enabled):
+    body = {"max_tokens": 9000}
+    with patch.object(rt, "get_db", _fake_get_db()), \
+         patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock, return_value=_row()), \
+         patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock, return_value={"stack": "ollama"}):
+        result = await rt.translate_for_session(body, "0xsess", "0x01", messages=MESSAGES)
+    assert result.headers() == {"X-Morpheus-Provider-Stack": "ollama"}
+    with patch.object(rt, "get_db", _fake_get_db()), \
+         patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock, return_value=_row()), \
+         patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock, return_value=None):
+        result = await rt.translate_for_session(body, "0xsess", "0x01", messages=MESSAGES)
+    assert result.headers() == {}, "no spec, no stack"
+
