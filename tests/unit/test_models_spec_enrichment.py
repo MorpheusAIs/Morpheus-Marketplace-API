@@ -40,9 +40,10 @@ def test_two_agreeing_specs_attach_once_regardless_of_key_order():
 def test_two_differing_specs_attach_nothing_and_log_debug():
     with _with_cache([SPEC_A, SPEC_C]), patch.object(mod, "logger") as log:
         assert mod.spec_enrichment("0x01") == {}
-    log.debug.assert_called_once()
-    assert log.debug.call_args.kwargs["distinct_values"] == 2
-    assert log.debug.call_args.kwargs["provider_specs"] == 2
+    logged = {c.kwargs["field"]: c.kwargs for c in log.debug.call_args_list}
+    assert set(logged) == {"capabilities", "model_family", "thinking"}
+    assert logged["capabilities"]["distinct_values"] == 2
+    assert logged["capabilities"]["provider_specs"] == 2
 
 
 def test_agreeing_capabilities_but_differing_family_or_thinking_attach_capabilities_only():
@@ -51,13 +52,49 @@ def test_agreeing_capabilities_but_differing_family_or_thinking_attach_capabilit
         assert mod.spec_enrichment("0x01") == {"capabilities": CAPS}
 
 
-def test_no_cached_specs_or_no_capabilities_attaches_nothing():
+def test_no_cached_specs_or_nothing_usable_attaches_nothing():
     with _with_cache([]):
         assert mod.spec_enrichment("0x01") == {}
-    with _with_cache([{"stack": "vllm", "modelFamily": "qwen3", "thinking": {"mode": "tunable"}}]):
+    with _with_cache([{"stack": "vllm"}]):
         assert mod.spec_enrichment("0x01") == {}
     with _with_cache([{"capabilities": "junk"}]):
         assert mod.spec_enrichment("0x01") == {}
+    with _with_cache([{"capabilities": {}}, {"capabilities": {"unknown": 1}}]):
+        assert mod.spec_enrichment("0x01") == {}, "nothing declared survives projection"
+
+
+def test_family_and_thinking_attach_without_capabilities():
+    """A router that reports modelFamily and thinking but no capabilities block still enriches the row."""
+    with _with_cache([{"stack": "vllm", "modelFamily": "qwen3", "thinking": {"mode": "tunable"}}]):
+        assert mod.spec_enrichment("0x01") == {"model_family": "qwen3", "thinking": {"mode": "tunable"}}
+    disagree = {**SPEC_A, "capabilities": CAPS_OTHER}
+    with _with_cache([SPEC_A, disagree]):
+        assert mod.spec_enrichment("0x01") == {"model_family": "qwen3", "thinking": {"mode": "controllable", "default": "on"}}
+
+
+def test_capabilities_are_projected_onto_declared_fields_without_coercion():
+    junk = {**CAPS, "vendor_blob": "x" * 10000, "nested": {"a": [1, 2]}}
+    with _with_cache([{"capabilities": junk}]):
+        assert mod.spec_enrichment("0x01") == {"capabilities": CAPS}
+    with _with_cache([{"capabilities": junk}, {"capabilities": {**CAPS, "other_blob": 1}}]):
+        assert mod.spec_enrichment("0x01")["capabilities"] == CAPS, "extras never make specs disagree"
+    full = {"context": 1, "contextTrained": 2, "maxOutput": 3, "modalities": {"input": ["text"], "output": ["text"]},
+            "tools": True, "toolsParallel": False, "structured": ["json_schema"], "reasoning": True,
+            "webSearch": False, "embeddings": False, "promptCache": True, "quantization": "fp8"}
+    with _with_cache([{"capabilities": full}]):
+        assert mod.spec_enrichment("0x01") == {"capabilities": full}, "every declared field passes through"
+    for bad in ({"context": "32768"}, {"tools": 1}, {"quantization": "q" * 65}, {"modalities": {"input": ["a"] * 17}},
+                {"structured": ["s" * 65]}, {"context": 1.0}):
+        with _with_cache([{"capabilities": {**CAPS, **bad}}]), patch.object(mod, "logger") as log:
+            assert mod.spec_enrichment("0x01") == {}, bad
+        assert log.debug.call_args.kwargs["event_type"] == "models_capabilities_invalid"
+
+
+def test_family_and_thinking_strings_are_bounded():
+    with _with_cache([{"modelFamily": "f" * 65, "thinking": {"mode": "m" * 65}}]):
+        assert mod.spec_enrichment("0x01") == {}
+    with _with_cache([{"modelFamily": "f" * 64, "thinking": {"mode": "always_on", "default": "d" * 65}}]):
+        assert mod.spec_enrichment("0x01") == {"model_family": "f" * 64, "thinking": {"mode": "always_on"}}
 
 
 def test_thinking_requires_a_mode_and_drops_empty_default():
