@@ -41,6 +41,7 @@ from ....services.rate_limiting import (
 from ....schemas.billing import UsageHoldRequest, UsageFinalizeRequest, UsageVoidRequest
 from ....core.config import settings
 from ....core.logging_config import get_api_logger
+from ....schemas import openai as openai_schemas
 from .chat_models import ChatCompletionRequest
 from .chat_utils import (
     log_tool_request_details,
@@ -77,7 +78,17 @@ from src.core.model_errors import ModelRoutingError
 router = APIRouter(tags=["Chat"])
 
 
-@router.post("/completions")
+@router.post(
+    "/completions",
+    responses={
+        400: {
+            "model": openai_schemas.ChatErrorResponse,
+            "description": "Refused before forwarding: error.code is context_length_exceeded (the prompt estimate "
+                           "exceeds the provider's context window; X-Morpheus-Context-Window carries it) or "
+                           "model_routing_error. X-Morpheus-Error repeats the code.",
+        },
+    },
+)
 async def create_chat_completion(
     request_data: ChatCompletionRequest,
     request: Request,

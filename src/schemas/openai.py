@@ -83,6 +83,20 @@ class MarketplaceModelList(BaseModel):
     data: List[MarketplaceModel]
 
 
+class ChatErrorDetail(BaseModel):
+    """OpenAI-style error body; the code is repeated in the X-Morpheus-Error response header."""
+    message: str
+    type: str = Field(..., description="e.g. invalid_request_error, model_routing_error")
+    code: str = Field(..., description="e.g. context_length_exceeded, model_routing_error")
+    param: Optional[str] = Field(None, description="The offending request field, e.g. messages")
+    context_window: Optional[int] = Field(None, description="context_length_exceeded: the provider's window in tokens")
+    estimated_prompt_tokens: Optional[int] = Field(None, description="context_length_exceeded: the gateway's prompt estimate")
+
+
+class ChatErrorResponse(BaseModel):
+    error: ChatErrorDetail
+
+
 class ChatMessageRole(str, Enum):
     """Roles in a chat conversation"""
     SYSTEM = "system"
