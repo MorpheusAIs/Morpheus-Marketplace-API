@@ -154,3 +154,31 @@ async def test_prepare_translation_headers_omits_header_without_spec():
 def test_cors_exposes_unlisted_params_header():
     exposed = [m.kwargs.get("expose_headers", []) for m in main_module.app.user_middleware]
     assert any("X-Morpheus-Unlisted-Params" in headers for headers in exposed)
+
+
+def test_web_search_alias_and_other_standard_fields_are_never_reported():
+    """web_search_options is the documented alias; venice lists neither it nor store/metadata, yet they are standard."""
+    body = {**STANDARD_BODY, "web_search_options": {}, "store": False, "metadata": {}, "service_tier": "auto",
+            "prompt_cache_key": "k", "safety_identifier": "s", "verbosity": "low", "modalities": ["text"],
+            "audio": {"voice": "alloy"}, "prediction": {"type": "content", "content": ""},
+            "functions": [], "function_call": "none"}
+    assert up.unlisted_params(body, VENICE) == []
+    assert up.unlisted_headers(body, VENICE) == {}
+    assert up.unlisted_params({**body, "min_p": 0.1}, VENICE) == ["min_p"]
+
+
+def test_header_is_capped_and_the_log_carries_only_the_capped_list():
+    body = {**STANDARD_BODY, **{f"junk_{i:04d}": i for i in range(300)}}
+    with patch.object(up, "logger") as log:
+        headers = up.unlisted_headers(body, VLLM)
+    value = headers["X-Morpheus-Unlisted-Params"]
+    tokens = value.split(";")
+    assert len(tokens) == up.MAX_REPORTED + 1
+    assert tokens[:up.MAX_REPORTED] == [f"junk_{i:04d}" for i in range(up.MAX_REPORTED)]
+    assert tokens[-1] == f"...+{300 - up.MAX_REPORTED}"
+    assert len(value) < up.MAX_REPORTED * (rt._HEADER_ELEMENT_MAX + 1) + 16, "bounded whatever the client sends"
+    logged = log.info.call_args.kwargs
+    assert logged["unlisted"] == tokens and logged["unlisted_total"] == 300
+
+    body = {**STANDARD_BODY, **{f"k{i}": i for i in range(up.MAX_REPORTED)}}
+    assert "..." not in up.unlisted_headers(body, VLLM)["X-Morpheus-Unlisted-Params"], "no marker at the cap"

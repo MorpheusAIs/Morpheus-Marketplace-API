@@ -491,7 +491,7 @@ And these headers only when translation actually ran and found a provider spec:
 - `X-Morpheus-Translated` — `intent=param;intent=param`, e.g. `reasoning.disable=chat_template_kwargs.enable_thinking`
 - `X-Morpheus-Unsupported` — `intent;intent` for intents the provider declares no usable binding for
 - `X-Morpheus-Capability-Mismatch` — `web_search` when the model is tagged `web-search-enabled` on chain but the provider's spec reports `capabilities.webSearch: false`; the web-search field is then forwarded unchanged
-- `X-Morpheus-Unlisted-Params` — `key;key` (sorted) for top-level request keys that are neither standard OpenAI chat-completions fields, nor gateway routing fields (`session_id`, `request_id`), nor in the provider spec's `parameters` list, nor targeted by one of its bindings; report only, the body is forwarded unchanged. Not emitted for the `anthropic` stack (its `parameters` use Anthropic Messages names) or when the spec lists no parameters
+- `X-Morpheus-Unlisted-Params` — `key;key` (sorted) for top-level request keys that are neither standard OpenAI chat-completions fields, nor gateway routing fields (`session_id`, `request_id`), nor in the provider spec's `parameters` list, nor targeted by one of its bindings; report only, the body is forwarded unchanged. At most 32 keys are named, then `...+N` for the rest. Not emitted for the `anthropic` stack (its `parameters` use Anthropic Messages names) or when the spec lists no parameters
 
 ### Web search (request translation)
 

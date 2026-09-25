@@ -8,12 +8,17 @@ logger = structlog.get_logger(__name__)
 
 HEADER = "X-Morpheus-Unlisted-Params"
 
-# https://platform.openai.com/docs/api-reference/chat/create
+# https://platform.openai.com/docs/api-reference/chat/create — the whole documented request, including the
+# deprecated functions/function_call pair and web_search_options, which the README accepts as a web-search alias
 OPENAI_CHAT_PARAMS: FrozenSet[str] = frozenset({
     "model", "messages", "temperature", "top_p", "n", "stream", "stream_options", "stop", "max_tokens",
     "max_completion_tokens", "presence_penalty", "frequency_penalty", "logit_bias", "logprobs", "top_logprobs",
     "user", "seed", "response_format", "tools", "tool_choice", "parallel_tool_calls", "reasoning_effort",
+    "store", "metadata", "modalities", "audio", "prediction", "service_tier", "prompt_cache_key",
+    "safety_identifier", "verbosity", "functions", "function_call", "web_search_options",
 })
+# The key count is under client control; the header names at most this many, then "...+N" for the rest
+MAX_REPORTED = 32
 # Routing keys the chat handlers strip before forwarding; the provider never sees them at all
 ROUTING_FIELDS: FrozenSet[str] = frozenset({"session_id", "request_id"})
 # Canonical fields the gateway consumes and rewrites; the provider never sees them by these names
@@ -60,6 +65,9 @@ def unlisted_headers(body: Dict[str, Any], spec: Optional[Dict[str, Any]]) -> Di
     tokens = [t for t in (_header_token(k) for k in unlisted) if t]
     if not tokens:
         return {}
+    reported, dropped = tokens[:MAX_REPORTED], len(tokens) - MAX_REPORTED
+    if dropped > 0:
+        reported.append(f"...+{dropped}")
     logger.info("request carries params the provider spec does not list", stack=spec.get("stack"),
-                unlisted=unlisted, event_type="request_translation_unlisted_params")
-    return {HEADER: ";".join(tokens)}
+                unlisted=reported, unlisted_total=len(tokens), event_type="request_translation_unlisted_params")
+    return {HEADER: ";".join(reported)}
