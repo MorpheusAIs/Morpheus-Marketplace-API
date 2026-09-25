@@ -33,6 +33,7 @@ from .chat_exceptions import (
     GatewayError,
 )
 from .request_translation import translate_for_session, needs_translation
+from .unlisted_params import ROUTING_FIELDS
 
 
 def _parse_request(body: bytes) -> Tuple[list, dict]:
@@ -42,7 +43,7 @@ def _parse_request(body: bytes) -> Tuple[list, dict]:
         messages = request_data.get("messages", [])
         chat_params = {
             k: v for k, v in request_data.items()
-            if k not in ["messages", "stream", "session_id", "request_id"]
+            if k not in ("messages", "stream", *ROUTING_FIELDS)
         }
         return messages, chat_params
     except Exception as e:

@@ -14,8 +14,10 @@ OPENAI_CHAT_PARAMS: FrozenSet[str] = frozenset({
     "max_completion_tokens", "presence_penalty", "frequency_penalty", "logit_bias", "logprobs", "top_logprobs",
     "user", "seed", "response_format", "tools", "tool_choice", "parallel_tool_calls", "reasoning_effort",
 })
+# Routing keys the chat handlers strip before forwarding; the provider never sees them at all
+ROUTING_FIELDS: FrozenSet[str] = frozenset({"session_id", "request_id"})
 # Canonical fields the gateway consumes and rewrites; the provider never sees them by these names
-GATEWAY_FIELDS: FrozenSet[str] = frozenset({"reasoning", "reasoning_effort", "web_search"})
+GATEWAY_FIELDS: FrozenSet[str] = frozenset({"reasoning", "reasoning_effort", "web_search"}) | ROUTING_FIELDS
 # The anthropic stack lists Anthropic Messages names (system, stop_sequences, top_k, ...) while the gateway
 # receives OpenAI chat-completions bodies that the proxy-router reshapes, so the two vocabularies cannot be
 # compared key for key and the check would flag nearly everything. Skipped entirely.

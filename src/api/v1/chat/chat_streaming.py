@@ -26,6 +26,7 @@ from ....utils.error_sanitizer import sanitize_error_message
 from ....db.models import SessionState
 from . import chat_failover
 from .request_translation import translate_for_session, needs_translation
+from .unlisted_params import ROUTING_FIELDS
 
 if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
@@ -522,7 +523,7 @@ def _parse_request_body(body: bytes, logger: "BoundLogger") -> tuple[list, dict]
         messages = req_body_json.get("messages", [])
         chat_params = {
             k: v for k, v in req_body_json.items()
-            if k not in ["messages", "stream", "session_id", "request_id"]
+            if k not in ("messages", "stream", *ROUTING_FIELDS)
         }
 
         has_tool_msg = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))

@@ -8,6 +8,8 @@ from src import main as main_module  # noqa: E402
 from src.api.v1.chat import index as chat_index  # noqa: E402
 from src.api.v1.chat import request_translation as rt  # noqa: E402
 from src.api.v1.chat import unlisted_params as up  # noqa: E402
+from src.api.v1.chat import chat_non_streaming, chat_streaming  # noqa: E402
+from src.api.v1.chat.chat_models import ChatCompletionRequest  # noqa: E402
 
 # Parameter rows as proxy-router/internal/apispec/presets.go declares them
 VLLM_PARAMS = ["model", "messages", "temperature", "top_p", "n", "stream", "stream_options", "stop", "max_tokens",
@@ -69,6 +71,22 @@ def test_unlisted_keys_are_reported_sorted():
 def test_gateway_canonical_fields_are_excluded():
     body = {**STANDARD_BODY, "reasoning": {"enabled": False}, "web_search": {"enabled": True}}
     assert up.unlisted_params(body, VLLM) == []
+
+
+def test_routing_fields_the_handlers_strip_are_excluded():
+    """session_id is a documented ChatCompletionRequest field and request_id rides along; neither reaches the provider."""
+    body = ChatCompletionRequest.model_validate({"model": "m", "messages": [{"role": "user", "content": "hi"}],
+                                                 "session_id": "0xabc", "request_id": "r1"}).model_dump(exclude_none=True)
+    assert up.unlisted_params(body, VLLM) == []
+    assert up.unlisted_headers(body, VLLM) == {}
+
+
+def test_handlers_strip_exactly_the_routing_fields_the_check_excludes():
+    raw = b'{"messages": [], "stream": true, "session_id": "0xabc", "request_id": "r1", "min_p": 0.1}'
+    for _, params in (chat_non_streaming._parse_request(raw), chat_streaming._parse_request_body(raw, MagicMock())):
+        assert set(params) == {"min_p"}
+        assert up.ROUTING_FIELDS.isdisjoint(params)
+    assert up.ROUTING_FIELDS <= up.GATEWAY_FIELDS
 
 
 def test_binding_targeted_roots_are_excluded():
