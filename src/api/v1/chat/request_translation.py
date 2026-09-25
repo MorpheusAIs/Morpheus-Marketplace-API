@@ -206,7 +206,8 @@ def apply_spec(body: Dict[str, Any], spec: Optional[Dict[str, Any]]) -> Translat
             if binding.get("paramType") == "enum" and isinstance(enum_values, list) and value not in enum_values:
                 result.unsupported.append(intent)
                 continue
-            set_path(body, param, value)
+            # The spec is the shared cache entry: a nested binding (thinking.budget_tokens) must never write into it
+            set_path(body, param, copy.deepcopy(value))
             result.applied[intent] = param
         except Exception:
             result.unsupported.append(intent)
