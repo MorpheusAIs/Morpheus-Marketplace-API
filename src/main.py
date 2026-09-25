@@ -78,7 +78,7 @@ try:
                         "X-Morpheus-Provider-Stack", "X-Morpheus-Translated", "X-Morpheus-Unsupported",
                         "X-Morpheus-Translation", "X-Morpheus-Translation-Mode",
                         "X-Morpheus-Context-Window", "X-Morpheus-Max-Tokens-Clamped",
-                        "X-Morpheus-Capability-Mismatch"],
+                        "X-Morpheus-Capability-Mismatch", "X-Morpheus-Unlisted-Params"],
         max_age=86400,  # 24 hours for preflight cache
         trusted_domain_patterns=[
             r"^https://.*\.mor\.org$",  # Any subdomain of mor.org

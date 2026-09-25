@@ -57,6 +57,7 @@ from .request_translation import (
 )
 from .context_limits import MAX_TOKEN_FIELDS
 from .web_search_translation import TOOLS_PARAM, WEB_SEARCH_FIELDS
+from .unlisted_params import unlisted_headers
 from .chat_exceptions import (
     ChatError,
     InsufficientBalanceError,
@@ -287,6 +288,7 @@ async def _prepare_translation_headers(
 
     headers: dict = translation_gate_headers()
     headers.update(translation.headers())
+    headers.update(unlisted_headers(json_body, translation.spec))
     return headers
 
 

@@ -111,6 +111,8 @@ class TranslationResult:
     context_limits: Optional[ContextLimitResult] = None
     # Capabilities the on-chain tags promise but the provider spec denies (web_search); the body stays as sent
     mismatch: List[str] = field(default_factory=list)
+    # The provider spec the body was translated against, for checks that need the full request (unlisted params)
+    spec: Optional[Dict[str, Any]] = None
 
     def headers(self) -> Dict[str, str]:
         # Untrusted provider values: sanitize against CRLF header injection and encoding errors
@@ -278,6 +280,7 @@ async def translate_for_session(
                        session_id=session_id, model_id=model_id, stack=result.stack,
                        event_type="request_translation_capability_mismatch")
     result.context_limits = limits
+    result.spec = spec if isinstance(spec, dict) else None
     set_context_window(limits.context)
     if result.touched or web_search.touched or limits.touched:
         body.clear()
