@@ -99,6 +99,15 @@ def test_array_binding_extends_existing_array_without_duplicates():
     ws.apply_web_search(body, OPENROUTER, ROOTS)
     assert body == {"plugins": [{"id": "web"}]}, "already present: not appended twice"
 
+    body = {"plugins": [{"id": "web", "max_results": 3}], "web_search": {"enabled": True}}
+    res = ws.apply_web_search(body, OPENROUTER, ROOTS)
+    assert body == {"plugins": [{"id": "web", "max_results": 3}]}, "client-configured entry with the same id is kept as is"
+    assert res.applied == {"web_search.enable": "plugins"}
+
+    body = {"plugins": [{"id": "other", "max_results": 3}, "web"], "web_search": {"enabled": True}}
+    ws.apply_web_search(body, OPENROUTER, ROOTS)
+    assert body["plugins"] == [{"id": "other", "max_results": 3}, "web", {"id": "web"}], "different id or non-object: appended"
+
 
 def test_array_binding_creates_or_overwrites_non_array_target():
     body = {"web_search": {"enabled": True}}
@@ -162,6 +171,30 @@ def test_tool_entry_creates_tools_and_is_idempotent():
     res = ws.apply_web_search(body, ANTHROPIC, ROOTS)
     assert body == {"tools": [WEB_TOOL]}, "equal entry already present: not appended"
     assert res.applied == {"web_search.enable": "tools"}
+
+    configured = {**WEB_TOOL, "max_uses": 2}
+    body = {"tools": [dict(configured)], "web_search": {"enabled": True}}
+    res = ws.apply_web_search(body, ANTHROPIC, ROOTS)
+    assert body == {"tools": [configured]}, "same type and name: the client's configured tool wins, no duplicate name"
+    assert res.applied == {"web_search.enable": "tools"}
+
+    for other in ({"type": "function", "name": "web_search"}, {"type": "web_search_20250305", "name": "other"},
+                  {"type": "web_search_20250305"}):
+        body = {"tools": [dict(other)], "web_search": {"enabled": True}}
+        ws.apply_web_search(body, ANTHROPIC, ROOTS)
+        assert body["tools"] == [other, WEB_TOOL], f"{other}: not the same entry, appended"
+
+
+def test_tool_entry_without_identity_keys_matches_by_equality_only():
+    gemini = {"stack": "gemini", "bindings": {"web_search.enable": {
+        "kind": "tool_entry", "param": "tools", "paramType": "object", "value": {"googleSearch": {}}}}}
+    body = {"tools": [{"googleSearch": {}}], "web_search": {"enabled": True}}
+    ws.apply_web_search(body, gemini, ROOTS)
+    assert body == {"tools": [{"googleSearch": {}}]}
+
+    body = {"tools": [{"googleSearch": {"mode": "x"}}], "web_search": {"enabled": True}}
+    ws.apply_web_search(body, gemini, ROOTS)
+    assert body["tools"] == [{"googleSearch": {"mode": "x"}}, {"googleSearch": {}}]
 
 
 def test_tool_entry_appends_a_copy():
@@ -333,7 +366,7 @@ async def test_translate_for_session_applies_web_search_with_reasoning(translati
          patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock, return_value=VENICE), \
          patch.object(rt.direct_model_service, "get_model_tags", new_callable=AsyncMock, return_value=["web-search-enabled"]) as tags:
         res = await rt.translate_for_session(body, "0xsess", "0x01")
-    tags.assert_awaited_once_with("0x01")
+    tags.assert_not_awaited()  # spec allows web search: no mismatch is possible, so tags are not needed
     assert body == {"messages": [], "venice_parameters": {
         "disable_thinking": True, "enable_web_search": "on", "enable_web_citations": True}}
     assert res.applied == {
@@ -384,6 +417,21 @@ async def test_translate_for_session_skips_tag_lookup_without_web_search_intent(
         await rt.translate_for_session(body, "0xsess", "0x01")
     tags.assert_not_awaited()
     assert body == {"venice_parameters": {"disable_thinking": True}}
+
+
+@pytest.mark.parametrize("spec", [None, VENICE, {"stack": "venice", "bindings": VENICE["bindings"]},
+                                  {"stack": "venice", "capabilities": {}, "bindings": VENICE["bindings"]}])
+async def test_translate_for_session_skips_tag_lookup_unless_spec_denies_web_search(translation_enabled, spec):
+    body = {"web_search": {"enabled": True}}
+    with patch.object(rt, "get_db", lambda: _FakeGetDb()), \
+         patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock, return_value=_session_row()), \
+         patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock, return_value=spec), \
+         patch.object(rt.direct_model_service, "get_model_tags", new_callable=AsyncMock) as tags:
+        res = await rt.translate_for_session(body, "0xsess", "0x01")
+    tags.assert_not_awaited()
+    assert res.mismatch == []
+    if spec is not None:
+        assert body == {"venice_parameters": {"enable_web_search": "on"}}
 
 
 async def test_translate_for_session_tag_lookup_failure_translates_without_mismatch(translation_enabled):

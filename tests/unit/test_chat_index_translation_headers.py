@@ -1,3 +1,4 @@
+import copy
 import os
 import sys
 import uuid
@@ -187,9 +188,41 @@ async def test_prepare_translation_headers_previews_web_search_fields_and_report
          patch.object(chat_index, "translate_for_session", fake_translate):
         headers = await chat_index._prepare_translation_headers(request, json_body, "0xsess", "0x01")
 
-    assert seen == {"web_search": {"enabled": True}, "web_search_options": {}}, "preview carries only translatable fields"
+    assert seen == {"web_search": {"enabled": True}, "web_search_options": {}, "tools": [{"type": "function"}]}, \
+        "preview carries only translatable fields plus tools"
+    assert seen["tools"] is not json_body["tools"], "preview never aliases the forwarded body"
     assert headers["X-Morpheus-Capability-Mismatch"] == "web_search"
     assert headers["X-Morpheus-Unsupported"] == "web_search.enable"
+
+
+async def test_prepare_translation_headers_preview_agrees_with_body_for_tool_entry():
+    """A client-sent non-list tools makes the tool_entry binding unsupported in the body, so the header must say so."""
+    anthropic = {"stack": "anthropic", "bindings": {"web_search.enable": {
+        "kind": "tool_entry", "param": "tools", "paramType": "object",
+        "value": {"type": "web_search_20250305", "name": "web_search"}}}}
+    request = MagicMock(headers={"X-Morpheus-Translate": "1"})
+    json_body = {"messages": [], "web_search": {"enabled": True}, "tools": "auto"}
+    row = MagicMock(); row.provider_address = "0xprov"
+
+    class _Db:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return False
+
+    with patch.object(chat_index.settings, "REQUEST_TRANSLATION_MODE", "header"), \
+         patch.object(chat_index.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"), \
+         patch.object(rt, "get_db", lambda: _Db()), \
+         patch.object(rt.session_routing_service, "get_session_info", new_callable=AsyncMock, return_value=row), \
+         patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock, return_value=anthropic):
+        headers = await chat_index._prepare_translation_headers(request, json_body, "0xsess", "0x01")
+        body = copy.deepcopy(json_body)
+        translation = await rt.translate_for_session(body, "0xsess", "0x01")
+
+    assert json_body["tools"] == "auto"
+    assert headers["X-Morpheus-Unsupported"] == "web_search.enable" and "X-Morpheus-Translated" not in headers
+    assert translation.unsupported == ["web_search.enable"] and body["tools"] == "auto"
 
 
 def test_cors_exposes_capability_mismatch_header():

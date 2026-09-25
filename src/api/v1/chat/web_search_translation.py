@@ -60,11 +60,30 @@ def tags_claim_web_search(tags: Optional[Iterable[str]]) -> bool:
     return WEB_SEARCH_TAG in (tags or ())
 
 
+IDENTITY_KEYS = ("type", "name", "id")
+
+
+def _entry_present(entries: List[Any], value: Any) -> bool:
+    """Whether value is already in entries, by identity keys when both carry them, else by equality.
+
+    Providers key tools and plugins by type/name/id, so a client-configured {"id": "web", "max_results": 3} or a
+    web_search tool with max_uses is the same entry, and a second copy would be rejected as a duplicate.
+    """
+    if value in entries:
+        return True
+    if not isinstance(value, dict):
+        return False
+    keys = [k for k in IDENTITY_KEYS if k in value]
+    return bool(keys) and any(
+        isinstance(e, dict) and all(k in e and e[k] == value[k] for k in keys) for e in entries
+    )
+
+
 def _merge_value(existing: Any, value: Any) -> Any:
     # A list binding (openrouter plugins) extends what the client sent; an object binding fills in only the keys
     # the client did not set, so an alias web_search_options survives a {} binding. Scalars overwrite.
     if isinstance(value, list) and isinstance(existing, list):
-        return existing + [v for v in value if v not in existing]
+        return existing + [v for v in value if not _entry_present(existing, v)]
     if isinstance(value, dict) and isinstance(existing, dict):
         return {**value, **existing}
     return value
@@ -91,7 +110,7 @@ def _apply_tool_entry(body: Dict[str, Any], binding: Dict[str, Any]) -> bool:
         body[TOOLS_PARAM] = tools
     elif not isinstance(tools, list):
         return False
-    if value not in tools:
+    if not _entry_present(tools, value):
         tools.append(copy.deepcopy(value))
     return True
 

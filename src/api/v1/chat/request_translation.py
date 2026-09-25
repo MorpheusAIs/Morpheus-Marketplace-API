@@ -16,6 +16,7 @@ from .web_search_translation import (
     MISMATCH_TOKEN,
     apply_web_search,
     extract_web_search_intents,
+    spec_denies_web_search,
     web_search_disabled,
 )
 
@@ -256,7 +257,8 @@ async def translate_for_session(
         logger.warning("request translation lookup failed", session_id=session_id, error=str(exc),
                        event_type="request_translation_lookup_failed")
         return TranslationResult()
-    tags = await _model_tags(model_id) if extract_web_search_intents(body) else None
+    # The mismatch check is the only consumer of tags, and it fires only when the spec denies web search
+    tags = await _model_tags(model_id) if extract_web_search_intents(body) and spec_denies_web_search(spec) else None
     work = copy.deepcopy(body)
     try:
         result = apply_spec(work, spec)
