@@ -86,7 +86,8 @@ async def test_prepare_translation_headers_mode_off_yields_no_headers():
 
 async def test_prepare_translation_headers_mode_header_present_vs_absent():
     with patch.object(chat_index.settings, "REQUEST_TRANSLATION_MODE", "header"), \
-         patch.object(chat_index.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"):
+         patch.object(chat_index.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"), \
+         patch.object(chat_index, "translate_for_session", new_callable=AsyncMock, return_value=rt.TranslationResult()):
         present = MagicMock(headers={"X-Morpheus-Translate": "1"})
         headers_on = await chat_index._prepare_translation_headers(present, {"messages": []}, "0xsess", "0x01")
 
@@ -100,7 +101,8 @@ async def test_prepare_translation_headers_mode_header_present_vs_absent():
 async def test_prepare_translation_headers_reach_non_streaming_response():
     request = MagicMock(headers={"X-Morpheus-Translate": "1"})
     with patch.object(chat_index.settings, "REQUEST_TRANSLATION_MODE", "header"), \
-         patch.object(chat_index.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"):
+         patch.object(chat_index.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"), \
+         patch.object(chat_index, "translate_for_session", new_callable=AsyncMock, return_value=rt.TranslationResult()):
         extra_headers = await chat_index._prepare_translation_headers(request, {"messages": []}, "0xsess", "0x01")
 
     success = JSONResponse(content={"ok": True}, status_code=200)

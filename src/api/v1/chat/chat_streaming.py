@@ -25,7 +25,7 @@ from ....db.database import get_db
 from ....utils.error_sanitizer import sanitize_error_message
 from ....db.models import SessionState
 from . import chat_failover
-from .request_translation import translate_for_session, extract_intents
+from .request_translation import translate_for_session, needs_translation
 
 if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
@@ -548,12 +548,12 @@ def _parse_request_body(body: bytes, logger: "BoundLogger") -> tuple[list, dict]
         return [], {}
 
 
-async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str]) -> dict:
-    if not extract_intents(chat_params):
+async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str], messages: Optional[list] = None) -> dict:
+    if not needs_translation(chat_params):
         return chat_params
     # Copy: a retry re-translates the canonical params for another provider
     params = copy.deepcopy(chat_params)
-    await translate_for_session(params, session_id, model_id)
+    await translate_for_session(params, session_id, model_id, messages=messages)
     return params
 
 
@@ -581,7 +581,7 @@ async def _process_stream_request(
             session_id=session_id,
             messages=messages,
             request_id=request_id,
-            **(await wire_params(chat_params, session_id, model_id)),
+            **(await wire_params(chat_params, session_id, model_id, messages=messages)),
         ) as response:
             logger.info(
                 "Proxy router response received",

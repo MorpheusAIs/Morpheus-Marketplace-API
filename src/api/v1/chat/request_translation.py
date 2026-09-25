@@ -10,6 +10,7 @@ from src.core.config import settings
 from ....db.database import get_db
 from ....services.session_routing_service import session_routing_service
 from src.services.provider_api_spec_service import provider_api_spec_service
+from .context_limits import ContextLimitResult, apply_context_limits, has_max_token_fields
 
 logger = structlog.get_logger(__name__)
 
@@ -35,6 +36,10 @@ def _header_token(value: Any) -> str:
 # Never reset: each ASGI request and its stream generator run in one task, so this cannot leak across requests
 _TRANSLATION_ACTIVE: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
     "request_translation_active", default=False
+)
+# The provider's context window once a spec has been read, so error responses can carry it too
+_CONTEXT_WINDOW: "contextvars.ContextVar[Optional[int]]" = contextvars.ContextVar(
+    "request_context_window", default=None
 )
 
 _TRANSLATION_TRUTHY = {"1", "true", "yes", "on"}
@@ -63,7 +68,12 @@ def translation_requested(headers) -> bool:
 
 
 def set_request_translation(flag: bool) -> "contextvars.Token[bool]":
+    _CONTEXT_WINDOW.set(None)
     return _TRANSLATION_ACTIVE.set(flag)
+
+
+def set_context_window(context: Optional[int]) -> "contextvars.Token[Optional[int]]":
+    return _CONTEXT_WINDOW.set(context)
 
 
 def request_translation_active() -> bool:
@@ -73,10 +83,14 @@ def request_translation_active() -> bool:
 def translation_gate_headers() -> Dict[str, str]:
     if settings.REQUEST_TRANSLATION_MODE == "off":
         return {}
-    return {
+    out = {
         "X-Morpheus-Translation": "on" if request_translation_active() else "off",
         "X-Morpheus-Translation-Mode": settings.REQUEST_TRANSLATION_MODE,
     }
+    context = _CONTEXT_WINDOW.get()
+    if context is not None:
+        out["X-Morpheus-Context-Window"] = str(context)
+    return out
 
 
 @dataclass
@@ -85,6 +99,7 @@ class TranslationResult:
     unsupported: List[str] = field(default_factory=list)
     stack: Optional[str] = None
     touched: bool = False
+    context_limits: Optional[ContextLimitResult] = None
 
     def headers(self) -> Dict[str, str]:
         # Untrusted provider values: sanitize against CRLF header injection and encoding errors
@@ -105,6 +120,8 @@ class TranslationResult:
             tokens = [t for t in (_header_token(u) for u in self.unsupported) if t]
             if tokens:
                 out["X-Morpheus-Unsupported"] = ";".join(tokens)
+        if self.context_limits is not None:
+            out.update(self.context_limits.headers())
         return out
 
 
@@ -185,10 +202,24 @@ def apply_spec(body: Dict[str, Any], spec: Optional[Dict[str, Any]]) -> Translat
     return result
 
 
-async def translate_for_session(body: Dict[str, Any], session_id: Optional[str], model_id: Optional[str]) -> TranslationResult:
+def needs_translation(body: Dict[str, Any]) -> bool:
+    return bool(extract_intents(body)) or has_max_token_fields(body)
+
+
+async def translate_for_session(
+    body: Dict[str, Any],
+    session_id: Optional[str],
+    model_id: Optional[str],
+    messages: Optional[Any] = None,
+) -> TranslationResult:
+    """Rewrite body in place for the session's provider.
+
+    Pass messages to also check the prompt against the provider's context window; without them only
+    fields already in body are translated.
+    """
     if not request_translation_active() or not session_id or not model_id:
         return TranslationResult()
-    if not extract_intents(body):
+    if not needs_translation(body) and messages is None:
         return TranslationResult()
     try:
         async with get_db() as db:
@@ -204,15 +235,22 @@ async def translate_for_session(body: Dict[str, Any], session_id: Optional[str],
     work = copy.deepcopy(body)
     try:
         result = apply_spec(work, spec)
+        limits = apply_context_limits(work, spec, messages)
     except Exception as exc:
         logger.warning("request translation apply failed", session_id=session_id, error=str(exc),
                        event_type="request_translation_apply_failed")
         return TranslationResult()
-    if result.touched:
+    result.context_limits = limits
+    set_context_window(limits.context)
+    if result.touched or limits.touched:
         body.clear()
         body.update(work)
-    if result.touched or result.unsupported:
+        result.touched = True
+    if result.touched or result.unsupported or limits.prompt_exceeds:
         logger.info("request translation applied", session_id=session_id, stack=result.stack,
                     applied=result.applied, unsupported=result.unsupported,
+                    context_window=limits.context, max_output=limits.max_output,
+                    estimated_prompt_tokens=limits.estimated_prompt_tokens,
+                    prompt_exceeds_context=limits.prompt_exceeds, clamped=limits.clamped,
                     event_type="request_translation_applied")
     return result

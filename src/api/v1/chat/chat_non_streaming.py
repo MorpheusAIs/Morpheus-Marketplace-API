@@ -32,7 +32,7 @@ from .chat_exceptions import (
     ProxyError,
     GatewayError,
 )
-from .request_translation import translate_for_session, extract_intents
+from .request_translation import translate_for_session, needs_translation
 
 
 def _parse_request(body: bytes) -> Tuple[list, dict]:
@@ -49,12 +49,12 @@ def _parse_request(body: bytes) -> Tuple[list, dict]:
         raise RequestParseError(message=f"Invalid JSON in request body: {e}") from e
 
 
-async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str]) -> dict:
-    if not extract_intents(chat_params):
+async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str], messages: Optional[list] = None) -> dict:
+    if not needs_translation(chat_params):
         return chat_params
     # Copy: a retry re-translates the canonical params for another provider
     params = copy.deepcopy(chat_params)
-    await translate_for_session(params, session_id, model_id)
+    await translate_for_session(params, session_id, model_id, messages=messages)
     return params
 
 
@@ -113,7 +113,7 @@ async def _make_proxy_request(
         session_id=session_id,
         messages=messages,
         request_id=request_id,
-        **(await wire_params(chat_params, session_id, model_id)),
+        **(await wire_params(chat_params, session_id, model_id, messages=messages)),
     )
 
 
