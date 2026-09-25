@@ -92,8 +92,10 @@ def apply_context_limits(
         return result
 
     for name in MAX_TOKEN_FIELDS:
-        value = body.get(name)
-        if isinstance(value, bool) or not isinstance(value, int):
+        # A client value outside the wire range is left for the provider to reject; echoing it in the clamp
+        # header would let a 4000-digit int blow past reverse-proxy header buffers
+        value = _positive_int(body.get(name))
+        if value is None:
             continue
         if value > ceiling:
             body[name] = ceiling

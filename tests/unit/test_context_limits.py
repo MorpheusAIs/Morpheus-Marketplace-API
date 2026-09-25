@@ -474,6 +474,19 @@ async def test_streaming_reclamps_on_failover_retry():
     assert second["messages"] == MESSAGES
 
 
+def test_client_values_outside_the_wire_range_are_left_to_the_provider():
+    huge = 10 ** 4000  # far past the wire range and past what str()/JSON would even render
+    body = {"max_tokens": huge, "max_completion_tokens": 1 << 31}
+    result = cl.apply_context_limits(body, SPEC_BOTH, MESSAGES)
+    assert body == {"max_tokens": huge, "max_completion_tokens": 1 << 31}
+    assert result.touched is False and result.clamped == []
+    assert result.headers() == {"X-Morpheus-Context-Window": "8192"}
+
+    body = {"max_tokens": (1 << 31) - 1}
+    cl.apply_context_limits(body, SPEC_BOTH, MESSAGES)
+    assert body == {"max_tokens": 1024}, "the largest wire int still clamps"
+
+
 async def test_translate_for_session_spec_without_limits_still_names_the_stack(translation_enabled):
     body = {"max_tokens": 9000}
     with patch.object(rt, "get_db", _fake_get_db()), \
