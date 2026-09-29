@@ -18,6 +18,7 @@ import platform
 
 from src.api.v1 import models, chat, auth, chat_history, embeddings, audio, billing, billing_admin, webhooks, wallet
 from src.api.v1.chat.chat_exceptions import ChatError
+from src.api.v1.chat.request_translation import translation_gate_headers
 from src.core.model_errors import ModelRoutingError
 from src.services import session_routing_service
 from src.utils.error_sanitizer import sanitize_error_message
@@ -73,7 +74,9 @@ try:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Requested-With", "X-API-Key"],
-        expose_headers=["Content-Length", "Content-Type"],
+        expose_headers=["Content-Length", "Content-Type", "X-Request-Id",
+                        "X-Morpheus-Provider-Stack", "X-Morpheus-Translated", "X-Morpheus-Unsupported",
+                        "X-Morpheus-Translation", "X-Morpheus-Translation-Mode"],
         max_age=86400,  # 24 hours for preflight cache
         trusted_domain_patterns=[
             r"^https://.*\.mor\.org$",  # Any subdomain of mor.org
@@ -180,7 +183,9 @@ async def enforce_https(request: Request, call_next):
 @app.exception_handler(ChatError)
 async def chat_error_handler(request: Request, exc: ChatError):
     """Handle ChatError exceptions with structured responses."""
-    return exc.to_response()
+    response = exc.to_response()
+    response.headers.update(translation_gate_headers())
+    return response
 
 
 @app.exception_handler(ModelRoutingError)

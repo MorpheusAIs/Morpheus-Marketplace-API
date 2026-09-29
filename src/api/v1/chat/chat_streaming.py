@@ -10,6 +10,7 @@ This module provides streaming response handling with:
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import uuid
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from ....db.database import get_db
 from ....utils.error_sanitizer import sanitize_error_message
 from ....db.models import SessionState
 from . import chat_failover
+from .request_translation import translate_for_session, extract_intents
 
 if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
@@ -414,6 +416,7 @@ def build_stream_generator(
                 logger=stream_logger,
                 accumulator=accumulator,
                 request_id=billing_params.request_id if billing_params else None,
+                model_id=model_id,
             ):
                 if isinstance(chunk_data, StreamResult):
                     chunk_count = chunk_data.chunk_count
@@ -431,6 +434,7 @@ def build_stream_generator(
                                 user=user,
                                 requested_model=requested_model,
                                 logger=stream_logger,
+                                model_id=model_id,
                                 accumulator=accumulator,
                                 request_id=billing_params.request_id if billing_params else None,
                             )
@@ -518,7 +522,7 @@ def _parse_request_body(body: bytes, logger: "BoundLogger") -> tuple[list, dict]
         messages = req_body_json.get("messages", [])
         chat_params = {
             k: v for k, v in req_body_json.items()
-            if k not in ["messages", "stream", "session_id"]
+            if k not in ["messages", "stream", "session_id", "request_id"]
         }
 
         has_tool_msg = any(msg.get("role") == "tool" for msg in messages if isinstance(msg, dict))
@@ -544,6 +548,15 @@ def _parse_request_body(body: bytes, logger: "BoundLogger") -> tuple[list, dict]
         return [], {}
 
 
+async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str]) -> dict:
+    if not extract_intents(chat_params):
+        return chat_params
+    # Copy: a retry re-translates the canonical params for another provider
+    params = copy.deepcopy(chat_params)
+    await translate_for_session(params, session_id, model_id)
+    return params
+
+
 async def _process_stream_request(
     session_id: str,
     messages: list,
@@ -551,6 +564,7 @@ async def _process_stream_request(
     logger: "BoundLogger",
     accumulator: Optional[StreamingUsageAccumulator] = None,
     request_id: Optional[str] = None,
+    model_id: Optional[str] = None,
 ) -> AsyncIterator[bytes | StreamResult]:
     """
     Process a single streaming request attempt.
@@ -567,7 +581,7 @@ async def _process_stream_request(
             session_id=session_id,
             messages=messages,
             request_id=request_id,
-            **chat_params,
+            **(await wire_params(chat_params, session_id, model_id)),
         ) as response:
             logger.info(
                 "Proxy router response received",
@@ -702,6 +716,7 @@ async def _handle_session_retry(
     user,
     requested_model: Optional[str],
     logger: "BoundLogger",
+    model_id: Optional[str] = None,
     accumulator: Optional[StreamingUsageAccumulator] = None,
     request_id: Optional[str] = None,
 ) -> AsyncIterator[bytes | StreamResult]:
@@ -770,6 +785,7 @@ async def _handle_session_retry(
             logger=logger.bind(retry_session_id=new_session_id),
             accumulator=accumulator,
             request_id=request_id,
+            model_id=model_id,
         ):
             if isinstance(chunk, StreamResult) and (chunk.needs_retry or chunk.needs_failover):
                 yield _format_sse_error(
@@ -855,6 +871,7 @@ async def _handle_failover_retry(
             logger=logger.bind(retry_session_id=new_session_id),
             accumulator=accumulator,
             request_id=request_id,
+            model_id=model_id,
         ):
             if isinstance(chunk, StreamResult) and (chunk.needs_retry or chunk.needs_failover):
                 # Single retry only: a second recoverable failure becomes a
