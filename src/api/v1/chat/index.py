@@ -101,7 +101,11 @@ async def create_chat_completion(
         user_id=user.id,
         request_id=request_id,
     )
-    
+
+    # Before rate limits, billing and session opening: their ChatErrors carry
+    # the gate headers, which must reflect this request's opt-in.
+    set_request_translation(translation_requested(request.headers))
+
     chat_logger.info(
         "New chat completion request received",
         model=request_data.model,
