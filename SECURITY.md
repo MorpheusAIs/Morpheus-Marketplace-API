@@ -4,8 +4,7 @@
 
 Report suspected vulnerabilities in this repository or in the hosted Morpheus Marketplace API privately.
 
-- Email [nomadicrogue@mor.org](mailto:nomadicrogue@mor.org)
-- Or open a draft security advisory: [Morpheus-Marketplace-API advisories](https://github.com/MorpheusAIs/Morpheus-Marketplace-API/security/advisories/new)
+Email [security@mor.org](mailto:security@mor.org).
 
 Do not open a public GitHub issue, pull request, or discussion for a suspected vulnerability. Do not include live credentials, customer data, or proof-of-concept traffic against production.
 
