@@ -612,6 +612,8 @@ The load testing script focuses on endpoints that don't depend on the proxy-rout
 
 ## Development and Contributing
 
+Branch model, local checks, and which files do not start a deploy are in [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities using [SECURITY.md](SECURITY.md).
+
 - Format code with `ruff format`
 - Run linting with `ruff check`
 - Run type checking with `mypy`
