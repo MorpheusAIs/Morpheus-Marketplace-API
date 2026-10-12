@@ -228,3 +228,56 @@ async def test_prepare_translation_headers_preview_agrees_with_body_for_tool_ent
 def test_cors_exposes_capability_mismatch_header():
     exposed = [m.kwargs.get("expose_headers", []) for m in main_module.app.user_middleware]
     assert any("X-Morpheus-Capability-Mismatch" in headers for headers in exposed)
+
+
+async def test_gate_headers_on_errors_before_the_session_reflect_the_opt_in():
+    """A 503 while opening the session must say translation is on when the client opted in."""
+    from src.api.v1.chat.chat_exceptions import ModelUnavailableError
+
+    request = MagicMock()
+    request.headers = {"X-Morpheus-Translate": "1"}
+    token = rt.set_request_translation(False)
+    try:
+        with patch.object(rt.settings, "REQUEST_TRANSLATION_MODE", "header"), \
+             patch.object(main_module.settings, "REQUEST_TRANSLATION_MODE", "header"), \
+             patch.object(chat_index, "_check_rate_limits", new_callable=AsyncMock, return_value=MagicMock()), \
+             patch.object(chat_index, "_create_billing_hold", new_callable=AsyncMock, return_value=(uuid.uuid4(), "0x01", MagicMock(), "mistral-24b:high")), \
+             patch.object(chat_index, "_resolve_session", new_callable=AsyncMock, side_effect=ModelUnavailableError(message="bid above the hosted gateway limit")), \
+             patch.object(chat_index, "_void_billing_hold", new_callable=AsyncMock):
+            request_data = chat_index.ChatCompletionRequest(model="mistral-24b:high", messages=[{"role": "user", "content": "hi"}])
+            try:
+                await chat_index.create_chat_completion(request_data, request, user=MagicMock(id=1), db_api_key=MagicMock(id=7, key_prefix="abc"))
+                raise AssertionError("expected the session error to propagate")
+            except ModelUnavailableError as exc:
+                response = await main_module.chat_error_handler(request, exc)
+    finally:
+        rt._TRANSLATION_ACTIVE.reset(token)
+
+    assert response.status_code == 503
+    assert response.headers["X-Morpheus-Translation"] == "on"
+    assert response.headers["X-Morpheus-Translation-Mode"] == "header"
+
+
+async def test_gate_headers_on_errors_before_the_session_stay_off_without_opt_in():
+    from src.api.v1.chat.chat_exceptions import ModelUnavailableError
+
+    request = MagicMock()
+    request.headers = {}
+    token = rt.set_request_translation(True)
+    try:
+        with patch.object(rt.settings, "REQUEST_TRANSLATION_MODE", "header"), \
+             patch.object(main_module.settings, "REQUEST_TRANSLATION_MODE", "header"), \
+             patch.object(chat_index, "_check_rate_limits", new_callable=AsyncMock, return_value=MagicMock()), \
+             patch.object(chat_index, "_create_billing_hold", new_callable=AsyncMock, return_value=(uuid.uuid4(), "0x01", MagicMock(), "mistral-24b:high")), \
+             patch.object(chat_index, "_resolve_session", new_callable=AsyncMock, side_effect=ModelUnavailableError(message="no session")), \
+             patch.object(chat_index, "_void_billing_hold", new_callable=AsyncMock):
+            request_data = chat_index.ChatCompletionRequest(model="mistral-24b:high", messages=[{"role": "user", "content": "hi"}])
+            try:
+                await chat_index.create_chat_completion(request_data, request, user=MagicMock(id=1), db_api_key=MagicMock(id=7, key_prefix="abc"))
+                raise AssertionError("expected the session error to propagate")
+            except ModelUnavailableError as exc:
+                response = await main_module.chat_error_handler(request, exc)
+    finally:
+        rt._TRANSLATION_ACTIVE.reset(token)
+
+    assert response.headers["X-Morpheus-Translation"] == "off"

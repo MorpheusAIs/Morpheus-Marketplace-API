@@ -125,6 +125,51 @@ def test_alias_removed_together_with_object():
     assert "reasoning" not in body and "reasoning_effort" not in body
 
 
+# Venice behind LiteLLM: LiteLLM rejects a top-level reasoning_effort for
+# openai/ deployments but forwards the reasoning object, so the proxy-router
+# binds effort to its object form.
+VENICE_OBJECT_EFFORT = {
+    "stack": "venice",
+    "via": "litellm",
+    "bindings": {
+        "reasoning.disable": {"kind": "body_param", "param": "venice_parameters.disable_thinking", "paramType": "boolean", "value": True},
+        "reasoning.effort": {"kind": "body_param", "param": "reasoning.effort", "paramType": "enum", "enumValues": ["low", "medium", "high"]},
+    },
+}
+
+
+def test_object_effort_binding_moves_the_alias_into_the_reasoning_object():
+    body = {"messages": [], "reasoning_effort": "low"}
+    res = rt.apply_spec(body, VENICE_OBJECT_EFFORT)
+    assert body == {"messages": [], "reasoning": {"effort": "low"}}
+    assert res.applied == {"reasoning.effort": "reasoning.effort"} and res.touched is True
+
+
+def test_object_effort_binding_keeps_the_object_form():
+    body = {"reasoning": {"effort": "high"}}
+    res = rt.apply_spec(body, VENICE_OBJECT_EFFORT)
+    assert body == {"reasoning": {"effort": "high"}}
+    assert res.applied == {"reasoning.effort": "reasoning.effort"}
+
+
+def test_object_effort_binding_still_pops_reasoning_for_disable():
+    body = {"reasoning": {"enabled": False}}
+    res = rt.apply_spec(body, VENICE_OBJECT_EFFORT)
+    assert body == {"venice_parameters": {"disable_thinking": True}}
+    assert res.applied == {"reasoning.disable": "venice_parameters.disable_thinking"}
+
+    body = {"reasoning_effort": "none"}
+    rt.apply_spec(body, VENICE_OBJECT_EFFORT)
+    assert body == {"venice_parameters": {"disable_thinking": True}}, "alias none is the disable intent, not an effort level"
+
+
+def test_object_effort_binding_keeps_the_callers_reasoning_root():
+    body = {"reasoning": {"enabled": False, "effort": "low"}}
+    res = rt.apply_spec(body, VENICE_OBJECT_EFFORT)
+    assert body == {"reasoning": {"enabled": False, "effort": "low"}, "venice_parameters": {"disable_thinking": True}}
+    assert res.applied == {"reasoning.disable": "venice_parameters.disable_thinking", "reasoning.effort": "reasoning.effort"}
+
+
 def test_headers():
     res = rt.TranslationResult(applied={"reasoning.disable": "venice_parameters.disable_thinking"}, unsupported=["reasoning.budget"], stack="venice", touched=True)
     assert res.headers() == {

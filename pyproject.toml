@@ -13,7 +13,10 @@ fastapi = "^0.110.0"
 uvicorn = "^0.27.0"
 pydantic = "^2.6.0"
 pydantic-settings = "^2.1.0"
-sqlalchemy = "^2.0.25"
+# Stay on 2.0. SQLAlchemy 2.1 moved greenlet into the asyncio extra, and a
+# Docker re-lock to 2.1.1 shipped an image that died on import.
+sqlalchemy = ">=2.0.25,<2.1"
+greenlet = "^3.1.1"
 asyncpg = "^0.29.0"
 alembic = "^1.13.1"
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}
