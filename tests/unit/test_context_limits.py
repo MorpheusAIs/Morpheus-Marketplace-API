@@ -46,6 +46,67 @@ def test_estimate_prompt_tokens_is_ceil_of_json_length_over_four():
     assert cl.estimate_prompt_tokens([{"role": "user", "content": "日本語"}]) == math.ceil(len('[{"role": "user", "content": "日本語"}]') / 4)
 
 
+IMAGE = "data:image/png;base64," + "A" * 400_000
+
+
+def _estimate_of(messages, media):
+    return math.ceil(len(json.dumps(messages, ensure_ascii=False)) / 4) + media * cl.MEDIA_PART_TOKENS
+
+
+def test_estimate_counts_a_media_part_at_a_fixed_cost_not_its_payload():
+    with_image = [{"role": "user", "content": [
+        {"type": "text", "text": "what is in this picture?"},
+        {"type": "image_url", "image_url": {"url": IMAGE, "detail": "high"}},
+    ]}]
+    reduced = [{"role": "user", "content": [{"type": "text", "text": "what is in this picture?"}, {"type": "image_url"}]}]
+    assert cl.estimate_prompt_tokens(with_image) == _estimate_of(reduced, 1)
+    assert with_image[0]["content"][1]["image_url"]["url"] == IMAGE, "the caller's messages are not changed"
+
+    # Every part without text is media: audio, a file, a part with no type
+    parts = [
+        {"type": "input_audio", "input_audio": {"data": "U" * 100_000, "format": "wav"}},
+        {"type": "file", "file": {"file_data": "F" * 100_000}},
+        {"image_url": {"url": IMAGE}},
+        {"type": "refusal", "refusal": "no"},
+    ]
+    reduced = [{"role": "assistant", "content": [{"type": "input_audio"}, {"type": "file"}, {"type": None}, {"type": "refusal", "refusal": "no"}]}]
+    assert cl.estimate_prompt_tokens([{"role": "assistant", "content": parts}]) == _estimate_of(reduced, 3)
+
+    # Plain string content and text-only parts are counted as before
+    text_parts = [{"role": "user", "content": [{"type": "text", "text": "x" * 4000}]}]
+    assert cl.estimate_prompt_tokens(text_parts) == _estimate_of(text_parts, 0)
+
+
+def test_estimate_classifies_parts_by_payload_not_by_type_label():
+    # Text under any type label is counted, so a long prompt cannot hide behind a media label
+    hidden = [{"role": "assistant", "content": [{"type": "output_text", "text": "x" * 40_000}, {"type": "image_url", "text": "y" * 40_000}]}]
+    assert cl.estimate_prompt_tokens(hidden) == _estimate_of(hidden, 0)
+    assert cl.estimate_prompt_tokens(hidden) > 20_000
+
+    # A media object riding on a text part is not serialized
+    riding = [{"role": "user", "content": [{"type": "text", "text": "hi", "image_url": {"url": IMAGE}}]}]
+    assert cl.estimate_prompt_tokens(riding) == _estimate_of([{"role": "user", "content": [{"type": "text", "text": "hi"}]}], 0)
+
+
+def test_context_derived_ceiling_reserves_only_the_fixed_media_cost():
+    # Pinned trade-off: an image reserves MEDIA_PART_TOKENS in the context-derived clamp; the provider
+    # enforces its own window when the real image cost is higher
+    messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": IMAGE}}]}]
+    body = {"max_tokens": 8192}
+    result = cl.apply_context_limits(body, {"stack": "vllm", "capabilities": {"context": 8192}}, messages)
+    assert body["max_tokens"] == 8192 - result.estimated_prompt_tokens
+    assert result.estimated_prompt_tokens == _estimate_of([{"role": "user", "content": [{"type": "image_url"}]}], 1)
+
+
+def test_an_inline_image_neither_trips_the_early_400_nor_over_clamps():
+    messages = [{"role": "user", "content": [{"type": "text", "text": "describe it"}, {"type": "image_url", "image_url": {"url": IMAGE}}]}]
+    body = {"max_tokens": 4096}
+    result = cl.apply_context_limits(body, {"stack": "vllm", "capabilities": {"context": 8192}}, messages)
+    assert result.prompt_exceeds is False
+    assert result.estimated_prompt_tokens < 200
+    assert body["max_tokens"] == 4096 and result.clamped == []
+
+
 def test_read_limits_accepts_only_positive_ints():
     assert cl.read_limits(SPEC_BOTH) == (8192, 1024)
     assert cl.read_limits(SPEC_CONTEXT_ONLY) == (100, None)

@@ -31,16 +31,58 @@ def read_limits(spec: Optional[Dict[str, Any]]) -> Tuple[Optional[int], Optional
     return _positive_int(caps.get("context")), _positive_int(caps.get("maxOutput"))
 
 
+# A media part costs the provider tokens by its resolution or duration, not by the length of its inline
+# base64: a 300 KB image would read as ~100k tokens at 4 characters each. It counts this fixed amount
+# instead, the low end of what providers bill (OpenAI's low-detail image is 85 tokens), so the early 400
+# never refuses a prompt because of its images. The same low figure feeds the context-derived max_tokens
+# ceiling, where it can leave more room than a large image really takes; the provider still enforces its
+# own window then, as it does without the clamp.
+MEDIA_PART_TOKENS = 85
+
+# String fields of a content part that the model reads as text, whatever the part's type says
+_TEXT_FIELDS = ("text", "refusal")
+
+
+def _without_media(messages: Any) -> Tuple[Any, int]:
+    """messages with every content part reduced to its type and text fields, and how many parts carried no
+    text (media: image_url, input_audio, file, ...). Classified by payload, not by the type label, so text
+    counts wherever it sits and a media object is never serialized."""
+    if not isinstance(messages, list):
+        return messages, 0
+    out: List[Any] = []
+    media = 0
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            parts: List[Any] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    parts.append(part)
+                    continue
+                reduced = {"type": part.get("type")}
+                for name in _TEXT_FIELDS:
+                    if isinstance(part.get(name), str):
+                        reduced[name] = part[name]
+                if len(reduced) == 1:
+                    media += 1
+                parts.append(reduced)
+            message = {**message, "content": parts}
+        out.append(message)
+    return out, media
+
+
 def estimate_prompt_tokens(messages: Any) -> int:
-    """Rough prompt size in tokens: ~4 characters per token over the serialized messages.
+    """Rough prompt size in tokens: ~4 characters per token over the serialized messages, with each media
+    part counted as MEDIA_PART_TOKENS instead of its payload.
 
     Deliberately crude and tokenizer-free; this is the single place to swap in a real tokenizer.
     """
+    text, media = _without_media(messages)
     try:
-        serialized = json.dumps(messages, ensure_ascii=False)
+        serialized = json.dumps(text, ensure_ascii=False)
     except (TypeError, ValueError):
-        serialized = str(messages)
-    return math.ceil(len(serialized) / 4)
+        serialized = str(text)
+    return math.ceil(len(serialized) / 4) + media * MEDIA_PART_TOKENS
 
 
 @dataclass
