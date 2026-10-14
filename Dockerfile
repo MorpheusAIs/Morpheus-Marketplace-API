@@ -17,15 +17,13 @@ RUN pip install --upgrade pip && \
 # Copy only files needed for dependency installation
 COPY pyproject.toml poetry.lock* ./
 
-# Install dependencies
+# Install dependencies from the committed lock.
 # --no-root: Don't install the project itself yet
 # --only main: Exclude development dependencies (replaces deprecated --no-dev)
-# poetry.lock is currently stale vs pyproject (missing siwe/web3/…). CI/Docker
-# still re-lock when check fails. The abnf pin in pyproject.toml is what
-# stops a same-day PyPI break (abnf 2.9.0 vs siwe, 2026-08-27) from landing
-# in a PRD rebuild. After a committed lock refresh, drop the `|| poetry lock`.
+# Do not re-lock here. A stale lock used to run `poetry lock` in the image,
+# which resolved SQLAlchemy 2.1 without greenlet and the task exited on import.
 RUN poetry config virtualenvs.create false && \
-    (poetry check --lock || poetry lock) && \
+    poetry check --lock && \
     poetry install --no-root --only main --no-interaction --no-ansi
 
 # Stage 2: Final stage

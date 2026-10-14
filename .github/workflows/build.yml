@@ -166,7 +166,7 @@ jobs:
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
-          version: latest
+          version: 1.8.2
           virtualenvs-create: true
           virtualenvs-in-project: true
           
@@ -180,20 +180,12 @@ jobs:
       - name: Install dependencies
         if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
         run: |
-          # Check if lock file is out of sync and regenerate if needed
-          if ! poetry check --lock; then
-            echo "🔄 Lock file out of sync, regenerating..."
-            poetry lock
-          fi
+          poetry check --lock
           poetry install --no-interaction --no-root
         
       - name: Install project
         run: |
-          # Check if lock file is out of sync and regenerate if needed
-          if ! poetry check --lock; then
-            echo "🔄 Lock file out of sync, regenerating..."
-            poetry lock
-          fi
+          poetry check --lock
           poetry install --no-interaction
         
       - name: Run database migrations (test)
@@ -331,17 +323,13 @@ jobs:
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
-          version: latest
+          version: 1.8.2
           virtualenvs-create: true
           virtualenvs-in-project: true
           
       - name: Install dependencies (for migrations)
         run: |
-          # Check if lock file is out of sync and regenerate if needed
-          if ! poetry check --lock; then
-            echo "🔄 Lock file out of sync, regenerating..."
-            poetry lock
-          fi
+          poetry check --lock
           poetry install --no-interaction
 
       - name: Configure AWS credentials

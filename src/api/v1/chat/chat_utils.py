@@ -102,3 +102,8 @@ def log_tool_request_details(json_body: Dict[str, Any], session_id: str, logger)
                    event_type="tool_calling_request_details")
 
 
+def finalize_request_body(json_body: Dict[str, Any], chat_logger) -> bytes:
+    fix_tool_choice_structure(json_body, chat_logger)
+    remove_tool_choice_from_tools(json_body, chat_logger)
+    normalize_assistant_tool_call_messages(json_body, chat_logger)
+    return json.dumps(json_body).encode("utf-8")
