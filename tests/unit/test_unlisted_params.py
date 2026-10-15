@@ -120,7 +120,8 @@ def test_headers_sanitize_untrusted_keys():
 async def test_prepare_translation_headers_reports_unlisted_params_from_the_full_body():
     """The preview passed to translate_for_session carries only translatable fields; the check must see the whole body."""
     request = MagicMock(headers={"X-Morpheus-Translate": "1"})
-    json_body = {"messages": [], "max_tokens": 5, "min_p": 0.1, "chat_template_kwargs": {"enable_thinking": True}}
+    json_body = {"messages": [], "reasoning": {"enabled": False}, "max_tokens": 5, "min_p": 0.1,
+                 "chat_template_kwargs": {"enable_thinking": True}}
     row = MagicMock()
     row.provider_address = "0xprov"
 

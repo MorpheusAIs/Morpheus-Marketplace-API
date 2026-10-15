@@ -11,7 +11,7 @@ from ....db.database import get_db
 from ....services.session_routing_service import session_routing_service
 from src.services.provider_api_spec_service import provider_api_spec_service
 from src.core.direct_model_service import direct_model_service
-from .context_limits import ContextLimitResult, apply_context_limits, has_max_token_fields
+from .context_limits import read_context
 from .web_search_translation import (
     MISMATCH_TOKEN,
     apply_web_search,
@@ -108,7 +108,8 @@ class TranslationResult:
     unsupported: List[str] = field(default_factory=list)
     stack: Optional[str] = None
     touched: bool = False
-    context_limits: Optional[ContextLimitResult] = None
+    # The provider's capabilities.context, reported only: the gateway never rewrites max_tokens
+    context_window: Optional[int] = None
     # Capabilities the on-chain tags promise but the provider spec denies (web_search); the body stays as sent
     mismatch: List[str] = field(default_factory=list)
     # The provider spec the body was translated against, for checks that need the full request (unlisted params)
@@ -137,8 +138,8 @@ class TranslationResult:
             tokens = [t for t in (_header_token(m) for m in self.mismatch) if t]
             if tokens:
                 out["X-Morpheus-Capability-Mismatch"] = ";".join(tokens)
-        if self.context_limits is not None:
-            out.update(self.context_limits.headers())
+        if self.context_window is not None:
+            out["X-Morpheus-Context-Window"] = str(self.context_window)
         return out
 
 
@@ -222,7 +223,7 @@ def apply_spec(body: Dict[str, Any], spec: Optional[Dict[str, Any]]) -> Translat
 
 
 def needs_translation(body: Dict[str, Any]) -> bool:
-    return bool(extract_intents(body)) or web_search_disabled(body) or has_max_token_fields(body)
+    return bool(extract_intents(body)) or web_search_disabled(body)
 
 
 async def _model_tags(model_id: str) -> Optional[List[str]]:
@@ -234,20 +235,9 @@ async def _model_tags(model_id: str) -> Optional[List[str]]:
         return None
 
 
-async def translate_for_session(
-    body: Dict[str, Any],
-    session_id: Optional[str],
-    model_id: Optional[str],
-    messages: Optional[Any] = None,
-) -> TranslationResult:
-    """Rewrite body in place for the session's provider.
-
-    Pass messages to also check the prompt against the provider's context window; without them only
-    fields already in body are translated.
-    """
-    if not request_translation_active() or not session_id or not model_id:
-        return TranslationResult()
-    if not needs_translation(body) and messages is None:
+async def translate_for_session(body: Dict[str, Any], session_id: Optional[str], model_id: Optional[str]) -> TranslationResult:
+    """Rewrite body in place for the session's provider; a body with nothing to translate never looks the spec up."""
+    if not request_translation_active() or not session_id or not model_id or not needs_translation(body):
         return TranslationResult()
     try:
         async with get_db() as db:
@@ -266,12 +256,11 @@ async def translate_for_session(
     try:
         result = apply_spec(work, spec)
         web_search = apply_web_search(work, spec, PROTECTED_ROOTS, tags)
-        limits = apply_context_limits(work, spec, messages)
     except Exception as exc:
         logger.warning("request translation apply failed", session_id=session_id, error=str(exc),
                        event_type="request_translation_apply_failed")
         return TranslationResult()
-    if isinstance(spec, dict):  # a spec was found: name its stack even when only the clamp ran
+    if isinstance(spec, dict):  # a spec was found: name its stack even when no binding applied
         result.stack = result.stack or spec.get("stack") or None
     result.applied.update(web_search.applied)
     result.unsupported.extend(web_search.unsupported)
@@ -280,18 +269,15 @@ async def translate_for_session(
         logger.warning("model tagged web-search-enabled but the provider spec denies web search",
                        session_id=session_id, model_id=model_id, stack=result.stack,
                        event_type="request_translation_capability_mismatch")
-    result.context_limits = limits
+    result.context_window = read_context(spec)
     result.spec = spec if isinstance(spec, dict) else None
-    set_context_window(limits.context)
-    if result.touched or web_search.touched or limits.touched:
+    set_context_window(result.context_window)
+    if result.touched or web_search.touched:
         body.clear()
         body.update(work)
         result.touched = True
     if result.touched or result.unsupported:
         logger.info("request translation applied", session_id=session_id, stack=result.stack,
                     applied=result.applied, unsupported=result.unsupported, mismatch=result.mismatch,
-                    context_window=limits.context, max_output=limits.max_output,
-                    estimated_prompt_tokens=limits.estimated_prompt_tokens,
-                    clamped=limits.clamped,
-                    event_type="request_translation_applied")
+                    context_window=result.context_window, event_type="request_translation_applied")
     return result

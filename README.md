@@ -485,12 +485,13 @@ The response carries (and CORS exposes) these headers whenever `REQUEST_TRANSLAT
 - `X-Morpheus-Translation` — `on` or `off`: whether this specific request qualified for translation
 - `X-Morpheus-Translation-Mode` — the configured mode (`header` or `always`)
 
-And these headers only when translation actually ran and found a provider spec:
+And these headers only when translation actually ran and found a provider spec. The gateway looks the spec up only when the body carries something to translate (`reasoning`, `reasoning_effort`, `web_search` or `web_search_options`); a body without them gets none of these headers:
 
 - `X-Morpheus-Provider-Stack` — the provider's declared stack, e.g. `vllm`
 - `X-Morpheus-Translated` — `intent=param;intent=param`, e.g. `reasoning.disable=chat_template_kwargs.enable_thinking`
 - `X-Morpheus-Unsupported` — `intent;intent` for intents the provider declares no usable binding for
 - `X-Morpheus-Capability-Mismatch` — `web_search` when the model is tagged `web-search-enabled` on chain but the provider's spec reports `capabilities.webSearch: false`; the web-search field is then forwarded unchanged
+- `X-Morpheus-Context-Window` — the provider spec's `capabilities.context`; report only, the gateway never changes `max_tokens` or `max_completion_tokens`. Also sent on error responses once the spec has been read
 - `X-Morpheus-Unlisted-Params` — `key;key` (sorted) for top-level request keys that are neither standard OpenAI chat-completions fields, nor gateway routing fields (`session_id`, `request_id`), nor in the provider spec's `parameters` list, nor targeted by one of its bindings; report only, the body is forwarded unchanged. At most 32 keys are named, then `...+N` for the rest. Not emitted for the `anthropic` stack (its `parameters` use Anthropic Messages names) or when the spec lists no parameters
 
 ### Web search (request translation)

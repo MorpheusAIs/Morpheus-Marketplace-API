@@ -177,7 +177,7 @@ async def test_chat_error_handler_omits_gate_headers_when_mode_off():
 async def test_prepare_translation_headers_previews_web_search_fields_and_reports_mismatch():
     seen = {}
 
-    async def fake_translate(body, session_id, model_id, messages=None):
+    async def fake_translate(body, session_id, model_id):
         seen.update(body)
         return rt.TranslationResult(stack="vllm", unsupported=["web_search.enable"], mismatch=["web_search"])
 

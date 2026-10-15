@@ -50,12 +50,12 @@ def _parse_request(body: bytes) -> Tuple[list, dict]:
         raise RequestParseError(message=f"Invalid JSON in request body: {e}") from e
 
 
-async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str], messages: Optional[list] = None) -> dict:
+async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str]) -> dict:
     if not needs_translation(chat_params):
         return chat_params
     # Copy: a retry re-translates the canonical params for another provider
     params = copy.deepcopy(chat_params)
-    await translate_for_session(params, session_id, model_id, messages=messages)
+    await translate_for_session(params, session_id, model_id)
     return params
 
 
@@ -114,7 +114,7 @@ async def _make_proxy_request(
         session_id=session_id,
         messages=messages,
         request_id=request_id,
-        **(await wire_params(chat_params, session_id, model_id, messages=messages)),
+        **(await wire_params(chat_params, session_id, model_id)),
     )
 
 

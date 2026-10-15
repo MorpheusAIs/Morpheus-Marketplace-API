@@ -28,7 +28,7 @@ GOOD_CHUNKS = [b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n', b"data: [D
 
 
 def _spec_by_session(mapping):
-    async def fake(body, session_id, model_id, messages=None):
+    async def fake(body, session_id, model_id):
         # No-op on a falsy model_id so an unthreaded model_id fails the assertions
         if not model_id:
             return rt.TranslationResult()

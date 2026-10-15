@@ -71,8 +71,8 @@ CORS_ALLOW_HEADERS = ["Authorization", "Content-Type", "X-Requested-With", "X-AP
 CORS_EXPOSE_HEADERS = ["Content-Length", "Content-Type", "X-Request-Id", "X-Morpheus-Error",
                        "X-Morpheus-Provider-Stack", "X-Morpheus-Translated", "X-Morpheus-Unsupported",
                        "X-Morpheus-Translation", "X-Morpheus-Translation-Mode",
-                       "X-Morpheus-Context-Window", "X-Morpheus-Max-Tokens-Clamped",
-                       "X-Morpheus-Capability-Mismatch", "X-Morpheus-Unlisted-Params"]
+                       "X-Morpheus-Context-Window", "X-Morpheus-Capability-Mismatch",
+                       "X-Morpheus-Unlisted-Params"]
 try:
     # Use new CORS_ALLOWED_ORIGINS setting (preferred)
     allowed_origins = settings.CORS_ALLOWED_ORIGINS
