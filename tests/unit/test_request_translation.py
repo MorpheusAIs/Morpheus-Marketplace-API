@@ -424,3 +424,34 @@ async def test_request_translation_active_isolated_from_concurrent_in_flight_tas
     finally:
         release.set()
     assert await a is True, "task A must still see its own write"
+
+
+# The claude family as proxy-router/internal/apispec/family.go binds it: enable writes an object, budget a key inside it
+CLAUDE = {
+    "stack": "anthropic",
+    "bindings": {
+        "reasoning.enable": {"kind": "body_param", "param": "thinking", "paramType": "object",
+                             "value": {"type": "enabled", "budget_tokens": 1024}},
+        "reasoning.budget": {"kind": "body_param", "param": "thinking.budget_tokens", "paramType": "number"},
+    },
+}
+
+
+def test_apply_spec_never_writes_into_the_cached_spec_through_a_nested_binding():
+    """A binding value is written by copy: the next request's budget must not land in the shared spec cache."""
+    import copy
+    import json
+
+    spec = copy.deepcopy(CLAUDE)
+    before = json.dumps(spec, sort_keys=True)
+
+    first = {"reasoning": {"enabled": True, "max_tokens": 9999}}
+    res = rt.apply_spec(first, spec)
+    assert first == {"thinking": {"type": "enabled", "budget_tokens": 9999}}
+    assert res.applied == {"reasoning.enable": "thinking", "reasoning.budget": "thinking.budget_tokens"}
+    assert json.dumps(spec, sort_keys=True) == before, "the cached spec must be byte-identical after a request"
+
+    second = {"reasoning": {"enabled": True}}
+    rt.apply_spec(second, spec)
+    assert second == {"thinking": {"type": "enabled", "budget_tokens": 1024}}, "no budget leaks from the previous caller"
+    assert second["thinking"] is not spec["bindings"]["reasoning.enable"]["value"]
