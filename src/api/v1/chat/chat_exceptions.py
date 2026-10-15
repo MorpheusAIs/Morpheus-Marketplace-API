@@ -328,47 +328,6 @@ class ModelRoutingChatError(ChatError):
         )
 
 
-@dataclass
-class ContextLengthError(ChatError):
-    """Refused before forwarding: the prompt estimate alone exceeds the provider's context window."""
-
-    context_window: int = 0
-    estimated_prompt_tokens: int = 0
-    message: str = ""
-    status_code: int = status.HTTP_400_BAD_REQUEST
-    error_type: str = "invalid_request_error"
-    code: str = "context_length_exceeded"
-
-    def __post_init__(self):
-        if not self.message:
-            self.message = (
-                f"The prompt is estimated at {self.estimated_prompt_tokens} tokens, which exceeds the "
-                f"{self.context_window}-token context window of the provider serving this model"
-            )
-        self.details = {
-            **self.details,
-            "code": self.code,
-            "param": "messages",
-            "context_window": self.context_window,
-            "estimated_prompt_tokens": self.estimated_prompt_tokens,
-        }
-        super().__post_init__()
-
-    def to_response(self) -> JSONResponse:
-        content = {
-            "error": {
-                "message": sanitize_error_message(self.message),
-                "type": self.error_type,
-                **self.details,
-            }
-        }
-        return JSONResponse(
-            status_code=self.status_code,
-            content=content,
-            headers={"X-Morpheus-Error": self.code, "X-Morpheus-Context-Window": str(self.context_window)},
-        )
-
-
 def model_routing_chat_error(exc: "ModelRoutingError") -> ModelRoutingChatError:
     """Convert a core ModelRoutingError into a ChatError response type."""
     from src.core.model_errors import ModelRoutingError as _MRE
@@ -422,7 +381,6 @@ __all__ = [
     "RequestParseError",
     "RateLimitError",
     "ModelRoutingChatError",
-    "ContextLengthError",
     "model_routing_chat_error",
     "handle_chat_error",
 ]

@@ -287,11 +287,11 @@ async def translate_for_session(
         body.clear()
         body.update(work)
         result.touched = True
-    if result.touched or result.unsupported or limits.prompt_exceeds:
+    if result.touched or result.unsupported:
         logger.info("request translation applied", session_id=session_id, stack=result.stack,
                     applied=result.applied, unsupported=result.unsupported, mismatch=result.mismatch,
                     context_window=limits.context, max_output=limits.max_output,
                     estimated_prompt_tokens=limits.estimated_prompt_tokens,
-                    prompt_exceeds_context=limits.prompt_exceeds, clamped=limits.clamped,
+                    clamped=limits.clamped,
                     event_type="request_translation_applied")
     return result

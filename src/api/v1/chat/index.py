@@ -69,7 +69,6 @@ from .chat_exceptions import (
     ModelUnavailableError,
     GatewayError,
     RateLimitError,
-    ContextLengthError,
     handle_chat_error,
     model_routing_chat_error,
 )
@@ -83,9 +82,8 @@ router = APIRouter(tags=["Chat"])
     responses={
         400: {
             "model": openai_schemas.ChatErrorResponse,
-            "description": "Refused before forwarding: error.code is context_length_exceeded (the prompt estimate "
-                           "exceeds the provider's context window; X-Morpheus-Context-Window carries it) or "
-                           "model_routing_error. X-Morpheus-Error repeats the code.",
+            "description": "Refused before forwarding: error.code is model_routing_error. "
+                           "X-Morpheus-Error repeats the code.",
         },
     },
 )
@@ -235,18 +233,7 @@ async def create_chat_completion(
     body = finalize_request_body(json_body, chat_logger)
     log_tool_request_details(json_body, session_id, chat_logger)
 
-    try:
-        translation_headers = await _prepare_translation_headers(request, json_body, session_id, model_id)
-    except ContextLengthError as e:
-        await _void_billing_hold(
-            user_id=user.id,
-            ledger_entry_id=ledger_entry_id,
-            failure_code=e.code,
-            failure_reason=e.message,
-            chat_logger=chat_logger,
-        )
-        await _release_session(session_id, chat_logger)
-        raise
+    translation_headers = await _prepare_translation_headers(request, json_body, session_id, model_id)
 
     # Handle request based on streaming preference
     if should_stream:
@@ -297,9 +284,6 @@ async def _prepare_translation_headers(
     preview = {k: copy.deepcopy(json_body[k])
                for k in (*CANONICAL_FIELDS, *WEB_SEARCH_FIELDS, *MAX_TOKEN_FIELDS, TOOLS_PARAM) if k in json_body}
     translation = await translate_for_session(preview, session_id, model_id, messages=json_body.get("messages") or [])
-    limits = translation.context_limits
-    if limits is not None and limits.prompt_exceeds:
-        raise ContextLengthError(context_window=limits.context, estimated_prompt_tokens=limits.estimated_prompt_tokens)
 
     headers: dict = translation_gate_headers()
     headers.update(translation.headers())

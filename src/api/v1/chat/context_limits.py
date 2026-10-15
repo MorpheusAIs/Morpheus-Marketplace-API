@@ -33,10 +33,9 @@ def read_limits(spec: Optional[Dict[str, Any]]) -> Tuple[Optional[int], Optional
 
 # A media part costs the provider tokens by its resolution or duration, not by the length of its inline
 # base64: a 300 KB image would read as ~100k tokens at 4 characters each. It counts this fixed amount
-# instead, the low end of what providers bill (OpenAI's low-detail image is 85 tokens), so the early 400
-# never refuses a prompt because of its images. The same low figure feeds the context-derived max_tokens
-# ceiling, where it can leave more room than a large image really takes; the provider still enforces its
-# own window then, as it does without the clamp.
+# instead, the low end of what providers bill (OpenAI's low-detail image is 85 tokens), so an inline image
+# never eats the context-derived max_tokens ceiling by its payload size. The low figure can leave more room
+# than a large image really takes; the provider enforces its own window then, as it does without the clamp.
 MEDIA_PART_TOKENS = 85
 
 # String fields of a content part that the model reads as text, whatever the part's type says
@@ -90,8 +89,6 @@ class ContextLimitResult:
     context: Optional[int] = None
     max_output: Optional[int] = None
     estimated_prompt_tokens: Optional[int] = None
-    # Prompt estimate alone exceeds the window; the caller decides whether to refuse the request
-    prompt_exceeds: bool = False
     clamped: List[Tuple[str, int, int]] = field(default_factory=list)
     touched: bool = False
 
@@ -112,8 +109,8 @@ def apply_context_limits(
     """Clamp max_tokens / max_completion_tokens in body to what the provider spec allows.
 
     The ceiling is capabilities.maxOutput, or context minus the prompt estimate when maxOutput is absent and
-    that leaves at least one token. A prompt estimate above context is reported, not rewritten; max_tokens is
-    still clamped to maxOutput so a retry that forwards the body anyway respects the provider's output cap.
+    that leaves at least one token. A prompt that does not fit is never refused here: the request is forwarded
+    and the provider enforces its own window; max_tokens is still clamped to maxOutput.
     """
     result = ContextLimitResult()
     result.context, result.max_output = read_limits(spec)
@@ -122,8 +119,6 @@ def apply_context_limits(
 
     if messages is not None:
         result.estimated_prompt_tokens = estimate_prompt_tokens(messages)
-        if result.context is not None and result.estimated_prompt_tokens > result.context:
-            result.prompt_exceeds = True
 
     ceiling = result.max_output
     if ceiling is None and result.context is not None and result.estimated_prompt_tokens is not None:

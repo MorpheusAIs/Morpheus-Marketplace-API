@@ -13,7 +13,6 @@ from src.api.v1.chat import context_limits as cl  # noqa: E402
 from src.api.v1.chat import request_translation as rt  # noqa: E402
 from src.api.v1.chat import index as chat_index  # noqa: E402
 from src.api.v1.chat import chat_non_streaming, chat_streaming  # noqa: E402
-from src.api.v1.chat.chat_exceptions import ContextLengthError  # noqa: E402
 from src import main as main_module  # noqa: E402
 from src.services.proxy_router_service import ProxyRouterServiceError  # noqa: E402
 from tests.unit.test_chat_translation_handlers import FakeStreamResponse, _stream_cm_factory  # noqa: E402
@@ -98,11 +97,10 @@ def test_context_derived_ceiling_reserves_only_the_fixed_media_cost():
     assert result.estimated_prompt_tokens == _estimate_of([{"role": "user", "content": [{"type": "image_url"}]}], 1)
 
 
-def test_an_inline_image_neither_trips_the_early_400_nor_over_clamps():
+def test_an_inline_image_does_not_eat_the_context_derived_ceiling():
     messages = [{"role": "user", "content": [{"type": "text", "text": "describe it"}, {"type": "image_url", "image_url": {"url": IMAGE}}]}]
     body = {"max_tokens": 4096}
     result = cl.apply_context_limits(body, {"stack": "vllm", "capabilities": {"context": 8192}}, messages)
-    assert result.prompt_exceeds is False
     assert result.estimated_prompt_tokens < 200
     assert body["max_tokens"] == 4096 and result.clamped == []
 
@@ -152,7 +150,7 @@ def test_context_only_clamp_needs_at_least_one_token_left():
     body = {"max_tokens": 4096}
     result = cl.apply_context_limits(body, spec, MESSAGES)
     assert body == {"max_tokens": 4096}
-    assert result.touched is False and result.prompt_exceeds is False
+    assert result.touched is False
     assert result.headers() == {"X-Morpheus-Context-Window": str(ESTIMATE)}
 
     spec = {"capabilities": {"context": ESTIMATE + 1}}
@@ -168,13 +166,12 @@ def test_context_only_clamp_skipped_without_messages():
     assert result.estimated_prompt_tokens is None and result.touched is False
 
 
-def test_prompt_exceeding_context_is_reported_and_max_output_still_clamps():
+def test_prompt_exceeding_context_still_clamps_to_max_output():
     spec = {"capabilities": {"context": ESTIMATE - 1, "maxOutput": 5}}
     body = {"max_tokens": 4096}
     result = cl.apply_context_limits(body, spec, MESSAGES)
-    assert result.prompt_exceeds is True
     assert result.estimated_prompt_tokens == ESTIMATE
-    assert body == {"max_tokens": 5}, "a retry that forwards the body anyway must respect maxOutput"
+    assert body == {"max_tokens": 5}, "the request is forwarded and must respect maxOutput"
     assert result.clamped == [("max_tokens", 4096, 5)]
     assert result.headers() == {"X-Morpheus-Context-Window": str(ESTIMATE - 1), "X-Morpheus-Max-Tokens-Clamped": "4096->5"}
 
@@ -183,7 +180,6 @@ def test_prompt_exceeding_context_without_max_output_is_not_rewritten():
     spec = {"capabilities": {"context": ESTIMATE - 1}}
     body = {"max_tokens": 4096}
     result = cl.apply_context_limits(body, spec, MESSAGES)
-    assert result.prompt_exceeds is True
     assert body == {"max_tokens": 4096}, "context minus an oversize prompt is no ceiling"
     assert result.touched is False and result.clamped == []
 
@@ -194,20 +190,6 @@ def test_no_capabilities_is_a_noop():
     assert body == {"max_tokens": 4096}
     assert result == cl.ContextLimitResult()
     assert result.headers() == {}
-
-
-def test_context_length_error_response_shape_and_headers():
-    err = ContextLengthError(context_window=4096, estimated_prompt_tokens=5000)
-    response = err.to_response()
-    assert response.status_code == 400
-    body = json.loads(response.body)
-    assert body["error"]["type"] == "invalid_request_error"
-    assert body["error"]["code"] == "context_length_exceeded"
-    assert body["error"]["context_window"] == 4096
-    assert body["error"]["estimated_prompt_tokens"] == 5000
-    assert "4096" in body["error"]["message"] and "5000" in body["error"]["message"]
-    assert response.headers["X-Morpheus-Context-Window"] == "4096"
-    assert response.headers["X-Morpheus-Error"] == "context_length_exceeded"
 
 
 def _fake_get_db():
@@ -268,7 +250,7 @@ async def test_translate_for_session_reasoning_only_body_is_byte_identical_to_be
     assert result.headers()["X-Morpheus-Context-Window"] == "8192"
 
 
-async def test_translate_for_session_reports_prompt_exceeding_context(translation_enabled):
+async def test_translate_for_session_forwards_a_prompt_exceeding_context(translation_enabled):
     spec = {"capabilities": {"context": ESTIMATE - 1}}
     body = {"max_tokens": 50}
     with patch.object(rt, "get_db", _fake_get_db()), \
@@ -276,8 +258,8 @@ async def test_translate_for_session_reports_prompt_exceeding_context(translatio
          patch.object(rt.provider_api_spec_service, "get_spec", new_callable=AsyncMock, return_value=spec):
         result = await rt.translate_for_session(body, "0xsess", "0x01", messages=MESSAGES)
 
-    assert result.context_limits.prompt_exceeds is True
-    assert body == {"max_tokens": 50}, "an oversize prompt is reported; without maxOutput there is nothing to clamp to"
+    assert result.context_limits.estimated_prompt_tokens == ESTIMATE
+    assert body == {"max_tokens": 50}, "an oversize prompt is forwarded; without maxOutput there is nothing to clamp to"
 
 
 async def test_translate_for_session_plain_body_without_messages_skips_lookups(translation_enabled):
@@ -345,7 +327,8 @@ async def test_prepare_translation_headers_carries_context_headers_and_previews_
     rt.set_context_window(None)
 
 
-async def test_prepare_translation_headers_raises_400_when_prompt_exceeds_context():
+async def test_prepare_translation_headers_forwards_a_prompt_exceeding_context():
+    # The provider enforces its own window; the gateway only reports it
     request = MagicMock(headers={"X-Morpheus-Translate": "1"})
     spec = {"capabilities": {"context": ESTIMATE - 1}}
 
@@ -357,12 +340,10 @@ async def test_prepare_translation_headers_raises_400_when_prompt_exceeds_contex
     with patch.object(chat_index.settings, "REQUEST_TRANSLATION_MODE", "header"), \
          patch.object(chat_index.settings, "REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"), \
          patch.object(chat_index, "translate_for_session", fake):
-        with pytest.raises(ContextLengthError) as excinfo:
-            await chat_index._prepare_translation_headers(request, {"messages": MESSAGES}, "0xsess", "0x01")
+        headers = await chat_index._prepare_translation_headers(request, {"messages": MESSAGES}, "0xsess", "0x01")
 
-    assert excinfo.value.context_window == ESTIMATE - 1
-    assert excinfo.value.estimated_prompt_tokens == ESTIMATE
-    assert excinfo.value.status_code == 400
+    assert headers["X-Morpheus-Context-Window"] == str(ESTIMATE - 1)
+    assert headers["X-Morpheus-Translation"] == "on"
 
 
 async def test_prepare_translation_headers_inactive_never_translates():
@@ -562,7 +543,7 @@ async def test_translate_for_session_spec_without_limits_still_names_the_stack(t
     assert result.headers() == {}, "no spec, no stack"
 
 
-async def test_create_chat_completion_voids_the_hold_and_releases_the_session_on_context_length_exceeded():
+async def test_create_chat_completion_forwards_a_prompt_exceeding_context():
     from src.api.v1.chat.chat_models import ChatCompletionRequest
 
     request_data = ChatCompletionRequest.model_validate({"model": "m", "messages": MESSAGES, "max_tokens": 5})
@@ -587,16 +568,11 @@ async def test_create_chat_completion_voids_the_hold_and_releases_the_session_on
          patch.object(chat_index, "translate_for_session", fake_translate), \
          patch.object(chat_index, "_handle_streaming_request") as streaming, \
          patch.object(chat_index, "_handle_non_streaming_request", new_callable=AsyncMock) as non_streaming:
-        with pytest.raises(ContextLengthError) as excinfo:
-            await chat_index.create_chat_completion(request_data, request, user=user, db_api_key=db_api_key)
+        await chat_index.create_chat_completion(request_data, request, user=user, db_api_key=db_api_key)
 
-    assert excinfo.value.code == "context_length_exceeded"
-    void_hold.assert_awaited_once()
-    assert void_hold.await_args.kwargs["ledger_entry_id"] is ledger_entry_id
-    assert void_hold.await_args.kwargs["user_id"] == 7
-    assert void_hold.await_args.kwargs["failure_code"] == "context_length_exceeded"
-    release.assert_awaited_once()
-    assert release.await_args.args[0] == "0xsess"
+    non_streaming.assert_awaited_once()
+    assert non_streaming.await_args.kwargs["extra_headers"]["X-Morpheus-Context-Window"] == str(ESTIMATE - 1)
+    void_hold.assert_not_awaited()
+    release.assert_not_awaited()
     streaming.assert_not_called()
-    non_streaming.assert_not_awaited()
     rt.set_context_window(None)
