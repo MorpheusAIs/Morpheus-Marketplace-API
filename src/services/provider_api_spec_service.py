@@ -80,6 +80,21 @@ class ProviderApiSpecService:
             self._reports[addr] = (self._clock() + self._ttl, specs)
             return specs.get(mid)
 
+    def cached_specs_for_model(self, model_id: str) -> List[dict]:
+        """Every unexpired cached spec for model_id across providers; never pings."""
+        mid = (model_id or "").strip().lower()
+        if not mid:
+            return []
+        now = self._clock()
+        out: List[dict] = []
+        for expires_at, specs in self._reports.values():
+            if expires_at <= now:
+                continue
+            spec = specs.get(mid)
+            if isinstance(spec, dict):
+                out.append(spec)
+        return out
+
     def _unknown_provider_needs_forced_refresh(self, addr: str, now: float) -> bool:
         # Unknown addresses may be newly registered; rate-limit by last attempt so an outage cannot trigger a refresh per address
         return (

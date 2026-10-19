@@ -41,6 +41,7 @@ from ....services.rate_limiting import (
 from ....schemas.billing import UsageHoldRequest, UsageFinalizeRequest, UsageVoidRequest
 from ....core.config import settings
 from ....core.logging_config import get_api_logger
+from ....schemas import openai as openai_schemas
 from .chat_models import ChatCompletionRequest
 from .chat_utils import (
     log_tool_request_details,
@@ -50,12 +51,13 @@ from .chat_streaming import build_stream_generator, StreamingBillingParams
 from .chat_non_streaming import handle_non_streaming_request
 from .request_translation import (
     translate_for_session,
-    extract_intents,
     CANONICAL_FIELDS,
     translation_requested,
     set_request_translation,
     translation_gate_headers,
 )
+from .web_search_translation import TOOLS_PARAM, WEB_SEARCH_FIELDS
+from .unlisted_params import unlisted_headers
 from .chat_exceptions import (
     ChatError,
     InsufficientBalanceError,
@@ -74,7 +76,16 @@ from src.core.model_errors import ModelRoutingError
 router = APIRouter(tags=["Chat"])
 
 
-@router.post("/completions")
+@router.post(
+    "/completions",
+    responses={
+        400: {
+            "model": openai_schemas.ChatErrorResponse,
+            "description": "Refused before forwarding: error.code is model_routing_error. "
+                           "X-Morpheus-Error repeats the code.",
+        },
+    },
+)
 async def create_chat_completion(
     request_data: ChatCompletionRequest,
     request: Request,
@@ -264,14 +275,18 @@ async def _prepare_translation_headers(
     translation_active = translation_requested(request.headers)
     set_request_translation(translation_active)
 
+    if not translation_active:
+        return translation_gate_headers()
+
+    # Translate a throwaway preview only for the headers; handlers translate the forwarded body per attempt.
+    # tools rides along because a tool_entry binding's outcome depends on what the client sent there.
+    preview = {k: copy.deepcopy(json_body[k])
+               for k in (*CANONICAL_FIELDS, *WEB_SEARCH_FIELDS, TOOLS_PARAM) if k in json_body}
+    translation = await translate_for_session(preview, session_id, model_id)
+
     headers: dict = translation_gate_headers()
-
-    # Translate a throwaway preview only for the headers; handlers translate the forwarded body per attempt
-    if translation_active and extract_intents(json_body):
-        preview = {k: copy.deepcopy(json_body[k]) for k in CANONICAL_FIELDS if k in json_body}
-        translation = await translate_for_session(preview, session_id, model_id)
-        headers.update(translation.headers())
-
+    headers.update(translation.headers())
+    headers.update(unlisted_headers(json_body, translation.spec))
     return headers
 
 
