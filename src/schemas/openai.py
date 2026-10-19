@@ -121,8 +121,9 @@ class ChatCompletionRequest(BaseModel):
 
     model: Optional[str] = None
     messages: List[ChatMessage]
-    temperature: Optional[float] = 1.0
-    top_p: Optional[float] = 1.0
+    # None, not OpenAI's documented 1: omitted means "provider default" (see chat_models).
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
     n: Optional[int] = 1
     stream: Optional[bool] = True
     stop: Optional[Union[str, List[str]]] = None
