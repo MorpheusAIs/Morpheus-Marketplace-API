@@ -12,13 +12,18 @@ from ....core.direct_model_service import direct_model_service
 from ....core.logging_config import get_api_logger
 from ....core.model_types import is_audio_model
 from ....utils.error_sanitizer import sanitize_error_message
+from .spec_enrichment import spec_enrichment
 
 logger = get_api_logger()
 
 router = APIRouter(tags=["Models"])
 
 
-@router.get("/models", response_model=None)  # Handle /api/v1/models (without trailing slash)
+@router.get(
+    "/models",
+    response_model=None,
+    responses={200: {"model": openai_schemas.MarketplaceModelList, "description": "Active models"}},
+)  # Handle /api/v1/models (without trailing slash)
 @router.get("/models/", response_model=None, include_in_schema=False)  # Handle /api/v1/models/ (with trailing slash) - backward compatibility, hidden from docs
 async def list_models():
     """
@@ -56,6 +61,7 @@ async def list_models():
                 "tags": tags,
                 "modelType": model_type
             }
+            openai_model.update(spec_enrichment(blockchain_id))
             
             models.append(openai_model)
         

@@ -32,7 +32,8 @@ from .chat_exceptions import (
     ProxyError,
     GatewayError,
 )
-from .request_translation import translate_for_session, extract_intents
+from .request_translation import translate_for_session, needs_translation
+from .unlisted_params import ROUTING_FIELDS
 
 
 def _parse_request(body: bytes) -> Tuple[list, dict]:
@@ -42,7 +43,7 @@ def _parse_request(body: bytes) -> Tuple[list, dict]:
         messages = request_data.get("messages", [])
         chat_params = {
             k: v for k, v in request_data.items()
-            if k not in ["messages", "stream", "session_id", "request_id"]
+            if k not in ("messages", "stream", *ROUTING_FIELDS)
         }
         return messages, chat_params
     except Exception as e:
@@ -50,7 +51,7 @@ def _parse_request(body: bytes) -> Tuple[list, dict]:
 
 
 async def wire_params(chat_params: dict, session_id: str, model_id: Optional[str]) -> dict:
-    if not extract_intents(chat_params):
+    if not needs_translation(chat_params):
         return chat_params
     # Copy: a retry re-translates the canonical params for another provider
     params = copy.deepcopy(chat_params)
