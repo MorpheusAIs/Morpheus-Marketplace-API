@@ -11,10 +11,10 @@ Key behaviors:
 - Rate limiting: RPM and TPM limits are applied before processing
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, status, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
-from typing import Optional
+from typing import Annotated, Optional
 import asyncio
 import copy
 import json
@@ -75,6 +75,16 @@ from src.core.model_errors import ModelRoutingError
 
 router = APIRouter(tags=["Chat"])
 
+# "Try it out" in /docs pre-fills the body from this example. Without one,
+# swagger-ui samples the nullable temperature/top_p as 0 and would send them.
+CHAT_REQUEST_EXAMPLES = {
+    "minimal": {
+        "summary": "Model and messages only",
+        "description": "temperature and top_p are left out, so the provider's defaults for the model apply.",
+        "value": {"model": "llama-3.3-70b", "messages": [{"role": "user", "content": "Hello"}]},
+    },
+}
+
 
 @router.post(
     "/completions",
@@ -87,7 +97,7 @@ router = APIRouter(tags=["Chat"])
     },
 )
 async def create_chat_completion(
-    request_data: ChatCompletionRequest,
+    request_data: Annotated[ChatCompletionRequest, Body(openapi_examples=CHAT_REQUEST_EXAMPLES)],
     request: Request,
     user: User = Depends(get_api_key_user),
     db_api_key: APIKey = Depends(get_current_api_key)
