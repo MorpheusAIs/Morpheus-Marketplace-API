@@ -242,6 +242,16 @@ LOG_LEVEL_CORE=WARN          # Reduce infrastructure noise
 PROXY_ROUTER_URL=http://localhost:8545  # URL of the Morpheus-Lumerin Node proxy-router
 ```
 
+### CA certificates for the Stripe client
+
+The Stripe client uses the system CA bundle rather than the CA file shipped with the Stripe SDK. At import it uses the first of these that exists:
+
+1. `SSL_CERT_FILE` (ignored if empty)
+2. `/etc/ssl/certs/ca-certificates.crt` (Debian/Ubuntu, and the Docker image)
+3. `/etc/ssl/cert.pem` (macOS)
+
+If none exists, the app fails at startup. For local development outside Docker on another system, set `SSL_CERT_FILE` to your CA bundle file.
+
 ## Database Setup
 
 ### Local Development Database
