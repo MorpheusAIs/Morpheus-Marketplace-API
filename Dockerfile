@@ -17,7 +17,7 @@ RUN set -e; \
     rm -rf /var/lib/apt/lists/*
 
 # Install poetry
-RUN pip install --upgrade pip && \
+RUN pip install pip==26.2.2 && \
     pip install poetry==1.8.2 # Use a specific version for reproducibility
 
 # Copy only files needed for dependency installation
@@ -54,7 +54,7 @@ RUN set -e; \
       ca-certificates; \
     rm -rf /var/lib/apt/lists/*; \
     dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20250419+deb13u1; \
-    sed -i -E 's|^(mozilla/emSign_[^/]*\.crt)$|!\1|' /etc/ca-certificates.conf; \
+    sed -i -E 's#^(mozilla/(emSign_[^/]*|Comodo_AAA_Services_root)\.crt)$#!\1#' /etc/ca-certificates.conf; \
     for c in mozilla/emSign_ECC_Root_CA_-_G3.crt mozilla/Comodo_AAA_Services_root.crt; do \
       grep -qxF "!$c" /etc/ca-certificates.conf || echo "!$c" >> /etc/ca-certificates.conf; \
     done; \

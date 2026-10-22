@@ -6,6 +6,7 @@ Exits non-zero if any check fails.
 
 import os
 import ssl
+import subprocess
 import sys
 
 BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
@@ -85,6 +86,46 @@ import src.services.stripe_webhook_service  # noqa: E402,F401
 print(f"stripe ca_bundle_path={stripe.ca_bundle_path}")
 if os.path.realpath(stripe.ca_bundle_path) != os.path.realpath(BUNDLE):
     errors.append("stripe does not use the system bundle")
+
+# Subprocess cases for the Stripe CA resolution (import only; no network, no keys).
+_PROBE = (
+    "import os, sys\n"
+    "sys.path.insert(0, os.environ.get('APP_DIR', '/app'))\n"
+    "if os.environ.get('CHECK_NO_CA_FILES') == '1':\n"
+    "    os.path.isfile = lambda p: False\n"
+    "import stripe\n"
+    "try:\n"
+    "    import src.services.stripe_webhook_service\n"
+    "except RuntimeError as e:\n"
+    "    print('RAISED:' + str(e)); sys.exit(0)\n"
+    "print('PATH:' + stripe.ca_bundle_path)\n"
+)
+
+
+def _probe(extra_env):
+    env = dict(os.environ, **extra_env)
+    out = subprocess.run([sys.executable, "-c", _PROBE], env=env,
+                         capture_output=True, text=True, timeout=120)
+    lines = [l for l in out.stdout.splitlines() if l.startswith(("PATH:", "RAISED:"))]
+    return out.returncode, (lines[-1] if lines else "")
+
+
+rc, res = _probe({"SSL_CERT_FILE": ""})
+print(f"stripe with blank SSL_CERT_FILE: {res!r}")
+if rc != 0 or not res.startswith("PATH:") or \
+        os.path.realpath(res[5:] or ".") != os.path.realpath(BUNDLE):
+    errors.append("stripe does not resolve the system bundle when SSL_CERT_FILE is blank")
+
+rc, res = _probe({"SSL_CERT_FILE": "   "})
+print(f"stripe with whitespace SSL_CERT_FILE: {res!r}")
+if rc != 0 or not res.startswith("PATH:") or \
+        os.path.realpath(res[5:] or ".") != os.path.realpath(BUNDLE):
+    errors.append("stripe does not resolve the system bundle when SSL_CERT_FILE is whitespace")
+
+rc, res = _probe({"CHECK_NO_CA_FILES": "1"})
+print(f"stripe with no CA files: {res!r}")
+if rc != 0 or not res.startswith("RAISED:No system CA bundle found"):
+    errors.append("stripe module import does not fail when no CA bundle exists")
 
 if errors:
     for e in errors:
