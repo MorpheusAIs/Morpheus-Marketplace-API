@@ -7,6 +7,7 @@ Handles:
 - invoice.payment_failed: Failed payment attempts
 """
 import asyncio
+import os
 from typing import Optional, Tuple, Dict, Any
 from decimal import Decimal
 import stripe
@@ -20,6 +21,10 @@ from src.core.logging_config import get_core_logger
 from src.core.config import settings
 
 logger = get_core_logger()
+
+# Use the system CA bundle instead of the CA file bundled with the Stripe SDK.
+# Set at import so it applies even when no Stripe key is configured.
+stripe.ca_bundle_path = os.environ.get("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
 
 
 class StripeWebhookService:

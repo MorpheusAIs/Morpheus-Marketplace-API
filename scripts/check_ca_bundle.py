@@ -74,6 +74,18 @@ if not boto_bundle or os.path.realpath(boto_bundle) != os.path.realpath(BUNDLE):
 httpx_ctx = httpx.create_ssl_context(trust_env=True)
 check_store("httpx context", httpx_ctx.get_ca_certs(), pem_count)
 
+# Stripe uses its own CA file unless configured; the app's Stripe module sets it.
+# Import only (no network, no keys). A placeholder DATABASE_URL satisfies settings
+# validation; nothing connects to it.
+os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://check:check@127.0.0.1:1/check")
+sys.path.insert(0, os.environ.get("APP_DIR", "/app"))
+import stripe  # noqa: E402
+import src.services.stripe_webhook_service  # noqa: E402,F401
+
+print(f"stripe ca_bundle_path={stripe.ca_bundle_path}")
+if os.path.realpath(stripe.ca_bundle_path) != os.path.realpath(BUNDLE):
+    errors.append("stripe does not use the system bundle")
+
 if errors:
     for e in errors:
         print(f"ERROR: {e}", file=sys.stderr)
