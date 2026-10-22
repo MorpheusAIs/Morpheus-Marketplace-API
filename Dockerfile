@@ -32,10 +32,15 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install runtime dependencies (including postgresql-client for pg_isready)
+# and the current ca-certificates; remove the emSign roots from the system CA bundle.
 RUN apt-get update && apt-get install -y \
     postgresql-client \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && sed -i -E 's|^(mozilla/emSign_[^/]*\.crt)$|!\1|' /etc/ca-certificates.conf \
+    && update-ca-certificates --fresh \
+    && if ls /etc/ssl/certs | grep -qi emsign; then echo "emSign roots still present" >&2; exit 1; fi
 
 # Build arguments for version information
 ARG BUILD_VERSION="0.0.0-dev"
