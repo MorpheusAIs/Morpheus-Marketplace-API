@@ -1,5 +1,5 @@
 # Stage 1: Build stage
-FROM python:3.11-slim AS builder
+FROM python:3.11-slim@sha256:cce12316475d7d56d605f76e1d811d0dc4e7227f2d4afd29951521264f504ff8 AS builder
 
 WORKDIR /app
 
@@ -27,20 +27,34 @@ RUN poetry config virtualenvs.create false && \
     poetry install --no-root --only main --no-interaction --no-ansi
 
 # Stage 2: Final stage
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:cce12316475d7d56d605f76e1d811d0dc4e7227f2d4afd29951521264f504ff8
 
 WORKDIR /app
 
 # Install runtime dependencies (including postgresql-client for pg_isready)
-# and the current ca-certificates; remove the emSign roots from the system CA bundle.
-RUN apt-get update && apt-get install -y \
-    postgresql-client \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && sed -i -E 's|^(mozilla/emSign_[^/]*\.crt)$|!\1|' /etc/ca-certificates.conf \
-    && update-ca-certificates --fresh \
-    && if ls /etc/ssl/certs | grep -qi emsign; then echo "emSign roots still present" >&2; exit 1; fi
+# and the current ca-certificates.
+# - apt-get update fails on any index error (retried for transient mirror errors)
+# - ca-certificates must be 20250419+deb13u1 or later
+# - the emSign roots are disabled in /etc/ca-certificates.conf and the bundle is regenerated
+RUN set -e; \
+    ok=; for i in 1 2 3 4 5; do \
+      if apt-get update -o APT::Update::Error-Mode=any; then ok=1; break; fi; \
+      rm -rf /var/lib/apt/lists/*; sleep 10; \
+    done; \
+    [ -n "$ok" ]; \
+    apt-get install -y --no-install-recommends \
+      postgresql-client \
+      curl \
+      ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20250419+deb13u1; \
+    sed -i -E 's|^(mozilla/emSign_[^/]*\.crt)$|!\1|' /etc/ca-certificates.conf; \
+    update-ca-certificates --fresh
+
+# Point Python TLS clients (httpx, requests, botocore) at the system bundle
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 # Build arguments for version information
 ARG BUILD_VERSION="0.0.0-dev"
@@ -60,6 +74,10 @@ RUN addgroup --system app && adduser --system --group app
 # Copy installed dependencies from builder stage
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Check the CA configuration (bundle subjects, env, certifi version, client resolution)
+COPY scripts/check_ca_bundle.py /tmp/check_ca_bundle.py
+RUN python /tmp/check_ca_bundle.py && rm -f /tmp/check_ca_bundle.py
 
 # Copy application code
 COPY ./src ./src

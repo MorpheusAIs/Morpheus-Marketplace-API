@@ -1,0 +1,70 @@
+name: Image check
+# Build-only check of the API Dockerfile for pull requests.
+# No registry login, no push, no secrets.
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "pyproject.toml"
+      - "poetry.lock"
+      - "scripts/check_ca_bundle.py"
+      - ".github/workflows/image-check.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  image-check:
+    name: Build API image and check CA configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build image (local only, no push)
+        run: docker build -t morpheus-api:pr-check .
+
+      - name: Check image runs as the app user
+        run: |
+          set -euo pipefail
+          user=$(docker run --rm --entrypoint id morpheus-api:pr-check -un)
+          echo "Image user: $user"
+          [ "$user" = "app" ]
+
+      - name: Check CA bundle, certifi version and client CA settings
+        run: |
+          docker run --rm \
+            -v "$PWD/scripts/check_ca_bundle.py:/tmp/check_ca_bundle.py:ro" \
+            --entrypoint python \
+            morpheus-api:pr-check /tmp/check_ca_bundle.py
+
+      - name: Check system bundle subjects with openssl
+        run: |
+          set -euo pipefail
+          cid=$(docker create morpheus-api:pr-check)
+          docker cp "$cid:/etc/ssl/certs/ca-certificates.crt" "$RUNNER_TEMP/ca-certificates.crt"
+          docker rm "$cid" >/dev/null
+          bundle="$RUNNER_TEMP/ca-certificates.crt"
+          openssl crl2pkcs7 -nocrl -certfile "$bundle" \
+            | openssl pkcs7 -print_certs -noout \
+            | grep '^subject=' > "$RUNNER_TEMP/subjects.txt"
+          total=$(wc -l < "$RUNNER_TEMP/subjects.txt")
+          pem=$(grep -c 'BEGIN CERTIFICATE' "$bundle")
+          echo "Certificates decoded: $total (PEM blocks: $pem)"
+          if [ "$total" -ne "$pem" ] || [ "$total" -lt 100 ]; then
+            echo "::error::CA bundle could not be fully decoded"
+            exit 1
+          fi
+          if grep -iE 'emSign|AAA Certificate Services' "$RUNNER_TEMP/subjects.txt"; then
+            echo "::error::CA bundle contains emSign or AAA Certificate Services roots"
+            exit 1
+          fi
+          echo "No emSign or AAA Certificate Services subjects in the system bundle"
