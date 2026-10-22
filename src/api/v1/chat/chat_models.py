@@ -105,8 +105,12 @@ class ChatCompletionRequest(BaseModel):
     to the proxy-router unchanged — the router already preserves unknown keys
     via OpenAICompletionRequestExtra.
 
-    Note: Field defaults and names for the typed fields must remain unchanged
-    for API parity.
+    ``temperature`` and ``top_p`` default to ``None`` so the body is dumped with
+    ``exclude_none`` and they reach the provider only when the client sent them.
+    A gateway-side 1.0 overrides the model's own sampling defaults, and some
+    upstreams fix these values and reject any other (kimi-k3 fixes ``top_p``
+    at 0.95, so an injected 1.0 fails every request).
+    Keep the names and the defaults of the other typed fields for API parity.
     """
 
     # Keep typed validation for known fields; do not drop vendor extensions.
@@ -114,8 +118,20 @@ class ChatCompletionRequest(BaseModel):
 
     model: Optional[str] = None
     messages: List[ChatMessage]
-    temperature: Optional[float] = 1.0
-    top_p: Optional[float] = 1.0
+    temperature: Optional[float] = Field(
+        None,
+        description=(
+            "Sampling temperature. Optional: when omitted it is not sent upstream "
+            "and the provider's default for the model applies."
+        ),
+    )
+    top_p: Optional[float] = Field(
+        None,
+        description=(
+            "Nucleus sampling probability mass. Optional: when omitted it is not sent "
+            "upstream and the provider's default for the model applies."
+        ),
+    )
     n: Optional[int] = 1
     stream: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
