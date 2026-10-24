@@ -64,6 +64,15 @@ app = FastAPI(
 # Note: Custom OpenAPI function is defined later in the file
 
 # Set up CORS with credential-safe configuration
+CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+# The translation opt-in header is configurable, so the preflight must allow whatever name is configured
+CORS_ALLOW_HEADERS = ["Authorization", "Content-Type", "X-Requested-With", "X-API-Key",
+                      settings.REQUEST_TRANSLATION_HEADER]
+CORS_EXPOSE_HEADERS = ["Content-Length", "Content-Type", "X-Request-Id", "X-Morpheus-Error",
+                       "X-Morpheus-Provider-Stack", "X-Morpheus-Translated", "X-Morpheus-Unsupported",
+                       "X-Morpheus-Translation", "X-Morpheus-Translation-Mode",
+                       "X-Morpheus-Context-Window", "X-Morpheus-Capability-Mismatch",
+                       "X-Morpheus-Unlisted-Params"]
 try:
     # Use new CORS_ALLOWED_ORIGINS setting (preferred)
     allowed_origins = settings.CORS_ALLOWED_ORIGINS
@@ -72,11 +81,9 @@ try:
         CredentialSafeCORSMiddleware,
         allowed_origins=allowed_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Requested-With", "X-API-Key"],
-        expose_headers=["Content-Length", "Content-Type", "X-Request-Id",
-                        "X-Morpheus-Provider-Stack", "X-Morpheus-Translated", "X-Morpheus-Unsupported",
-                        "X-Morpheus-Translation", "X-Morpheus-Translation-Mode"],
+        allow_methods=CORS_ALLOW_METHODS,
+        allow_headers=CORS_ALLOW_HEADERS,
+        expose_headers=CORS_EXPOSE_HEADERS,
         max_age=86400,  # 24 hours for preflight cache
         trusted_domain_patterns=[
             r"^https://.*\.mor\.org$",  # Any subdomain of mor.org
@@ -859,9 +866,9 @@ async def cors_check(request: Request):
     cors_config = {
         "explicit_origins": settings.CORS_ALLOWED_ORIGINS,
         "credentials_enabled": True,
-        "allowed_methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        "allowed_headers": ["Authorization", "Content-Type", "X-Requested-With", "X-API-Key"],
-        "exposed_headers": ["Content-Length", "Content-Type"],
+        "allowed_methods": CORS_ALLOW_METHODS,
+        "allowed_headers": CORS_ALLOW_HEADERS,
+        "exposed_headers": CORS_EXPOSE_HEADERS,
         "trusted_patterns": [
             "^https://.*\\.mor\\.org$",
             "^https://.*\\.dev\\.mor\\.org$"

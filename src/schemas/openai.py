@@ -37,6 +37,64 @@ class ModelList(BaseModel):
     data: List[Model]
 
 
+class ModelModalities(BaseModel):
+    input: Optional[List[str]] = Field(None, description="Accepted input kinds: text, image, audio, video, pdf")
+    output: Optional[List[str]] = Field(None, description="Produced output kinds: text, image, audio, embeddings")
+
+
+class ModelCapabilities(BaseModel):
+    """Provider-reported facts about the model as served; an absent field is unknown, never false."""
+    model_config = ConfigDict(extra="allow")
+
+    context: Optional[int] = Field(None, description="Served context window in tokens (prompt + completion)")
+    contextTrained: Optional[int] = Field(None, description="Trained context window when the backend reports both")
+    maxOutput: Optional[int] = Field(None, description="Maximum completion tokens")
+    modalities: Optional[ModelModalities] = None
+    tools: Optional[bool] = Field(None, description="Function/tool calling accepted")
+    toolsParallel: Optional[bool] = None
+    structured: Optional[List[str]] = Field(None, description="Subset of json_object, json_schema, grammar, regex, choice")
+    reasoning: Optional[bool] = Field(None, description="The model can reason; control is in thinking")
+    webSearch: Optional[bool] = Field(None, description="The backend can search the web for this model on request")
+    embeddings: Optional[bool] = None
+    promptCache: Optional[bool] = None
+    quantization: Optional[str] = Field(None, description="Backend's own label (fp8, Q4_K_M, bf16, ...)")
+
+
+class ModelThinking(BaseModel):
+    mode: str = Field(..., description="always_on | controllable | tunable")
+    default: Optional[str] = Field(None, description="on, off or an effort level name; absent when unknown")
+
+
+class MarketplaceModel(BaseModel):
+    """A marketplace model row; capabilities, model_family and thinking come from the provider-spec cache
+    and are present only when every cached provider spec for the model agrees."""
+    id: str
+    blockchainID: str
+    created: int = Field(..., description="Unix timestamp (seconds)")
+    tags: List[str]
+    modelType: str
+    capabilities: Optional[ModelCapabilities] = None
+    model_family: Optional[str] = None
+    thinking: Optional[ModelThinking] = None
+
+
+class MarketplaceModelList(BaseModel):
+    object: str = "list"
+    data: List[MarketplaceModel]
+
+
+class ChatErrorDetail(BaseModel):
+    """OpenAI-style error body; the code is repeated in the X-Morpheus-Error response header."""
+    message: str
+    type: str = Field(..., description="e.g. invalid_request_error, model_routing_error")
+    code: str = Field(..., description="e.g. model_routing_error")
+    param: Optional[str] = Field(None, description="The offending request field, e.g. messages")
+
+
+class ChatErrorResponse(BaseModel):
+    error: ChatErrorDetail
+
+
 class ChatMessageRole(str, Enum):
     """Roles in a chat conversation"""
     SYSTEM = "system"
@@ -63,8 +121,9 @@ class ChatCompletionRequest(BaseModel):
 
     model: Optional[str] = None
     messages: List[ChatMessage]
-    temperature: Optional[float] = 1.0
-    top_p: Optional[float] = 1.0
+    # None, not OpenAI's documented 1: omitted means "provider default" (see chat_models).
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
     n: Optional[int] = 1
     stream: Optional[bool] = True
     stop: Optional[Union[str, List[str]]] = None

@@ -161,6 +161,7 @@ class DirectModelService:
         self.cache_duration = cache_duration_seconds
         self._model_mapping: Dict[str, str] = {}  # lowercase name -> blockchain_id
         self._id_to_name: Dict[str, str] = {}  # blockchain_id -> name
+        self._id_to_tags: Dict[str, List[str]] = {}  # blockchain_id -> on-chain tags
         self._model_mapping_type: Dict[str, str] = {}  # lowercase name -> type
         self._blockchain_ids: set = set()
         self._cache_expiry: Optional[datetime] = None
@@ -307,6 +308,11 @@ class DirectModelService:
         """
         await self._ensure_fresh_cache()
         return self._id_to_name.get(blockchain_id)
+
+    async def get_model_tags(self, blockchain_id: str) -> List[str]:
+        """The catalog's on-chain tags for a blockchain ID; empty when unknown."""
+        await self._ensure_fresh_cache()
+        return list(self._id_to_tags.get(blockchain_id, ()))
     
     async def _ensure_fresh_cache(self):
         """Ensure the cache is fresh, refresh if needed."""
@@ -450,6 +456,7 @@ class DirectModelService:
         """
         new_mapping: Dict[str, str] = {}
         new_id_to_name: Dict[str, str] = {}
+        new_id_to_tags: Dict[str, List[str]] = {}
         new_mapping_type: Dict[str, str] = {}
         new_blockchain_ids: set = set()
         alias_claims: Dict[str, Set[str]] = defaultdict(set)
@@ -468,6 +475,7 @@ class DirectModelService:
             name_key = model_name.lower()
             new_mapping[name_key] = blockchain_id
             new_id_to_name[blockchain_id] = model_name
+            new_id_to_tags[blockchain_id] = [t for t in (model.get("Tags") or []) if isinstance(t, str)]
             new_mapping_type[name_key] = model_type
             new_blockchain_ids.add(blockchain_id)
 
@@ -502,6 +510,7 @@ class DirectModelService:
 
         self._model_mapping = new_mapping
         self._id_to_name = new_id_to_name
+        self._id_to_tags = new_id_to_tags
         self._model_mapping_type = new_mapping_type
         self._blockchain_ids = new_blockchain_ids
         self._raw_models_data = models

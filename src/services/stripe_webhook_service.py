@@ -7,6 +7,7 @@ Handles:
 - invoice.payment_failed: Failed payment attempts
 """
 import asyncio
+import os
 from typing import Optional, Tuple, Dict, Any
 from decimal import Decimal
 import stripe
@@ -20,6 +21,28 @@ from src.core.logging_config import get_core_logger
 from src.core.config import settings
 
 logger = get_core_logger()
+
+
+def _resolve_system_ca_bundle() -> str:
+    """Return the first existing system CA bundle; never Stripe's bundled CA file."""
+    candidates = (
+        (os.environ.get("SSL_CERT_FILE") or "").strip(),
+        "/etc/ssl/certs/ca-certificates.crt",  # Debian/Ubuntu (container image)
+        "/etc/ssl/cert.pem",  # macOS
+    )
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    raise RuntimeError(
+        "No system CA bundle found for the Stripe client "
+        "(checked SSL_CERT_FILE, /etc/ssl/certs/ca-certificates.crt, /etc/ssl/cert.pem); "
+        "set SSL_CERT_FILE to a CA bundle file"
+    )
+
+
+# Use the system CA bundle instead of the CA file bundled with the Stripe SDK.
+# Set at import so it applies even when no Stripe key is configured.
+stripe.ca_bundle_path = _resolve_system_ca_bundle()
 
 
 class StripeWebhookService:

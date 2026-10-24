@@ -10,6 +10,15 @@ from src.core.config import settings
 from ....db.database import get_db
 from ....services.session_routing_service import session_routing_service
 from src.services.provider_api_spec_service import provider_api_spec_service
+from src.core.direct_model_service import direct_model_service
+from .context_limits import read_context
+from .web_search_translation import (
+    MISMATCH_TOKEN,
+    apply_web_search,
+    extract_web_search_intents,
+    spec_denies_web_search,
+    web_search_disabled,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -20,6 +29,7 @@ INTENT_DISABLE = "reasoning.disable"
 INTENT_ENABLE = "reasoning.enable"
 INTENT_EFFORT = "reasoning.effort"
 INTENT_BUDGET = "reasoning.budget"
+REASONING_INTENTS = frozenset({INTENT_DISABLE, INTENT_ENABLE, INTENT_EFFORT, INTENT_BUDGET})
 
 # Untrusted provider specs must never rewrite these routing fields
 PROTECTED_ROOTS = frozenset({"messages", "stream", "session_id", "request_id", "model", "tools", "tool_choice"})
@@ -35,6 +45,10 @@ def _header_token(value: Any) -> str:
 # Never reset: each ASGI request and its stream generator run in one task, so this cannot leak across requests
 _TRANSLATION_ACTIVE: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
     "request_translation_active", default=False
+)
+# The provider's context window once a spec has been read, so error responses can carry it too
+_CONTEXT_WINDOW: "contextvars.ContextVar[Optional[int]]" = contextvars.ContextVar(
+    "request_context_window", default=None
 )
 
 _TRANSLATION_TRUTHY = {"1", "true", "yes", "on"}
@@ -63,7 +77,12 @@ def translation_requested(headers) -> bool:
 
 
 def set_request_translation(flag: bool) -> "contextvars.Token[bool]":
+    _CONTEXT_WINDOW.set(None)
     return _TRANSLATION_ACTIVE.set(flag)
+
+
+def set_context_window(context: Optional[int]) -> "contextvars.Token[Optional[int]]":
+    return _CONTEXT_WINDOW.set(context)
 
 
 def request_translation_active() -> bool:
@@ -73,10 +92,14 @@ def request_translation_active() -> bool:
 def translation_gate_headers() -> Dict[str, str]:
     if settings.REQUEST_TRANSLATION_MODE == "off":
         return {}
-    return {
+    out = {
         "X-Morpheus-Translation": "on" if request_translation_active() else "off",
         "X-Morpheus-Translation-Mode": settings.REQUEST_TRANSLATION_MODE,
     }
+    context = _CONTEXT_WINDOW.get()
+    if context is not None:
+        out["X-Morpheus-Context-Window"] = str(context)
+    return out
 
 
 @dataclass
@@ -85,6 +108,12 @@ class TranslationResult:
     unsupported: List[str] = field(default_factory=list)
     stack: Optional[str] = None
     touched: bool = False
+    # The provider's capabilities.context, reported only: the gateway never rewrites max_tokens
+    context_window: Optional[int] = None
+    # Capabilities the on-chain tags promise but the provider spec denies (web_search); the body stays as sent
+    mismatch: List[str] = field(default_factory=list)
+    # The provider spec the body was translated against, for checks that need the full request (unlisted params)
+    spec: Optional[Dict[str, Any]] = None
 
     def headers(self) -> Dict[str, str]:
         # Untrusted provider values: sanitize against CRLF header injection and encoding errors
@@ -105,6 +134,12 @@ class TranslationResult:
             tokens = [t for t in (_header_token(u) for u in self.unsupported) if t]
             if tokens:
                 out["X-Morpheus-Unsupported"] = ";".join(tokens)
+        if self.mismatch:
+            tokens = [t for t in (_header_token(m) for m in self.mismatch) if t]
+            if tokens:
+                out["X-Morpheus-Capability-Mismatch"] = ";".join(tokens)
+        if self.context_window is not None:
+            out["X-Morpheus-Context-Window"] = str(self.context_window)
         return out
 
 
@@ -129,6 +164,7 @@ def extract_intents(body: Dict[str, Any]) -> Dict[str, Any]:
             intents[INTENT_DISABLE] = True
         else:
             intents[INTENT_EFFORT] = alias
+    intents.update(extract_web_search_intents(body))
     return intents
 
 
@@ -146,7 +182,7 @@ def set_path(obj: Dict[str, Any], dotted: str, value: Any) -> None:
 
 def apply_spec(body: Dict[str, Any], spec: Optional[Dict[str, Any]]) -> TranslationResult:
     result = TranslationResult()
-    intents = extract_intents(body)
+    intents = {k: v for k, v in extract_intents(body).items() if k in REASONING_INTENTS}
     if not intents or not isinstance(spec, dict):
         return result
     result.stack = spec.get("stack") or None
@@ -171,7 +207,8 @@ def apply_spec(body: Dict[str, Any], spec: Optional[Dict[str, Any]]) -> Translat
             if binding.get("paramType") == "enum" and isinstance(enum_values, list) and value not in enum_values:
                 result.unsupported.append(intent)
                 continue
-            set_path(body, param, value)
+            # The spec is the shared cache entry: a nested binding (thinking.budget_tokens) must never write into it
+            set_path(body, param, copy.deepcopy(value))
             result.applied[intent] = param
         except Exception:
             result.unsupported.append(intent)
@@ -185,10 +222,22 @@ def apply_spec(body: Dict[str, Any], spec: Optional[Dict[str, Any]]) -> Translat
     return result
 
 
+def needs_translation(body: Dict[str, Any]) -> bool:
+    return bool(extract_intents(body)) or web_search_disabled(body)
+
+
+async def _model_tags(model_id: str) -> Optional[List[str]]:
+    try:
+        return await direct_model_service.get_model_tags(model_id)
+    except Exception as exc:  # unknown tags: the mismatch check simply does not fire
+        logger.warning("model tags lookup for request translation failed", model_id=model_id, error=str(exc),
+                       event_type="request_translation_tags_lookup_failed")
+        return None
+
+
 async def translate_for_session(body: Dict[str, Any], session_id: Optional[str], model_id: Optional[str]) -> TranslationResult:
-    if not request_translation_active() or not session_id or not model_id:
-        return TranslationResult()
-    if not extract_intents(body):
+    """Rewrite body in place for the session's provider; a body with nothing to translate never looks the spec up."""
+    if not request_translation_active() or not session_id or not model_id or not needs_translation(body):
         return TranslationResult()
     try:
         async with get_db() as db:
@@ -201,18 +250,34 @@ async def translate_for_session(body: Dict[str, Any], session_id: Optional[str],
         logger.warning("request translation lookup failed", session_id=session_id, error=str(exc),
                        event_type="request_translation_lookup_failed")
         return TranslationResult()
+    # The mismatch check is the only consumer of tags, and it fires only when the spec denies web search
+    tags = await _model_tags(model_id) if extract_web_search_intents(body) and spec_denies_web_search(spec) else None
     work = copy.deepcopy(body)
     try:
         result = apply_spec(work, spec)
+        web_search = apply_web_search(work, spec, PROTECTED_ROOTS, tags)
     except Exception as exc:
         logger.warning("request translation apply failed", session_id=session_id, error=str(exc),
                        event_type="request_translation_apply_failed")
         return TranslationResult()
-    if result.touched:
+    if isinstance(spec, dict):  # a spec was found: name its stack even when no binding applied
+        result.stack = result.stack or spec.get("stack") or None
+    result.applied.update(web_search.applied)
+    result.unsupported.extend(web_search.unsupported)
+    if web_search.mismatch:
+        result.mismatch.append(MISMATCH_TOKEN)
+        logger.warning("model tagged web-search-enabled but the provider spec denies web search",
+                       session_id=session_id, model_id=model_id, stack=result.stack,
+                       event_type="request_translation_capability_mismatch")
+    result.context_window = read_context(spec)
+    result.spec = spec if isinstance(spec, dict) else None
+    set_context_window(result.context_window)
+    if result.touched or web_search.touched:
         body.clear()
         body.update(work)
+        result.touched = True
     if result.touched or result.unsupported:
         logger.info("request translation applied", session_id=session_id, stack=result.stack,
-                    applied=result.applied, unsupported=result.unsupported,
-                    event_type="request_translation_applied")
+                    applied=result.applied, unsupported=result.unsupported, mismatch=result.mismatch,
+                    context_window=result.context_window, event_type="request_translation_applied")
     return result
