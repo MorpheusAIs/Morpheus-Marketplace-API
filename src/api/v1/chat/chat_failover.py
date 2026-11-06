@@ -44,6 +44,30 @@ NON_FAILOVER_ERROR_PATTERNS = [
     "request cancelled while waiting in queue",
 ]
 
+# Provider-side rejection of a session the gateway just opened. The
+# proxy-router relays unencrypted provider infra errors verbatim as
+# "provider error: <msg>" (proxy_sender.go rpcRequestStreamV2). When the
+# PROVIDER says it cannot find / load / bind the session, the handshake and
+# on-chain open already succeeded — the session exists, the provider's own
+# state is broken (stale chain view, non-sticky backends, lost user record).
+# That is a provider fault, not our stale-session case, so renewal does not
+# apply: a fresh session on the same provider fails identically. These are
+# failover-eligible and the dead session is closed immediately so it is not
+# re-picked. Checked BEFORE NON_FAILOVER_ERROR_PATTERNS, which would
+# otherwise swallow "session not found".
+PROVIDER_SESSION_REJECTED_PATTERNS = [
+    "provider error: session not found",
+    "provider error: session cannot be loaded",
+    "provider error: session not bound to this provider",
+    "provider error: user not found",
+]
+
+
+def is_provider_session_rejection(message: str) -> bool:
+    """True when the provider itself rejected an open, unexpired session."""
+    message = message.lower()
+    return any(p in message for p in PROVIDER_SESSION_REJECTED_PATTERNS)
+
 # Provider-unavailability signatures from the proxy-router (see
 # proxy-router/internal/proxyapi/proxy_sender.go sentinel errors).
 # Used when no status code is available on the exception.
@@ -99,14 +123,18 @@ def is_failover_eligible(exc: proxy_router_service.ProxyRouterServiceError) -> b
 
     Eligible: provider unreachable / 5xx / timeouts / transport failures /
     rate-limited or out-of-capacity model backends (429, or capacity patterns
-    inside a providerModelError body).
-    Not eligible: session expired/not found (separate renewal mechanism),
-    genuine user/4xx errors, TEE failures, client-cancelled requests.
+    inside a providerModelError body) / provider-side rejection of a session
+    we just opened ("provider error: session not found" and friends).
+    Not eligible: our own session expired/not found (separate renewal
+    mechanism), genuine user/4xx errors, TEE failures, client-cancelled
+    requests.
     """
     if not settings.CHAT_FAILOVER_ENABLED:
         return False
 
     message = str(exc).lower()
+    if is_provider_session_rejection(message):
+        return True
     if any(p in message for p in NON_FAILOVER_ERROR_PATTERNS):
         return False
 
@@ -190,6 +218,14 @@ async def attempt_failover(
     OPEN so it rides to its natural expiry (stake returns, no lock) and
     surface the original error to the caller — the pre-failover behavior.
 
+    Exception — provider rejected the session (``failure_reason`` matches
+    PROVIDER_SESSION_REJECTED_PATTERNS): the session is dead weight on every
+    future prompt, and if left OPEN route_request re-picks it as an idle
+    session for the model and every following request 500s until expiry.
+    It is invalidated (FAILED + background on-chain close) regardless of
+    whether an alternate bid exists; the reroute still only happens when
+    one does.
+
     Returns the new session id (already assigned to this request), or None
     when failover is not possible (caller surfaces the original error).
 
@@ -204,19 +240,40 @@ async def attempt_failover(
         request_id=request_id,
     )
 
+    provider_rejected = is_provider_session_rejection(failure_reason)
+
     # 1. Single-bid guardrail FIRST. With no alternate bid there is nothing to
     #    fail over to, so do nothing destructive: leave the session OPEN to
     #    expire naturally (no early on-chain close, no MOR lock). Must run
     #    BEFORE invalidate so single-bid models don't pay the early-close cost.
+    #    A provider-rejected session is the exception: it can never serve a
+    #    prompt, so it is closed now even with nowhere to fail over to.
     if model_id and not await _has_alternate_bids(model_id, failover_logger):
+        if not provider_rejected:
+            failover_logger.warning(
+                "No alternate bid available; leaving session to expire naturally",
+                failure_reason=failure_reason[:300],
+                event_type="failover_no_alternate_bids")
+            return None
         failover_logger.warning(
-            "No alternate bid available; leaving session to expire naturally",
+            "Provider rejected the session and no alternate bid exists; "
+            "closing the dead session without reroute",
             failure_reason=failure_reason[:300],
-            event_type="failover_no_alternate_bids")
+            event_type="provider_session_rejected_no_alternate")
+        try:
+            async with get_db() as db:
+                await session_routing_service.invalidate_session(
+                    db, original_session_id, failure_reason[:300]
+                )
+        except Exception as e:
+            failover_logger.error("Dead-session invalidation failed",
+                                  error=str(e),
+                                  event_type="failover_invalidate_failed")
         return None
 
     failover_logger.warning("Attempting gateway failover to a new provider",
                             failure_reason=failure_reason[:300],
+                            provider_session_rejected=provider_rejected,
                             event_type="failover_triggered")
 
     # 2. A sibling bid exists and is worth trying. Look up which provider
