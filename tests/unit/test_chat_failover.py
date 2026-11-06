@@ -54,10 +54,27 @@ class TestIsFailoverEligible:
         assert chat_failover.is_failover_eligible(exc) is True
 
     @pytest.mark.parametrize("exc", [
+        # The PROVIDER rejected a session we just opened (handshake + on-chain
+        # open succeeded, the provider's own state is broken). Relayed by the
+        # proxy-router as "provider error: <msg>". Not our stale-session case:
+        # renewal would land on the same broken provider.
+        _err('HTTP 500: {"error":"provider request failed: provider error: session not found"}', 500, "server_error"),
+        _err('HTTP 500: {"error":"provider request failed: provider error: session cannot be loaded session not found"}', 500, "server_error"),
+        _err('HTTP 500: {"error":"provider request failed: provider error: session not bound to this provider"}', 500, "server_error"),
+        _err('HTTP 500: {"error":"provider request failed: provider error: user not found"}', 500, "server_error"),
+    ])
+    def test_provider_session_rejection_is_eligible(self, exc):
+        assert chat_failover.is_failover_eligible(exc) is True
+        assert chat_failover.is_provider_session_rejection(str(exc)) is True
+
+    @pytest.mark.parametrize("exc", [
         # Session-state errors belong to the SEPARATE renewal mechanism —
         # failover must NOT trigger even though they arrive as 500.
         _err('HTTP 500: {"error":"session expired"}', 500, "server_error"),
+        # Our own C-Node's stale-session error (no "provider error:" prefix).
         _err('HTTP 500: {"error":"session not found"}', 500, "server_error"),
+        # Provider-side expiry still goes through renewal, not failover.
+        _err('HTTP 500: {"error":"provider request failed: provider error: session expired"}', 500, "server_error"),
         # User/4xx and known-permanent failures.
         _err('HTTP 400: {"error":"invalid request"}', 400, "client_error"),
         _err('HTTP 404: {"error":"not found"}', 404, "client_error"),
@@ -177,6 +194,29 @@ class TestAttemptFailover:
         assert new_id is None
         failover_mocks["invalidate"].assert_not_awaited()
         failover_mocks["route"].assert_not_awaited()
+
+    async def test_single_bid_provider_rejection_closes_session_without_retry(self, failover_mocks):
+        # Provider said "session not found" on a session we just opened and
+        # there is no alternate bid. The session can never serve a prompt and
+        # would be re-picked as idle, so it IS invalidated (background close),
+        # but nothing is rerouted.
+        failover_mocks["bids"].return_value = _rated_bids_response(1)
+        new_id = await _failover(
+            failover_mocks,
+            failure_reason='HTTP 500: {"error":"provider request failed: provider error: session not found"}',
+        )
+        assert new_id is None
+        failover_mocks["invalidate"].assert_awaited_once()
+        failover_mocks["route"].assert_not_awaited()
+
+    async def test_provider_rejection_with_alternate_bid_fails_over(self, failover_mocks):
+        new_id = await _failover(
+            failover_mocks,
+            failure_reason='HTTP 500: {"error":"provider request failed: provider error: session not found"}',
+        )
+        assert new_id == "0xnew"
+        failover_mocks["invalidate"].assert_awaited_once()
+        assert failover_mocks["route"].await_args.kwargs["omit_provider"] == FAILED_PROVIDER
 
     async def test_bids_lookup_failure_proceeds_optimistically(self, failover_mocks):
         failover_mocks["bids"].side_effect = Exception("chain read failed")
