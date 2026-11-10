@@ -19,7 +19,7 @@ import random
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Optional, Dict, Any, List, Set
+from typing import Awaitable, Callable, Optional, Dict, Any, List, Set, Tuple
 
 from sqlalchemy import select, update, func, and_, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +34,26 @@ from ..core.logging_config import get_api_logger
 from ..services import proxy_router_service
 
 logger = get_api_logger()
+
+# routed_sessions.endpoint of a session opened for one video clip
+# (open_session_for_quote). Such a session belongs to its clip until the clip
+# is terminal: idle claim and automation never pick it, and it is closed with
+# close_session_now. A provider withholds an undelivered clip when its session
+# closes more than 60 s before EndsAt.
+VIDEO_JOBS_ENDPOINT = "/v1/video/jobs"
+# A video session left CLOSING this long was abandoned by its closer (a crash
+# between the claim and the outcome write): close_session_now claims it again,
+# and the video sweeper looks for such rows every pass.
+VIDEO_CLOSE_ABANDONED_SECONDS = 600
+# close_session_now gives its on-chain close (120 s, behind the wallet
+# throttle queue) and the daylock read after it this long from its claim,
+# then puts the row back to OPEN. Well under VIDEO_CLOSE_ABANDONED_SECONDS,
+# so a row is claimed again only once its first closer has stopped.
+VIDEO_CLOSE_DEADLINE_SECONDS = 240
+# close_session_now leaves a session this close to expires_at to the expiry
+# cleanup, which closes OPEN rows without a claim: a claim taken just before
+# expiry then cannot commit after the cleanup has read the row OPEN.
+VIDEO_CLOSE_EXPIRY_MARGIN_SECONDS = 30
 
 # OpenSessionByBid failures where the next cheapest healthy bid may succeed.
 # Deliberately excludes nonce conflicts (wallet throttle handles those) and
@@ -649,25 +669,101 @@ class SessionRoutingService:
         if not under:
             cheapest = bids[0]
             stake = self._stake_mor_for_pps(cheapest["pps"], session_duration)
-            logger.warning(
-                "Cheapest rated bid exceeds max stake fuse",
+            raise self._stake_fuse_error(
                 model_id=model_id,
-                bid_id=cheapest["bid_id"],
-                stake_mor=round(stake, 6),
-                max_stake_mor=max_stake,
-                session_duration=session_duration,
-                event_type="session_stake_fuse_refused",
-            )
-            mor_hr = self._max_mor_per_hour_for_fuse(max_stake, session_duration)
-            raise SessionStakeFuseError(
-                "We couldn't open a session — the lowest usable bid for this model "
-                f"is above the hosted gateway limit of ~{mor_hr:.2f} MOR/hr "
-                "(compare the MOR/hr column on https://active.mor.org). "
-                + P2P_OFFRAMP_HINT,
-                model_id=model_id,
+                bid_id=str(cheapest["bid_id"]),
                 stake_mor=stake,
                 max_stake_mor=max_stake,
-                bid_id=str(cheapest["bid_id"]),
+                session_duration=session_duration,
+            )
+        return under
+
+    def _stake_fuse_error(
+        self,
+        *,
+        model_id: str,
+        bid_id: str,
+        stake_mor: float,
+        max_stake_mor: float,
+        session_duration: int,
+    ) -> SessionStakeFuseError:
+        """Log and build the refusal for a cheapest bid over max_stake_mor."""
+        logger.warning(
+            "Cheapest rated bid exceeds max stake fuse",
+            model_id=model_id,
+            bid_id=bid_id,
+            stake_mor=round(stake_mor, 6),
+            max_stake_mor=max_stake_mor,
+            session_duration=session_duration,
+            event_type="session_stake_fuse_refused",
+        )
+        mor_hr = self._max_mor_per_hour_for_fuse(max_stake_mor, session_duration)
+        return SessionStakeFuseError(
+            "We couldn't open a session — the lowest usable bid for this model "
+            f"is above the hosted gateway limit of ~{mor_hr:.2f} MOR/hr "
+            "(compare the MOR/hr column on https://active.mor.org). "
+            + P2P_OFFRAMP_HINT,
+            model_id=model_id,
+            stake_mor=stake_mor,
+            max_stake_mor=max_stake_mor,
+            bid_id=bid_id,
+        )
+
+    def _quote_candidates_under_fuse(
+        self,
+        model_id: str,
+        candidates: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Video quote entries as open candidates under max_stake_mor, order kept.
+
+        Each entry is opened for its own session_seconds, so its stake is
+        pps × session_seconds × SESSION_STAKE_FACTOR. Entries without a bid,
+        a price or a positive session_seconds are dropped.
+
+        Raises SessionOpenError when no entry is usable and
+        SessionStakeFuseError when every usable entry is over the fuse.
+        """
+        policy = get_session_routing_policy()
+        max_stake = float(policy.max_stake_mor or 0)
+
+        priced: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict) or not candidate.get("bid_id"):
+                continue
+            try:
+                pps = int(str(candidate.get("price_per_second_wei"))) / 1e18
+                session_seconds = int(candidate.get("session_seconds") or 0)
+            except (TypeError, ValueError):
+                continue
+            if session_seconds <= 0:
+                continue
+            priced.append(
+                {
+                    **candidate,
+                    "pps": pps,
+                    "stake_mor": self._stake_mor_for_pps(pps, session_seconds),
+                    "session_duration": session_seconds,
+                }
+            )
+
+        if not priced:
+            raise SessionOpenError(
+                "No quoted bids available for model",
+                model_id=model_id,
+            )
+
+        under = [
+            row for row in priced
+            if max_stake <= 0 or row["stake_mor"] <= max_stake
+        ]
+        if not under:
+            first = priced[0]
+            raise self._stake_fuse_error(
+                model_id=model_id,
+                bid_id=str(first["bid_id"]),
+                stake_mor=first["stake_mor"],
+                max_stake_mor=max_stake,
+                session_duration=first["session_duration"],
             )
         return under
 
@@ -959,92 +1055,14 @@ class SessionRoutingService:
         actual is not double-incremented on retry paths.
         """
         try:
-            prior = getattr(session, "daylock_mor", None)
-            if prior is not None and float(prior) > 0:
+            metered = await self._read_daylock_on_close(session, close_result=close_result)
+            if metered is None:
                 return
-
-            status = None
-            try:
-                status = await proxy_router_service.getSessionStatus(session.id)
-            except Exception as e:
-                logger.warning(
-                    "getSessionStatus for daylock meter failed",
-                    session_id=session.id,
-                    error=str(e),
-                    event_type="daylock_meter_status_error",
-                )
-
-            stake_mor = self._parse_session_stake_mor(status)
-            if stake_mor is None and session.stake_mor is not None:
-                stake_mor = float(session.stake_mor)
-            if stake_mor is None or stake_mor < 0:
-                stake_mor = 0.0
-
-            opened_at = self._parse_session_unix(
-                status, "OpenedAt", "openedAt"
-            )
-            ends_at = self._parse_session_unix(status, "EndsAt", "endsAt")
-            closed_at = self._parse_session_unix(
-                status, "ClosedAt", "closedAt"
-            )
-
-            daylock: Optional[float] = None
-            source = "prorata"
-            tx_hash = self._extract_close_tx_hash(close_result)
-            if tx_hash and stake_mor > 0:
-                daylock = await self._daylock_from_close_receipt(tx_hash, stake_mor)
-                if daylock is not None:
-                    source = "receipt"
-
-            if daylock is None:
-                # Do not invent daylock while the session is still open on-chain
-                # (EXPIRED cleanup / invalidate may call us after a failed close).
-                if (not closed_at or closed_at <= 0) and not tx_hash:
-                    logger.info(
-                        "Skip daylock meter; on-chain close not confirmed yet",
-                        session_id=session.id,
-                        event_type="daylock_meter_skipped_not_closed",
-                    )
-                    return
-                if (not closed_at or closed_at <= 0) and tx_hash:
-                    # Close tx returned but status lag — treat as just closed.
-                    closed_at = int(datetime.now(timezone.utc).timestamp())
-                if opened_at is None and session.created_at is not None:
-                    created = session.created_at
-                    if created.tzinfo is not None:
-                        created = created.replace(tzinfo=None)
-                    opened_at = int(created.replace(tzinfo=timezone.utc).timestamp())
-                if ends_at is None and session.expires_at is not None:
-                    exp = session.expires_at
-                    if exp.tzinfo is not None:
-                        exp = exp.replace(tzinfo=None)
-                    # expires_at includes SESSION_EXPIRY_BUFFER; still OK as sched proxy
-                    ends_at = int(exp.replace(tzinfo=timezone.utc).timestamp())
-                daylock = self._daylock_prorata_mor(
-                    stake_mor, opened_at, ends_at, closed_at
-                )
-                source = "prorata"
-
-            daylock = max(0.0, float(daylock or 0.0))
+            daylock, stake_mor, source = metered
             session.daylock_mor = daylock
             if session.stake_mor is None and stake_mor > 0:
                 session.stake_mor = stake_mor
-
-            is_premium = self._is_premium_model(session.model_id)
-            budget = float(settings.SESSION_PREMIUM_DAILY_BUDGET_MOR or 0)
-            if is_premium and budget > 0 and daylock > 0:
-                await self._add_premium_daylock_spent(daylock)
-
-            logger.info(
-                "Recorded session daylock on close",
-                session_id=session.id,
-                model_id=session.model_id,
-                stake_mor=round(stake_mor, 6),
-                daylock_mor=round(daylock, 6),
-                meter_source=source,
-                premium=is_premium,
-                event_type="daylock_recorded",
-            )
+            await self._count_daylock_on_close(session, daylock, stake_mor, source)
         except Exception as e:
             logger.warning(
                 "Daylock meter failed",
@@ -1052,6 +1070,109 @@ class SessionRoutingService:
                 error=str(e),
                 event_type="daylock_meter_error",
             )
+
+    async def _read_daylock_on_close(
+        self,
+        session: Any,
+        close_result: Any = None,
+    ) -> Optional[Tuple[float, float, str]]:
+        """The daylock of a closed session, read without writing anything.
+
+        Returns (daylock_mor, stake_mor, source), or None when the row is
+        already metered or the on-chain close is not confirmed yet. Raises
+        only on a malformed row: the status and receipt reads are best effort.
+        """
+        prior = getattr(session, "daylock_mor", None)
+        if prior is not None and float(prior) > 0:
+            return None
+
+        status = None
+        try:
+            status = await proxy_router_service.getSessionStatus(session.id)
+        except Exception as e:
+            logger.warning(
+                "getSessionStatus for daylock meter failed",
+                session_id=session.id,
+                error=str(e),
+                event_type="daylock_meter_status_error",
+            )
+
+        stake_mor = self._parse_session_stake_mor(status)
+        if stake_mor is None and session.stake_mor is not None:
+            stake_mor = float(session.stake_mor)
+        if stake_mor is None or stake_mor < 0:
+            stake_mor = 0.0
+
+        opened_at = self._parse_session_unix(
+            status, "OpenedAt", "openedAt"
+        )
+        ends_at = self._parse_session_unix(status, "EndsAt", "endsAt")
+        closed_at = self._parse_session_unix(
+            status, "ClosedAt", "closedAt"
+        )
+
+        daylock: Optional[float] = None
+        source = "prorata"
+        tx_hash = self._extract_close_tx_hash(close_result)
+        if tx_hash and stake_mor > 0:
+            daylock = await self._daylock_from_close_receipt(tx_hash, stake_mor)
+            if daylock is not None:
+                source = "receipt"
+
+        if daylock is None:
+            # Do not invent daylock while the session is still open on-chain
+            # (EXPIRED cleanup / invalidate may call us after a failed close).
+            if (not closed_at or closed_at <= 0) and not tx_hash:
+                logger.info(
+                    "Skip daylock meter; on-chain close not confirmed yet",
+                    session_id=session.id,
+                    event_type="daylock_meter_skipped_not_closed",
+                )
+                return None
+            if (not closed_at or closed_at <= 0) and tx_hash:
+                # Close tx returned but status lag — treat as just closed.
+                closed_at = int(datetime.now(timezone.utc).timestamp())
+            if opened_at is None and session.created_at is not None:
+                created = session.created_at
+                if created.tzinfo is not None:
+                    created = created.replace(tzinfo=None)
+                opened_at = int(created.replace(tzinfo=timezone.utc).timestamp())
+            if ends_at is None and session.expires_at is not None:
+                exp = session.expires_at
+                if exp.tzinfo is not None:
+                    exp = exp.replace(tzinfo=None)
+                # expires_at includes SESSION_EXPIRY_BUFFER; still OK as sched proxy
+                ends_at = int(exp.replace(tzinfo=timezone.utc).timestamp())
+            daylock = self._daylock_prorata_mor(
+                stake_mor, opened_at, ends_at, closed_at
+            )
+            source = "prorata"
+
+        return max(0.0, float(daylock or 0.0)), stake_mor, source
+
+    async def _count_daylock_on_close(
+        self,
+        session: Any,
+        daylock: float,
+        stake_mor: float,
+        source: str,
+    ) -> None:
+        """Add a recorded daylock to today's premium counter (premium models only)."""
+        is_premium = self._is_premium_model(session.model_id)
+        budget = float(settings.SESSION_PREMIUM_DAILY_BUDGET_MOR or 0)
+        if is_premium and budget > 0 and daylock > 0:
+            await self._add_premium_daylock_spent(daylock)
+
+        logger.info(
+            "Recorded session daylock on close",
+            session_id=session.id,
+            model_id=session.model_id,
+            stake_mor=round(stake_mor, 6),
+            daylock_mor=round(daylock, 6),
+            meter_source=source,
+            premium=is_premium,
+            event_type="daylock_recorded",
+        )
 
     # =========================================================================
     # EXPENSIVE-MODEL TIER
@@ -1620,6 +1741,69 @@ class SessionRoutingService:
             session_duration=session_duration,
             candidate_count=len(candidates),
         )
+
+        endpoint = "/v1/chat/completions"
+        if model_type == "EMBEDDINGS":
+            endpoint = "/v1/embeddings"
+        elif model_type == "AUTOMATION":
+            endpoint = ""
+
+        session_id, _ = await self._open_bid_walk(
+            model_id=model_id,
+            model_name=model_name,
+            candidates=candidates,
+            endpoint=endpoint,
+            initial_active_requests=initial_active_requests,
+            open_logger=open_logger,
+            user_id=user_id,
+            omit_provider=omit_provider,
+            session_duration=session_duration,
+        )
+        return session_id
+
+    async def _open_bid_walk(
+        self,
+        *,
+        model_id: str,
+        model_name: Optional[str],
+        candidates: List[Dict[str, Any]],
+        endpoint: str,
+        initial_active_requests: int,
+        open_logger,
+        user_id: Optional[int] = None,
+        omit_provider: Optional[str] = None,
+        session_duration: Optional[int] = None,
+        expiry_fallback_after_open: bool = False,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Open a session on the first candidate bid that takes one, then persist its row.
+
+        Shared by the chat open (_open_session_for_model) and the video open
+        (open_session_for_quote). Candidates are walked in the given order
+        with an accumulating omit set, the per-provider open cool-off, at most
+        SESSION_OPEN_BID_WALK_MAX_ATTEMPTS opens, and the adaptive wallet
+        throttle. Only capacity/unreachable failures move to the next peer.
+
+        Each candidate needs ``bid_id`` and ``stake_mor``, and may carry
+        ``provider``. It is opened for ``session_duration`` when given, else
+        for its own ``session_duration``.
+
+        Holds NO DB connection across the on-chain open; the row is inserted
+        on its own short-lived connection afterwards, with
+        ``initial_active_requests`` and ``endpoint``.
+
+        expires_at is the on-chain endsAt + SESSION_EXPIRY_BUFFER_SECONDS.
+        When the status read fails it falls back to the walk start + duration
+        (chat), or, with ``expiry_fallback_after_open``, to the time the open
+        returned + duration + SESSION_EXPIRY_BUFFER_SECONDS: an upper bound on
+        endsAt, so expiry cleanup never closes the session before endsAt.
+
+        Returns:
+            (session_id, chosen candidate)
+
+        Raises:
+            SessionOpenError: If no candidate opened
+        """
         # Fallback ONLY. The authoritative expiry is the actual on-chain endsAt,
         # read back after the open (see below). This call-start estimate is used
         # solely if that read fails, because it is systematically too short: it
@@ -1627,9 +1811,7 @@ class SessionRoutingService:
         # openedAt (== mine time) is later and the true endsAt is later still.
         # Closing at this estimate can land a few seconds BEFORE endsAt under
         # load. Prefer the on-chain endsAt below when available.
-        estimated_expires_at = (
-            datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=session_duration)
-        )
+        walk_started_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
         omitted: Set[str] = set()
         if omit_provider:
@@ -1654,9 +1836,16 @@ class SessionRoutingService:
 
             attempts += 1
             bid_id = str(chosen_bid["bid_id"])
+            duration = int(
+                session_duration
+                if session_duration is not None
+                else chosen_bid["session_duration"]
+            )
+            estimated_expires_at = walk_started_at + timedelta(seconds=duration)
             bid_logger = open_logger.bind(
                 bid_id=bid_id,
                 provider=provider or None,
+                session_duration=duration,
                 selected_stake_mor=round(float(chosen_bid["stake_mor"]), 6),
                 walk_attempt=attempts,
                 walk_max_attempts=max_attempts,
@@ -1676,13 +1865,21 @@ class SessionRoutingService:
                 # uses its own short-lived session), so a throttled queue can grow
                 # without exhausting the DB pool.
                 response = await self._run_onchain(
-                    lambda bid=bid_id: proxy_router_service.openSessionByBid(
+                    lambda bid=bid_id, seconds=duration: proxy_router_service.openSessionByBid(
                         bid_id=bid,
-                        session_duration=session_duration,
+                        session_duration=seconds,
                     ),
                     op_name="openSessionByBid",
                     op_logger=bid_logger,
                 )
+                if expiry_fallback_after_open:
+                    # The open tx is mined by now, so openedAt <= now and
+                    # endsAt <= now + duration.
+                    estimated_expires_at = datetime.now(timezone.utc).replace(
+                        tzinfo=None
+                    ) + timedelta(
+                        seconds=duration + settings.SESSION_EXPIRY_BUFFER_SECONDS
+                    )
 
                 blockchain_session_id = response.get("sessionID")
 
@@ -1714,11 +1911,6 @@ class SessionRoutingService:
 
                 # Create session record only after successful open
                 now = datetime.now(timezone.utc).replace(tzinfo=None)
-                endpoint = "/v1/chat/completions"
-                if model_type == "EMBEDDINGS":
-                    endpoint = "/v1/embeddings"
-                elif model_type == "AUTOMATION":
-                    endpoint = ""
 
                 # Persist on a fresh short-lived connection. Create the row already
                 # assigned (active_requests=initial_active_requests) so a request-path
@@ -1746,7 +1938,7 @@ class SessionRoutingService:
                     session_id=blockchain_session_id,
                     event_type="session_opened",
                 )
-                return blockchain_session_id
+                return blockchain_session_id, chosen_bid
 
             except SessionOpenError:
                 # Domain error after a successful proxy response (e.g. missing
@@ -1812,7 +2004,338 @@ class SessionRoutingService:
             "No rated bids available for model",
             model_id=model_id,
         )
-    
+
+    async def open_session_for_quote(
+        self,
+        *,
+        model_id: str,
+        model_name: Optional[str],
+        candidates: List[Dict[str, Any]],
+        user_id: Optional[int] = None,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Open a session for one video clip on the first quoted bid that takes it.
+
+        ``candidates`` are POST v1/video/quote entries the caller already
+        filtered (no error, healthy bid) and ordered (cheapest first). They are
+        walked in that order, each opened for its own ``session_seconds``.
+
+        Gates as chat: allowlist, soft cap, MOR low-water, premium budget, and
+        the stake fuse on each entry's own session. The max-bid PPS gate is
+        skipped: it is calibrated for LLM prices.
+
+        The row is created assigned (active_requests=1) with endpoint
+        VIDEO_JOBS_ENDPOINT, so idle claim and automation never pick it. The
+        caller closes it with close_session_now once the clip is terminal,
+        never on a client disconnect or timeout.
+
+        Returns:
+            (session_id, chosen): chosen is the candidate as given, plus
+            ``pps`` (MOR/s), ``stake_mor`` and ``session_duration``.
+
+        Raises:
+            SessionAllowlistError, SessionPoolBusyError, SessionMorReservedError,
+            SessionPremiumBudgetError, SessionStakeFuseError, SessionOpenError
+        """
+        open_logger = logger.bind(
+            model_id=model_id,
+            model_name=model_name,
+            endpoint=VIDEO_JOBS_ENDPOINT,
+        )
+        open_logger.info("Opening session for video quote",
+                         quoted_count=len(candidates),
+                         event_type="video_session_open_start")
+
+        await self._ensure_allowlist_allows_open(model_id)
+        await self._ensure_soft_cap_allows_open(model_id)
+        await self._ensure_mor_low_water_allows_open(model_id)
+        await self._ensure_premium_budget_allows_open(model_id)
+
+        under = self._quote_candidates_under_fuse(model_id, candidates)
+        open_logger = open_logger.bind(candidate_count=len(under))
+
+        return await self._open_bid_walk(
+            model_id=model_id,
+            model_name=model_name,
+            candidates=under,
+            endpoint=VIDEO_JOBS_ENDPOINT,
+            initial_active_requests=1,
+            open_logger=open_logger,
+            user_id=user_id,
+            expiry_fallback_after_open=True,
+        )
+
+    async def close_session_now(self, session_id: str, reason: str = "") -> bool:
+        """
+        Close one session now, whatever its active_requests (video clip sessions).
+
+        Claims the row atomically (OPEN -> CLOSING, active_requests=0) so the
+        GET refresh and the sweeper never close it twice. The claim stamps
+        updated_at, and every later write of this call is fenced on that stamp
+        (state CLOSING, updated_at unchanged): once another call has claimed
+        the row again, this one writes nothing and answers False.
+
+        Then it closes on chain through the adaptive throttle and reads the
+        daylock, with no DB connection held and bounded by
+        VIDEO_CLOSE_DEADLINE_SECONDS from the claim, marks the row CLOSED with
+        that daylock, and only after the mark adds it to the premium counter.
+
+        On an on-chain close error, the deadline, or a cancel mid-close, the
+        row goes back to OPEN with active_requests=0 and error_reason set,
+        so a later call tries again and expiry cleanup still closes it at
+        expires_at. That is safe for a video session: idle claim and
+        automation skip VIDEO_JOBS_ENDPOINT rows.
+
+        An OPEN row within VIDEO_CLOSE_EXPIRY_MARGIN_SECONDS of expires_at is
+        left to the expiry cleanup, which closes OPEN rows without a claim. A
+        video row left CLOSING for VIDEO_CLOSE_ABANDONED_SECONDS (its closer
+        died, or lost the row before writing the outcome) is claimed again,
+        expired or not: its first closer is past its deadline by then, and a
+        repeated close of a closed session answers already-closed.
+
+        Returns:
+            True when this call closed the session and marked its row CLOSED
+            (an already-closed session on chain counts). False when the row was
+            not claimed (closing, closed, expired, failed, unknown, or due for
+            the expiry cleanup), when the on-chain close failed or ran past the
+            deadline (the session may still be open), or when the row could not
+            be marked CLOSED. get_session_state tells them apart.
+
+        Raises:
+            asyncio.CancelledError: cancelled; the row is back to OPEN.
+        """
+        close_logger = logger.bind(session_id=session_id, close_reason=reason or None)
+
+        async with get_db() as db:
+            # The claim time is taken once a connection is checked out: a slow
+            # pool wait must not age the expiry guard past the expiry cleanup.
+            await db.connection()
+            started = time.monotonic()
+            claimed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            abandoned_before = claimed_at - timedelta(seconds=VIDEO_CLOSE_ABANDONED_SECONDS)
+            expiry_due = claimed_at + timedelta(seconds=VIDEO_CLOSE_EXPIRY_MARGIN_SECONDS)
+            result = await db.execute(
+                update(RoutedSession)
+                .where(
+                    RoutedSession.id == session_id,
+                    or_(
+                        and_(
+                            RoutedSession.state == SessionState.OPEN.value,
+                            RoutedSession.expires_at > expiry_due,
+                        ),
+                        and_(
+                            RoutedSession.state == SessionState.CLOSING.value,
+                            RoutedSession.endpoint == VIDEO_JOBS_ENDPOINT,
+                            RoutedSession.updated_at < abandoned_before,
+                        ),
+                    ),
+                )
+                .values(
+                    state=SessionState.CLOSING.value,
+                    active_requests=0,
+                    updated_at=claimed_at,
+                )
+                .returning(RoutedSession.id)
+            )
+            claimed_id = result.scalar_one_or_none()
+            await db.commit()
+
+        if claimed_id is None:
+            close_logger.info("Session not OPEN, or left to the expiry cleanup; nothing to close",
+                              event_type="session_close_now_skipped")
+            return False
+
+        close_logger.info("Closing session now",
+                          event_type="session_close_start")
+        try:
+            session_row, metered = await asyncio.wait_for(
+                self._close_now_on_chain(session_id, close_logger),
+                timeout=VIDEO_CLOSE_DEADLINE_SECONDS - (time.monotonic() - started),
+            )
+        except asyncio.TimeoutError:
+            close_logger.error("Session close ran past its deadline; left OPEN for a retry",
+                               deadline_seconds=VIDEO_CLOSE_DEADLINE_SECONDS,
+                               event_type="session_close_timeout")
+            await self._reopen_closing_session(
+                session_id, claimed_at, "Close failed: deadline passed", close_logger
+            )
+            return False
+        except Exception as e:
+            close_logger.error("Error closing session; left OPEN for a retry",
+                               error=str(e),
+                               event_type="session_close_error")
+            await self._reopen_closing_session(
+                session_id, claimed_at, f"Close failed: {str(e)}", close_logger
+            )
+            return False
+        except BaseException:
+            # Cancelled (shutdown, a sweeper close timeout): the close may or
+            # may not have reached the chain. Back to OPEN, never stuck
+            # CLOSING: a later call or the expiry cleanup finishes it.
+            close_logger.warning("Session close interrupted; left OPEN for a retry",
+                                 event_type="session_close_interrupted")
+            await self._reopen_closing_session(
+                session_id, claimed_at, "Close failed: interrupted", close_logger
+            )
+            raise
+
+        # The session is closed on chain from here on. A failure to mark the
+        # row is logged, not raised, and answers False: the row stays CLOSING
+        # until it counts as abandoned, and a retry or the sweeper then claims
+        # it again (the chain answers already-closed).
+        values: Dict[str, Any] = {
+            "state": SessionState.CLOSED.value,
+            "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
+        }
+        if metered is not None:
+            daylock, stake_mor, _ = metered
+            values["daylock_mor"] = daylock
+            if session_row.stake_mor is None and stake_mor > 0:
+                values["stake_mor"] = stake_mor
+        try:
+            async with get_db() as db:
+                result = await db.execute(
+                    update(RoutedSession)
+                    .where(*self._close_claim_fence(session_id, claimed_at))
+                    .values(**values)
+                    .returning(RoutedSession.id)
+                )
+                marked = result.scalar_one_or_none() is not None
+                await db.commit()
+        except Exception as e:
+            close_logger.error("Session closed on chain but its row was not marked CLOSED",
+                               error=str(e),
+                               event_type="session_close_record_error")
+            return False
+        except BaseException:
+            # Cancelled mid-mark: back to OPEN unless the mark landed (the
+            # fence then matches nothing), so a retry records the close
+            await self._reopen_closing_session(
+                session_id, claimed_at, "Close failed: interrupted", close_logger
+            )
+            raise
+        if not marked:
+            close_logger.warning("Session row was claimed again mid-close; nothing recorded",
+                                 event_type="session_close_claim_lost")
+            return False
+
+        if metered is not None:
+            try:
+                await self._count_daylock_on_close(session_row, *metered)
+            except Exception as e:
+                close_logger.warning("Daylock meter failed",
+                                     error=str(e),
+                                     event_type="daylock_meter_error")
+        close_logger.info("Session closed successfully",
+                          event_type="session_closed")
+        return True
+
+    async def _close_now_on_chain(
+        self, session_id: str, close_logger
+    ) -> Tuple[Optional[RoutedSession], Optional[Tuple[float, float, str]]]:
+        """close_session_now's bounded part: the on-chain close, then the
+        daylock read. Writes nothing.
+
+        Returns:
+            (the row as read after the close or None, the daylock reading or
+            None when there is nothing to meter)
+
+        Raises:
+            Whatever the on-chain close or the row read raised.
+        """
+        close_result = await self._run_onchain(
+            lambda: proxy_router_service.closeSession(session_id),
+            op_name="closeSession",
+            op_logger=close_logger,
+        )
+        async with get_db() as db:
+            row = await db.execute(
+                select(RoutedSession).where(RoutedSession.id == session_id)
+            )
+            session_row = row.scalar_one_or_none()
+        if session_row is None:
+            return None, None
+        try:
+            return session_row, await self._read_daylock_on_close(
+                session_row, close_result=close_result
+            )
+        except Exception as e:
+            close_logger.warning("Daylock meter failed",
+                                 error=str(e),
+                                 event_type="daylock_meter_error")
+            return session_row, None
+
+    @staticmethod
+    def _close_claim_fence(session_id: str, claimed_at: datetime) -> Tuple[Any, ...]:
+        """WHERE of a close_session_now write: the row is still under that call's claim."""
+        return (
+            RoutedSession.id == session_id,
+            RoutedSession.state == SessionState.CLOSING.value,
+            RoutedSession.updated_at == claimed_at,
+        )
+
+    async def _reopen_closing_session(
+        self, session_id: str, claimed_at: datetime, error_reason: str, close_logger
+    ) -> None:
+        """Best effort: put a row this call still holds (its claim) back to OPEN."""
+        try:
+            async with get_db() as db:
+                result = await db.execute(
+                    update(RoutedSession)
+                    .where(*self._close_claim_fence(session_id, claimed_at))
+                    .values(
+                        state=SessionState.OPEN.value,
+                        active_requests=0,
+                        error_reason=error_reason[:500],
+                        updated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                    )
+                    .returning(RoutedSession.id)
+                )
+                reopened = result.scalar_one_or_none() is not None
+                await db.commit()
+        except Exception as db_error:
+            close_logger.error("Could not reopen session row after close error",
+                               error=str(db_error),
+                               event_type="session_close_reopen_error")
+            return
+        if not reopened:
+            close_logger.warning("Session row was claimed again mid-close; left as it is",
+                                 event_type="session_close_claim_lost")
+
+    async def list_abandoned_video_closes(self, limit: int) -> List[str]:
+        """Video sessions left CLOSING for VIDEO_CLOSE_ABANDONED_SECONDS, oldest first.
+
+        close_session_now claims each of them again. The video sweeper reaches
+        through this the ones no video_jobs row retries (a submit that lost its
+        row), which would otherwise stay CLOSING and count as premium holds.
+        """
+        abandoned_before = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            seconds=VIDEO_CLOSE_ABANDONED_SECONDS
+        )
+        async with get_db() as db:
+            result = await db.execute(
+                select(RoutedSession.id)
+                .where(
+                    RoutedSession.endpoint == VIDEO_JOBS_ENDPOINT,
+                    RoutedSession.state == SessionState.CLOSING.value,
+                    RoutedSession.updated_at < abandoned_before,
+                )
+                .order_by(RoutedSession.updated_at.asc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
+    async def get_session_state(self, session_id: str) -> Optional[str]:
+        """The routed_sessions state of one session (SessionState value), or None when unknown."""
+        async with get_db() as db:
+            result = await db.execute(
+                select(RoutedSession.state).where(RoutedSession.id == session_id)
+            )
+            state = result.scalar_one_or_none()
+        if state is None:
+            return None
+        return state.value if isinstance(state, SessionState) else str(state)
+
     async def _close_session(
         self,
         db: AsyncSession,
@@ -1920,6 +2443,9 @@ class SessionRoutingService:
         session of the same impaired provider. Rows with an unknown (NULL)
         provider stay claimable — optimistic, matches pre-tracking behavior.
 
+        Video clip sessions (endpoint VIDEO_JOBS_ENDPOINT) are never claimed:
+        each belongs to its clip until close_session_now.
+
         Returns the claimed session id, or None when no idle session exists.
         """
         now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1935,6 +2461,7 @@ class SessionRoutingService:
                   AND state = :open_state
                   AND active_requests = 0
                   AND expires_at > :now
+                  AND endpoint IS DISTINCT FROM :video_endpoint
                   AND (
                         CAST(:omit_provider AS VARCHAR) IS NULL
                         OR provider_address IS NULL
@@ -1955,6 +2482,7 @@ class SessionRoutingService:
                     "model_id": model_id,
                     "open_state": SessionState.OPEN.value,
                     "omit_provider": omit_provider,
+                    "video_endpoint": VIDEO_JOBS_ENDPOINT,
                 },
             )
             claimed_id = result.scalar_one_or_none()
@@ -2166,7 +2694,14 @@ class SessionRoutingService:
         
         Non-preferred model rules:
         - If any unutilized -> close one
+
+        Video clip sessions (endpoint VIDEO_JOBS_ENDPOINT) are left out: they
+        close when their clip is terminal, and must not drive a scale-up.
         """
+        sessions = [s for s in sessions if s.endpoint != VIDEO_JOBS_ENDPOINT]
+        if not sessions:
+            return
+
         process_logger = logger.bind(
             model_id=model_id,
             is_preferred=is_preferred,
@@ -2253,7 +2788,11 @@ class SessionRoutingService:
                 await self._close_session(db, to_close)
     
     async def _cleanup_expired_sessions(self, db: AsyncSession) -> None:
-        """Mark expired sessions and attempt to close them."""
+        """Mark expired sessions and attempt to close them.
+
+        Video clip sessions too: close_session_now leaves an OPEN one near or
+        past expires_at to this cleanup, so the two never close it together.
+        """
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         
         result = await db.execute(

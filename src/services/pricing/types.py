@@ -6,9 +6,12 @@ Prices are per 1 million tokens (standard industry convention).
 """
 
 from dataclasses import dataclass, field
-from decimal import Decimal
-from typing import Optional
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Dict, Optional
 from datetime import datetime
+
+# Clip prices are stored as NUMERIC(20, 8), like every other ledger amount
+CLIP_PRICE_QUANTUM = Decimal("0.00000001")
 
 
 @dataclass(frozen=True)
@@ -131,3 +134,46 @@ class UsageCost:
         """Returns False as this is actual cost."""
         return False
 
+
+@dataclass(frozen=True)
+class ClipPricing:
+    """
+    Per-clip pricing for a video model, in USD per second of video.
+
+    Attributes:
+        model_key: The clip_prices key this came from (lowercase name or 0x id)
+        per_second: Resolution (e.g. "720p") -> price per second of video
+        audio_per_second: Surcharge per second when audio is generated.
+            None means audio is not priced, so audio clips cannot be sold.
+        currency: Currency code (default: "USD")
+    """
+    model_key: str
+    per_second: Dict[str, Decimal] = field(default_factory=dict)
+    audio_per_second: Optional[Decimal] = None
+    currency: str = "USD"
+
+    def price_for(
+        self,
+        duration_seconds: int,
+        resolution: Optional[str],
+        generate_audio: bool,
+    ) -> Optional[Decimal]:
+        """
+        Price one clip, quantized to 8 places.
+
+        Returns None (fail closed) when the resolution is not priced, when
+        audio is requested but has no price, or when the duration is not a
+        positive whole number of seconds.
+        """
+        if isinstance(duration_seconds, bool) or not isinstance(duration_seconds, int):
+            return None
+        if duration_seconds <= 0:
+            return None
+        rate = self.per_second.get((resolution or "").strip().lower())
+        if rate is None:
+            return None
+        if generate_audio:
+            if self.audio_per_second is None:
+                return None
+            rate = rate + self.audio_per_second
+        return (rate * Decimal(duration_seconds)).quantize(CLIP_PRICE_QUANTUM, rounding=ROUND_HALF_UP)

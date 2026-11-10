@@ -12,7 +12,7 @@ from decimal import Decimal
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-from .types import ModelPricing
+from .types import ModelPricing, ClipPricing
 
 
 class PricingProvider(ABC):
@@ -91,6 +91,29 @@ class PricingProvider(ABC):
         """
         pass
     
+    async def get_clip_pricing(
+        self,
+        model_name: Optional[str] = None,
+        model_id: Optional[str] = None,
+        db: Optional["AsyncSession"] = None,
+    ) -> Optional[ClipPricing]:
+        """
+        Get per-clip (video) pricing for a model.
+
+        Exact key match only: a wrong video price costs real money, so there is
+        no fuzzy match and no default. The base implementation prices nothing,
+        so providers that do not override it fail closed.
+
+        Args:
+            model_name: Human-readable model name
+            model_id: Hex32 blockchain model identifier
+            db: Optional database session
+
+        Returns:
+            ClipPricing if the model is priced for video, None otherwise
+        """
+        return None
+
     async def supports_model(
         self,
         model_name: Optional[str] = None,
