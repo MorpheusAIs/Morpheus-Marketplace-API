@@ -65,6 +65,11 @@ class CreditLedger(Base):
     tokens_total = Column(Integer, nullable=True)
     input_price_per_million = Column(Numeric(20, 8), nullable=True)
     output_price_per_million = Column(Numeric(20, 8), nullable=True)
+    # Unit-priced usage (video clips billed per second); null for token usage
+    unit_type = Column(TEXT, nullable=True)  # e.g. "video_second"
+    units = Column(Numeric(20, 6), nullable=True)
+    unit_price = Column(Numeric(20, 8), nullable=True)
+    usage_metadata = Column(JSONB, nullable=True)  # Server-side only (resolved params, bid, provider)
     failure_code = Column(TEXT, nullable=True)
     failure_reason = Column(TEXT, nullable=True)
     description = Column(TEXT, nullable=True)

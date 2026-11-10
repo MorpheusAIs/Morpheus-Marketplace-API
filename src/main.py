@@ -16,10 +16,11 @@ import socket
 import copy
 import platform
 
-from src.api.v1 import models, chat, auth, chat_history, embeddings, audio, billing, billing_admin, webhooks, wallet
+from src.api.v1 import models, chat, auth, chat_history, embeddings, audio, videos, billing, billing_admin, webhooks, wallet
 from src.api.v1.chat.chat_exceptions import ChatError
 from src.api.v1.chat.request_translation import translation_gate_headers
 from src.core.model_errors import ModelRoutingError
+from src.services.video.errors import VideoError
 from src.services import session_routing_service
 from src.utils.error_sanitizer import sanitize_error_message
 from src.services.staking_service import staking_service
@@ -47,6 +48,7 @@ APP_VERSION = get_version()
 # Handles to long-lived background tasks so they can be cancelled on shutdown
 _staking_sync_task = None
 _hold_reconciliation_task = None
+_video_job_sweep_task = None
 
 # Using our production-ready fixed route class
 app = FastAPI(
@@ -205,6 +207,12 @@ async def model_routing_error_handler(request: Request, exc: ModelRoutingError):
     )
 
 
+@app.exception_handler(VideoError)
+async def video_error_handler(request: Request, exc: VideoError):
+    """/v1/videos errors: the {"error": {...}} body, without chat's translation headers."""
+    return exc.to_response()
+
+
 # Error handler for OpenAI-compatible error responses
 @app.exception_handler(Exception)
 async def openai_exception_handler(request: Request, exc: Exception):
@@ -352,6 +360,58 @@ async def hold_reconciliation_loop():
             )
 
 
+async def video_job_sweep_loop():
+    """
+    Background task that follows video jobs to the end.
+
+    Every VIDEO_JOB_POLL_INTERVAL_SECONDS, on the replica that wins the
+    advisory lock: refresh queued / in_progress jobs from the node (settle
+    or void their holds), fail jobs that never reached the node, release
+    holds stranded on finished jobs, and last retry session closes that did
+    not go through.
+    """
+    from src.db.database import advisory_xact_lock
+    from src.services.video import jobs as video_jobs
+    import traceback
+
+    sweep_logger = get_core_logger().bind(component="video_job_sweep")
+    interval = settings.VIDEO_JOB_POLL_INTERVAL_SECONDS
+
+    sweep_logger.info(
+        "Starting video job sweep loop",
+        interval_seconds=interval,
+        max_age_seconds=settings.VIDEO_JOB_MAX_AGE_SECONDS,
+        event_type="video_job_sweep_start",
+    )
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with advisory_xact_lock("video_job_sweep") as is_leader:
+                if not is_leader:
+                    sweep_logger.debug(
+                        "Skipping video job sweep - another replica holds the leader lock",
+                        event_type="video_job_sweep_skipped_not_leader",
+                    )
+                    continue
+                summary = await video_jobs.sweep()
+
+            if (summary["interrupted"] or summary["sessions_closed"]
+                    or summary["holds_released"] or summary["errors"]):
+                sweep_logger.info(
+                    "Video job sweep completed",
+                    **summary,
+                    event_type="video_job_sweep_complete",
+                )
+        except Exception as e:
+            sweep_logger.error(
+                "Error in video job sweep loop",
+                error=str(e),
+                traceback=traceback.format_exc(),
+                event_type="video_job_sweep_error",
+            )
+
+
 @app.on_event("startup")
 async def startup_event():
     """
@@ -460,6 +520,20 @@ async def startup_event():
                     event_type="hold_reconciliation_task_error")
         logger.warning("Continuing startup without hold reconciliation")
     
+    # Start the video job sweeper (node status, settle/void, session closes).
+    # It runs even with VIDEO_JOBS_ENABLED=false so submitted clips still end.
+    try:
+        global _video_job_sweep_task
+        _video_job_sweep_task = asyncio.create_task(video_job_sweep_loop())
+        logger.info("Started background task for video job sweep",
+                   interval_seconds=settings.VIDEO_JOB_POLL_INTERVAL_SECONDS,
+                   event_type="video_job_sweep_task_start")
+    except Exception as e:
+        logger.error("Failed to start video job sweep task",
+                    error=str(e),
+                    event_type="video_job_sweep_task_error")
+        logger.warning("Continuing startup without video job sweep")
+    
     # Initialize rate limiting service
     if settings.RATE_LIMIT_ENABLED:
         try:
@@ -517,6 +591,7 @@ async def shutdown_event():
     for task_name, task in (
         ("staking_sync", _staking_sync_task),
         ("hold_reconciliation", _hold_reconciliation_task),
+        ("video_job_sweep", _video_job_sweep_task),
     ):
         if task is None:
             continue
@@ -532,6 +607,19 @@ async def shutdown_event():
         else:
             logger.info("Background task stopped", task=task_name,
                        event_type="background_task_stopped")
+    
+    # Let detached video submits and session closes finish before the HTTP
+    # client and the DB engine go. What is still running after the drain is
+    # cancelled: the sweeper fails a cut submit, a cut close goes back to OPEN.
+    try:
+        from src.services.video import jobs as video_jobs
+        cancelled = await video_jobs.drain_background_tasks()
+        logger.info("Video background tasks drained",
+                    cancelled=cancelled,
+                    event_type="video_background_tasks_drained")
+    except Exception as e:
+        logger.warning("Error draining video background tasks", error=str(e),
+                       event_type="video_background_tasks_drain_error")
     
     # Close rate limiting service
     try:
@@ -655,6 +743,7 @@ app.include_router(chat, prefix=f"{settings.API_V1_STR}/chat")
 app.include_router(chat_history, prefix=f"{settings.API_V1_STR}/chat-history")
 app.include_router(embeddings, prefix=f"{settings.API_V1_STR}")
 app.include_router(audio, prefix=f"{settings.API_V1_STR}")
+app.include_router(videos, prefix=f"{settings.API_V1_STR}")
 app.include_router(billing, prefix=f"{settings.API_V1_STR}/billing")
 app.include_router(billing_admin, prefix=f"{settings.API_V1_STR}/billing")
 app.include_router(webhooks, prefix=f"{settings.API_V1_STR}/webhooks")
