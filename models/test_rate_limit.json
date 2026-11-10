@@ -71,6 +71,17 @@
       ],
       "priority": 100,
       "description": "Large models with conservative limits"
+    },
+    {
+      "name": "video",
+      "rpm": 5,
+      "tpm": 0,
+      "models": [
+        "seedance-2.0",
+        "seedance-2.5"
+      ],
+      "priority": 30,
+      "description": "Video models: each request starts a clip and opens an on-chain session (no token limit). Exact names only: seedance-2.0:beta is a chat model."
     }
   ]
 }

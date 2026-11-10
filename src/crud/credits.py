@@ -17,6 +17,9 @@ from src.core.logging_config import get_core_logger
 
 logger = get_core_logger()
 
+# Ledger endpoint of video clip holds; owned by the video job sweeper
+VIDEO_JOBS_ENDPOINT = "/v1/videos"
+
 
 def _normalize_datetime(dt: Optional[datetime]) -> Optional[datetime]:
     if dt is None:
@@ -327,6 +330,26 @@ async def reconcile_pending_holds(db: AsyncSession, user_id: int) -> CreditAccou
     return balance
 
 
+async def get_staking_reset_at(
+    db: AsyncSession, user_id: int, refresh_date: date
+) -> Optional[datetime]:
+    """
+    When the staking reset of *refresh_date* ran: the created_at of the first
+    staking_refresh ledger entry at or after that day's midnight.
+
+    None when that reset wrote no entry (the daily sync skips it for a zero
+    daily amount).
+    """
+    result = await db.execute(
+        select(func.min(CreditLedger.created_at)).where(
+            CreditLedger.user_id == user_id,
+            CreditLedger.entry_type == LedgerEntryType.staking_refresh,
+            CreditLedger.created_at >= datetime.combine(refresh_date, datetime.min.time()),
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 async def reconcile_all_balances(db: AsyncSession, user_id: int) -> CreditAccountBalance:
     """
     Full reconciliation of paid_pending_holds AND staking_available pending holds
@@ -383,6 +406,10 @@ async def void_stale_holds(
     """
     Void all usage_hold entries that have been pending longer than *max_age_seconds*.
 
+    Video clip holds (endpoint '/v1/videos') are skipped: a clip legitimately
+    stays held for minutes to hours, and the video job sweeper voids or
+    settles them itself.
+
     For each voided hold the amounts are zeroed out.  The caller must run
     ``reconcile_all_balances`` for each affected user_id afterwards to fix the
     balance cache.
@@ -399,6 +426,7 @@ async def void_stale_holds(
             CreditLedger.entry_type == LedgerEntryType.usage_hold,
             CreditLedger.status == LedgerStatus.pending,
             CreditLedger.created_at < cutoff,
+            CreditLedger.endpoint.is_distinct_from(VIDEO_JOBS_ENDPOINT),
         )
     )
     rows = (await db.execute(stale_query)).fetchall()
@@ -530,6 +558,10 @@ async def create_ledger_entry(
     tokens_total: Optional[int] = None,
     input_price_per_million: Optional[Decimal] = None,
     output_price_per_million: Optional[Decimal] = None,
+    unit_type: Optional[str] = None,
+    units: Optional[Decimal] = None,
+    unit_price: Optional[Decimal] = None,
+    usage_metadata: Optional[dict] = None,
     failure_code: Optional[str] = None,
     failure_reason: Optional[str] = None,
     description: Optional[str] = None,
@@ -546,6 +578,8 @@ async def create_ledger_entry(
     Args:
         entry_id: Optional pre-generated UUID for the entry. If not provided, one is generated.
         idempotency_key: Optional key for deduplication (used for Stripe/Coinbase purchases).
+        unit_type / units / unit_price: Unit-priced usage (e.g. "video_second"); null for tokens.
+        usage_metadata: Server-side usage details (stored as JSONB, not exposed by the API).
         payment_source: Payment provider source (e.g., "stripe", "coinbase", "manual").
         external_transaction_id: Primary transaction ID from the payment provider (indexed for lookups).
         payment_metadata: Provider-specific metadata as a dict (stored as JSONB).
@@ -574,6 +608,10 @@ async def create_ledger_entry(
         tokens_total=tokens_total,
         input_price_per_million=input_price_per_million,
         output_price_per_million=output_price_per_million,
+        unit_type=unit_type,
+        units=units,
+        unit_price=unit_price,
+        usage_metadata=usage_metadata,
         failure_code=failure_code,
         failure_reason=failure_reason,
         description=description,

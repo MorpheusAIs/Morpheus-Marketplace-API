@@ -172,6 +172,9 @@ class Settings(BaseSettings):
     PROXY_ROUTER_PASSWORD: str = Field(default=os.getenv("PROXY_ROUTER_PASSWORD", ""))
     PROXY_ROUTER_CHAT_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_CHAT_TIMEOUT", "300.0")))
     PROXY_ROUTER_STREAM_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_STREAM_TIMEOUT", "300.0")))
+    # Video job submit (POST v1/video/jobs) is sent once; the node itself
+    # retries the provider (about 2 x 60 s plus TEE attestation worst case).
+    PROXY_ROUTER_VIDEO_SUBMIT_TIMEOUT: float = Field(default=float(os.getenv("PROXY_ROUTER_VIDEO_SUBMIT_TIMEOUT", "300.0")))
     CHAT_FAILOVER_ENABLED: bool = Field(default=os.getenv("CHAT_FAILOVER_ENABLED", "true").lower() == "true")
     REQUEST_TRANSLATION_MODE: str = Field(default=os.getenv("REQUEST_TRANSLATION_MODE", "header"))
     REQUEST_TRANSLATION_HEADER: str = Field(default=os.getenv("REQUEST_TRANSLATION_HEADER", "X-Morpheus-Translate"))
@@ -450,6 +453,16 @@ class Settings(BaseSettings):
     HOLD_RECONCILIATION_INTERVAL_SECONDS: int = Field(default=int(os.getenv("HOLD_RECONCILIATION_INTERVAL_SECONDS", "600")))
     # Maximum age of a pending hold before it is auto-voided (seconds).  Default: 3600s / 60 min
     HOLD_MAX_PENDING_SECONDS: int = Field(default=int(os.getenv("HOLD_MAX_PENDING_SECONDS", "3600")))
+    
+    # Video Generation Jobs (/v1/videos)
+    # Kill switch: false answers 410 video_disabled to POST /v1/videos; reads stay
+    # open so clips already submitted can still be fetched.
+    # The sweeper keeps running so jobs already submitted still settle or void.
+    VIDEO_JOBS_ENABLED: bool = Field(default=os.getenv("VIDEO_JOBS_ENABLED", "true").lower() == "true")
+    # Interval between video job sweeps (node status reads, stuck submits, session close retries)
+    VIDEO_JOB_POLL_INTERVAL_SECONDS: int = Field(default=int(os.getenv("VIDEO_JOB_POLL_INTERVAL_SECONDS", "20")))
+    # A clip with no terminal state after this many seconds fails as "timeout" and its hold is voided
+    VIDEO_JOB_MAX_AGE_SECONDS: int = Field(default=int(os.getenv("VIDEO_JOB_MAX_AGE_SECONDS", "21600")))
     
     # Rate Limiting Settings
     # Enable/disable rate limiting globally
