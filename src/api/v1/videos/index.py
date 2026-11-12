@@ -7,7 +7,10 @@ OpenAI Videos compatible endpoints, extended with Morpheus fields.
   the node continue in the background; a failure there shows on GET.
   Idempotency-Key: a retried POST answers with the first video, no new hold.
 - GET /videos, GET /videos/{video_id}: the caller's jobs only.
-- GET /videos/{video_id}/content: 307 to the vendor's link (no proxying).
+- GET /videos/{video_id}/content: 307 to the vendor's link (no proxying), or
+  with redirect=false the link as JSON, for browsers: the vendor's storage
+  sends no CORS headers, so a page cannot read the clip through the redirect
+  but can play the link in <video src>.
 
 Billing: a clip is priced per second by resolution (plus audio), held when
 submitted, charged when it completes and voided when it fails, expires or
@@ -220,6 +223,14 @@ def _list_order(value: Optional[str]) -> str:
     return order
 
 
+def _content_redirect(value: Optional[str]) -> bool:
+    """/content redirect flag, parsed here so a bad value is a 400 in the {error} shape."""
+    text = (value or "true").strip().lower()
+    if text not in ("true", "false", "1", "0"):
+        raise VideoParamError("redirect must be true or false", "redirect")
+    return text in ("true", "1")
+
+
 @router.post(
     "/videos",
     response_model=None,
@@ -358,6 +369,7 @@ async def retrieve_video(
     "/videos/{video_id}/content",
     response_model=None,
     responses={
+        200: {"description": "With redirect=false: {object, id, variant, url, expires_at}"},
         307: {"description": "Redirect to the clip at the vendor (a short-lived link)"},
         400: {"description": "Unsupported variant (error.type unsupported_variant)"},
         404: {"description": "No such video for this caller (error.type not_found)"},
@@ -368,10 +380,11 @@ async def retrieve_video(
 async def download_video_content(
     video_id: str,
     variant: str = Query("video", description="Only video is available"),
+    redirect: Optional[str] = Query(None, description="false: answer the link as JSON instead of a 307 (default true)"),
     user: User = Depends(get_api_key_user),
     db_api_key: APIKey = Depends(get_current_api_key),
 ):
-    """Download a completed clip: a 307 to the vendor's link, which is not proxied."""
+    """Download a completed clip: a 307 to the vendor's link, which is not proxied, or the link as JSON."""
     video_logger = logger.bind(endpoint="download_video_content", user_id=user.id, video_id=video_id)
     job = await video_jobs.get_job_for_user(video_id, user.id)
     if job is None:
@@ -379,6 +392,7 @@ async def download_video_content(
     if variant != "video":
         raise VideoError(400, "unsupported_variant", "Only the video variant is available",
                          details={"param": "variant"})
+    as_redirect = _content_redirect(redirect)
 
     job = await _refreshed(job, video_logger)
     if job.status != VideoJobStatus.completed.value:
@@ -390,9 +404,22 @@ async def download_video_content(
         raise VideoError(410, "video_expired", "The video download link has expired")
 
     # Never log the link: it is a vendor bearer URL
+    headers = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+    if not as_redirect:
+        video_logger.info("Returning video content link", event_type="video_content_link")
+        return JSONResponse(
+            content={
+                "object": "video.content",
+                "id": job.id,
+                "variant": variant,
+                "url": job.video_url,
+                "expires_at": to_video_object(job)["expires_at"],
+            },
+            headers=headers,
+        )
     video_logger.info("Redirecting to video content", event_type="video_content_redirect")
     return RedirectResponse(
         job.video_url,
         status_code=307,
-        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        headers=headers,
     )
