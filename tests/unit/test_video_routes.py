@@ -105,39 +105,47 @@ def test_only_the_owner_sees_a_video(path, caller, expected_status):
     if expected_status == 404:
         assert response.json()["error"]["type"] == "not_found"
     if expected_status != 307:
-        # The bearer link only ever leaves through the owner's /content redirect
+        # The bearer link only ever leaves through the owner's /content
         assert VIDEO_URL not in response.text
         assert "location" not in response.headers
 
 
 @pytest.mark.parametrize(
-    "row_values, expected_status, error_type",
+    "row_values, query, expected_status, error_type",
     [
         # Still rendering on the node
         (dict(status="queued", billing_state="held", video_url=None, expires_at=None,
-              completed_at=None, session_closed_at=None), 409, "video_not_ready"),
+              completed_at=None, session_closed_at=None), "", 409, "video_not_ready"),
         (dict(status="failed", billing_state="voided", video_url=None, expires_at=None,
-              completed_at=None, error_code="job_failed"), 409, "video_not_ready"),
-        (dict(expires_at=_utcnow() - timedelta(minutes=1)), 410, "video_expired"),
-        (dict(), 307, None),
+              completed_at=None, error_code="job_failed"), "", 409, "video_not_ready"),
+        (dict(expires_at=_utcnow() - timedelta(minutes=1)), "?redirect=false", 410, "video_expired"),
+        (dict(), "", 307, None),
+        # For browsers: the vendor's storage has no CORS, so the link is played directly
+        (dict(), "?redirect=false", 200, None),
+        # A bad flag answers in the {error} shape, not FastAPI's 422
+        (dict(), "?redirect=nope", 400, "invalid_request"),
     ],
 )
-def test_content_download(row_values, expected_status, error_type):
+def test_content_download(row_values, query, expected_status, error_type):
     row = _row(**row_values)
     db = FakeDb(row)
     with patch.object(jobs, "get_db", db.get_db), \
             patch("src.services.proxy_router_service.getVideoJob",
                   AsyncMock(return_value={"status": "running"})):
-        response = _client(OWNER).get(f"/videos/{row.id}/content")
+        response = _client(OWNER).get(f"/videos/{row.id}/content{query}")
 
     assert response.status_code == expected_status
     if error_type:
         assert response.json()["error"]["type"] == error_type
         assert VIDEO_URL not in response.text
-    else:
+        return
+    if expected_status == 307:
         assert response.headers["location"] == VIDEO_URL
-        assert response.headers["cache-control"] == "no-store"
-        assert response.headers["referrer-policy"] == "no-referrer"
+    else:
+        assert "location" not in response.headers
+        assert response.json()["url"] == VIDEO_URL
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["referrer-policy"] == "no-referrer"
 
 
 @pytest.mark.parametrize(
