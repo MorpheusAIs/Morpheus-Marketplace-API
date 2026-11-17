@@ -27,46 +27,14 @@ from ....schemas.billing import (
     LedgerStatusEnum,
     LedgerEntryTypeEnum,
 )
+from ....core.client_ip import resolve_client_ip
 from ....core.logging_config import get_api_logger
 from ....utils.error_sanitizer import sanitize_error_message
 
-import ipaddress
 
 logger = get_api_logger()
 
 router = APIRouter(tags=["Billing"])
-
-
-def _resolve_client_ip(request: Request) -> str:
-    """Resolve the client IP without trusting caller-controlled headers.
-
-    The first X-Forwarded-For hop is whatever the client sent, so it must never
-    feed abuse controls (the signup-bonus per-IP guard). Instead:
-
-    - Only consult X-Forwarded-For when the direct peer is a private/loopback
-      address, i.e. the request actually came through our load balancer.
-    - Use the RIGHTMOST hop, which was appended by the trusted proxy itself;
-      anything a client prepends gets pushed left and ignored.
-    - Otherwise (direct connection), use the socket peer address.
-    """
-    peer_ip = request.client.host if request.client else ""
-
-    peer_is_trusted_proxy = False
-    if peer_ip:
-        try:
-            addr = ipaddress.ip_address(peer_ip)
-            peer_is_trusted_proxy = addr.is_private or addr.is_loopback
-        except ValueError:
-            pass
-
-    if peer_is_trusted_proxy:
-        forwarded_for = request.headers.get("X-Forwarded-For", "")
-        if forwarded_for:
-            hops = [hop.strip() for hop in forwarded_for.split(",") if hop.strip()]
-            if hops:
-                return hops[-1]
-
-    return peer_ip or "unknown"
 
 
 # === Balance Endpoint ===
@@ -88,7 +56,7 @@ async def get_balance(
     - total_available: Sum of all available credits
     """
     try:
-        client_ip = _resolve_client_ip(request)
+        client_ip = resolve_client_ip(request)
         balance = await billing_service.get_balance(db, current_user.id, client_ip=client_ip)
         return balance
     except Exception as e:

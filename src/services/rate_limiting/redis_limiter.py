@@ -456,6 +456,59 @@ class RedisRateLimiter:
             )
             return False
 
+    # ------------------------------------------------------------------ #
+    # Distinct counting (used by the API key address monitor)
+    # ------------------------------------------------------------------ #
+
+    async def add_distinct(self, key: str, member: str, ttl_seconds: int) -> Optional[int]:
+        """
+        Add ``member`` to the HyperLogLog at ``key`` and return its approximate
+        cardinality. One round trip. Returns None when Redis is degraded, so
+        the caller can skip instead of acting on a wrong count.
+        """
+        try:
+            async with self._get_redis() as redis:
+                if redis is None:
+                    return None
+
+                pipe = redis.pipeline()
+                pipe.pfadd(key, member)
+                pipe.pfcount(key)
+                pipe.expire(key, ttl_seconds)
+                _, count, _ = await pipe.execute()
+                return int(count)
+
+        except Exception as e:
+            self._note_op_error(e)
+            logger.debug(
+                "Distinct count failed",
+                error=str(e),
+                event_type="add_distinct_error",
+            )
+            return None
+
+    async def set_if_absent(self, key: str, ttl_seconds: int) -> Optional[bool]:
+        """
+        Set a marker key only if it does not exist. Returns True when this call
+        created it, False when it was already there, None when Redis is degraded.
+        """
+        try:
+            async with self._get_redis() as redis:
+                if redis is None:
+                    return None
+
+                created = await redis.set(key, "1", nx=True, ex=ttl_seconds)
+                return bool(created)
+
+        except Exception as e:
+            self._note_op_error(e)
+            logger.debug(
+                "Marker set failed",
+                error=str(e),
+                event_type="set_if_absent_error",
+            )
+            return None
+
     async def health_check(self) -> dict:
         """
         Check Redis health status. Returns fast (no dial) while the circuit is
