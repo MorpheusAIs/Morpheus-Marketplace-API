@@ -32,4 +32,4 @@ Out of scope (report those to their own projects):
 
 ## Supported versions
 
-Security fixes land on `dev`, then maintainers promote them through `test` and `stg` to `main`. Production is the `main` image. Older image tags are not maintained as separate release lines.
+Security fixes land on `dev`, then maintainers promote them through `test` to `main`. Production is the `main` image. Older image tags are not maintained as separate release lines.

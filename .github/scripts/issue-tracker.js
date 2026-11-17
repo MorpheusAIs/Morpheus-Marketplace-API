@@ -1,16 +1,10 @@
-// Long-lived branches a promote or release pull request may target, and the
-// project status an issue gets when its change lands on each branch. A repo
-// that has no `test` or `stg` branch never sees those bases.
-const PROMOTE_BASES = ['test', 'stg', 'main']
-const STATUS_BY_BASE = { dev: 'On Dev', test: 'On Test', stg: 'On Stg', main: 'Shipped' }
-
 module.exports.main = async function main({ github, context, core }) {
   const owner = context.repo.owner
   const repo = context.repo.repo
   const pr = context.payload.pull_request
   const base = pr.base.ref
   const body = pr.body || ''
-  const promote = /^(promote:|release\b)/i.test(pr.title || '') && PROMOTE_BASES.includes(base)
+  const promote = /^(promote:|release\b)/i.test(pr.title || '') && (base === 'test' || base === 'main')
 
   if (context.payload.action !== 'closed') {
     await syncNeedsIssueLabel({ github, context, core, owner, repo, pr, base, body, promote })
@@ -39,7 +33,7 @@ module.exports.main = async function main({ github, context, core }) {
       if (isPromoteOrReleaseMessage(message)) continue
       for (const n of refsIn(message)) refs.add(n)
     }
-    const status = STATUS_BY_BASE[base] || null
+    const status = base === 'main' ? 'Shipped' : base === 'test' ? 'On Test' : base === 'dev' ? 'On Dev' : null
     for (const n of refs) {
       if (base === 'main') {
         await note(github, core, owner, repo, n, `Shipped on \`main\` in #${pr.number}.`)
