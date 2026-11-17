@@ -16,7 +16,7 @@ name: Morpheus-Mktplc-API-CI-CD
 #   • Database rollback on deployment failures
 #   • Git tags only created after successful deployment (safe to re-run on failure)
 
-# 2026-02-12: Added stg branch support again
+# 2026-11-17: Removed stg. The path is dev -> test -> main.
 
 on:
   workflow_dispatch:
@@ -39,7 +39,6 @@ on:
     branches:
       - main
       - test
-      - stg
       - dev
       - cicd/*
 
@@ -63,7 +62,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/stg' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/cicd/'))) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/cicd/'))) ||
         (github.event_name == 'workflow_dispatch') 
       )
     outputs:
@@ -130,7 +129,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/stg')) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/dev')) ||
         (github.event_name == 'workflow_dispatch') 
       )
     runs-on: ubuntu-latest
@@ -217,7 +216,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/stg')) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')) ||
         (github.event_name == 'workflow_dispatch' && github.event.inputs.create_deployment == 'true')
       )
     needs:
@@ -251,9 +250,6 @@ jobs:
           if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV_TAG="dev-latest"
             echo "🚀 Building for development environment"
-          elif [ "${{ github.ref_name }}" == "stg" ]; then
-            ENV_TAG="stg-latest"
-            echo "🚀 Building for staging environment"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV_TAG="prd-latest"
             echo "🚀 Building for production environment"
@@ -300,14 +296,14 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/stg' || startsWith(github.ref, 'refs/heads/cicd/'))) ||
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || startsWith(github.ref, 'refs/heads/cicd/'))) ||
         (github.event_name == 'workflow_dispatch' && github.event.inputs.create_deployment == 'true')
       )
     needs:
       - Generate-Tag
       - Build-and-Push-Container
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name == 'main' && 'main' || (github.ref_name == 'stg' && 'stg' || 'test') }}
+    environment: ${{ github.ref_name == 'main' && 'main' || 'test' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -347,8 +343,6 @@ jobs:
           # Determine environment from branch
           if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
-          elif [ "${{ github.ref_name }}" == "stg" ]; then
-            ENV="stg"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
           else
@@ -513,8 +507,6 @@ jobs:
           # Determine environment based on branch
           if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
-          elif [ "${{ github.ref_name }}" == "stg" ]; then
-            ENV="stg"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
           else
@@ -631,8 +623,6 @@ jobs:
           # Determine environment
           if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
-          elif [ "${{ github.ref_name }}" == "stg" ]; then
-            ENV="stg"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
           else
@@ -678,8 +668,6 @@ jobs:
           # Determine environment and health endpoint
           if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             HEALTH_ENDPOINT="https://api.dev.mor.org/health"
-          elif [ "${{ github.ref_name }}" == "stg" ]; then
-            HEALTH_ENDPOINT="https://api.stg.mor.org/health"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             HEALTH_ENDPOINT="https://api.mor.org/health"
           else
@@ -782,8 +770,6 @@ jobs:
           # Determine environment from branch
           if [ "${{ github.ref_name }}" == "test" ] || [[ "${{ github.ref_name }}" == cicd/* ]]; then
             ENV="dev"
-          elif [ "${{ github.ref_name }}" == "stg" ]; then
-            ENV="stg"
           elif [ "${{ github.ref_name }}" == "main" ]; then
             ENV="prd"
           else
@@ -873,7 +859,7 @@ jobs:
     if: |
       github.repository == 'MorpheusAIs/Morpheus-Marketplace-API' &&
       github.event_name == 'push' && 
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/stg')
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test')
     needs:
       - Generate-Tag
       - Deploy-to-ECS

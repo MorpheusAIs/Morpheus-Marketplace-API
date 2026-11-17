@@ -54,7 +54,7 @@ Local API without external dependencies: `./scripts/test_local.sh` (see the READ
 
 ## What does not start a build
 
-The workflow in `.github/workflows/build.yml` runs on push to `dev`, `test`, `stg`, `main`, and `cicd/*` only when the push touches one of:
+The workflow in `.github/workflows/build.yml` runs on push to `dev`, `test`, `main`, and `cicd/*` only when the push touches one of:
 
 - `.github/**`
 - `src/**`
