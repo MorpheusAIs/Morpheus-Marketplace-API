@@ -22,7 +22,7 @@ We will acknowledge the report and follow up with a fix path. Please give us tim
 In scope:
 
 - This repository
-- The hosted API it deploys: `api.mor.org`, `api.stg.mor.org`, and `api.dev.mor.org`
+- The hosted API it deploys: `api.mor.org` and `api.dev.mor.org`
 
 Out of scope (report those to their own projects):
 
