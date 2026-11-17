@@ -39,6 +39,7 @@ from ....services.rate_limiting import (
     RateLimitStatus,
 )
 from ....schemas.billing import UsageHoldRequest, UsageFinalizeRequest, UsageVoidRequest
+from ....core.client_ip import resolve_client_ip, resolve_user_agent
 from ....core.config import settings
 from ....core.logging_config import get_api_logger
 from ....schemas import openai as openai_schemas
@@ -131,6 +132,9 @@ async def create_chat_completion(
         "New chat completion request received",
         model=request_data.model,
         stream_requested=request_data.stream,
+        api_key_id=db_api_key.id,
+        client_ip=resolve_client_ip(request),
+        user_agent=resolve_user_agent(request),
         event_type="chat_completion_request_start",
     )
     

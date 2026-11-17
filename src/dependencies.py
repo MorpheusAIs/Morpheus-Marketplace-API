@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import asyncio
 from datetime import datetime
 
-from fastapi import Depends, HTTPException, status, Security
+from fastapi import Depends, HTTPException, Request, status, Security
 from fastapi.security import HTTPBearer, APIKeyHeader, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,12 +12,14 @@ from sqlalchemy import select
 from jose import jwt, jwk
 import httpx
 
+from src.core.client_ip import resolve_client_ip, resolve_user_agent
 from src.core.config import settings
 from src.core.security import verify_api_key
 from src.crud import user as user_crud
 from src.crud import api_key as api_key_crud
 from src.db.database import get_db, get_db_session
 from src.db.models import User, APIKey
+from src.services.api_key_address_monitor import api_key_address_monitor
 from src.services.cache_service import cache_service
 from src.core.logging_config import get_auth_logger
 
@@ -307,6 +309,7 @@ class APIKeyAuth:
 # ---------------------------------------------------------------------------
 
 async def get_api_key_auth(
+    request: Request,
     api_key_str: str = Security(api_key_header),
 ) -> APIKeyAuth:
     """
@@ -320,7 +323,11 @@ async def get_api_key_auth(
     request, even when multiple route parameters depend on it via the thin
     wrappers ``get_api_key_user`` and ``get_current_api_key``.
 
+    On success it logs which address used which key (``api_key_request``) and
+    feeds the distinct-address monitor. The key itself is never logged.
+
     Args:
+        request: The incoming request, for the caller's address and user agent
         api_key_str: Raw Authorization header value ("Bearer sk-…" or "sk-…")
 
     Returns:
@@ -378,10 +385,13 @@ async def get_api_key_auth(
         # ── Single cache lookup ─────────────────────────────────────────
         cached_data = await cache_service.get("api_key", key_prefix)
         if cached_data:
-            return await _build_auth_from_cache(cached_data, api_key_str, key_prefix)
+            auth = await _build_auth_from_cache(cached_data, api_key_str, key_prefix)
+        else:
+            # ── Single DB fallback ──────────────────────────────────────
+            auth = await _build_auth_from_db(api_key_str, key_prefix)
 
-        # ── Single DB fallback ──────────────────────────────────────────
-        return await _build_auth_from_db(api_key_str, key_prefix)
+        _record_api_key_use(request, auth)
+        return auth
 
     except HTTPException:
         raise
@@ -393,6 +403,42 @@ async def get_api_key_auth(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Unexpected error validating API key"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Caller address logging
+# ---------------------------------------------------------------------------
+
+def _record_api_key_use(request: Request, auth: APIKeyAuth) -> None:
+    """
+    Log which address used which key and feed the distinct-address monitor.
+
+    Runs once per request that authenticates with an API key, whatever the
+    endpoint. Logs the key ID and its nine-character prefix, never the key.
+    Must not fail the request: any error here is logged and swallowed.
+    """
+    try:
+        if auth.api_key is None:
+            return
+        client_ip = resolve_client_ip(request)
+        auth_logger.info(
+            "API key request",
+            api_key_id=auth.api_key.id,
+            key_prefix=auth.api_key.key_prefix,
+            user_id=auth.user.id,
+            client_ip=client_ip,
+            user_agent=resolve_user_agent(request),
+            method=request.method,
+            path=request.url.path,
+            event_type="api_key_request",
+        )
+        api_key_address_monitor.note(auth.api_key.id, auth.user.id, client_ip)
+    except Exception as e:
+        auth_logger.warning(
+            "Could not record API key use",
+            error=str(e),
+            event_type="api_key_request_log_failed",
         )
 
 
@@ -658,6 +704,7 @@ async def get_current_api_key(
 # ---------------------------------------------------------------------------
 
 async def get_user_jwt_or_api_key(
+    request: Request,
     db: AsyncSession = Depends(get_db_session),
     token: Optional[HTTPAuthorizationCredentials] = Depends(oauth2_scheme_optional),
     api_key_str: Optional[str] = Security(api_key_header),
@@ -697,7 +744,7 @@ async def get_user_jwt_or_api_key(
         )
 
     if raw.startswith("sk-"):
-        auth = await get_api_key_auth(api_key_str=raw)
+        auth = await get_api_key_auth(request=request, api_key_str=raw)
         return auth.user
 
     return await get_current_user(db=db, token=token)

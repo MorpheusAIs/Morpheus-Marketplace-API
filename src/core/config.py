@@ -472,6 +472,12 @@ class Settings(BaseSettings):
     # unmetered. Default false preserves the availability-first behavior; enable
     # per environment where unthrottled cost amplification is the bigger risk.
     RATE_LIMIT_FAIL_CLOSED: bool = Field(default=os.getenv("RATE_LIMIT_FAIL_CLOSED", "false").lower() == "true")
+
+    # API key address monitor
+    # One log event (api_key_many_addresses) the first time a key is used from
+    # this many distinct caller addresses in a UTC day. It only reports; it
+    # never blocks or revokes. 0 turns it off.
+    API_KEY_ADDRESS_ALERT_THRESHOLD: int = Field(default=int(os.getenv("API_KEY_ADDRESS_ALERT_THRESHOLD", "20")))
     # Rate limit defaults and model groups are loaded from models/{env}_rate_limit.json
     # Model pricing is loaded from models/{env}_model_price.json
 
