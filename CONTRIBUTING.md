@@ -38,6 +38,19 @@ The branch named `test` deploys the AWS DEV environment. Production is `main` on
 
 Prefer commit titles with a conventional prefix: `feat:`, `fix:`, `docs:`, `chore:`.
 
+Promote and release pull requests are opened by maintainers:
+
+- Promote: `promote: <summary> (dev -> test)`, into `test`, `stg`, or `main`
+- Release into `main`: `Release vX.Y.Z — <themes>`
+
+## Issues
+
+File a bug, a feature request, or a docs correction with the issue forms. Questions are not tracked as issues; the API docs are at [apidocs.mor.org](https://apidocs.mor.org).
+
+An issue closes when the change is on `main` and production has deployed. The local rules and the setup checklist are in [`.ai-docs/issue-tracker.md`](.ai-docs/issue-tracker.md). Maintainers follow the practice in `Morpheus-Maintainer-Context` (`.ai-docs/how-we-work.md`).
+
+A feature or fix pull request targets `dev`. The body contains `Refs #123`, or the no-issue line for a chore, revert, or CI-only change. A promote pull request targets `test`, `stg`, or `main` and its title starts with `promote:`. A release pull request targets `main` and its title starts with `Release`. The **PR target** check fails any other pull request that does not target `dev`.
+
 ## Local checks
 
 Python 3.11 and Poetry.
