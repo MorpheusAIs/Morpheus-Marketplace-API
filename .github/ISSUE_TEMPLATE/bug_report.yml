@@ -1,0 +1,71 @@
+name: Bug report
+description: Something in the hosted API (api.mor.org) or this codebase is broken
+type: Bug
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - inference (chat, embeddings, audio, video)
+        - models
+        - sessions
+        - billing
+        - auth and keys
+        - docs
+        - not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - api.mor.org (production)
+        - api.dev.mor.org
+        - Local or self-hosted
+    validations:
+      required: true
+  - type: input
+    id: endpoint
+    attributes:
+      label: Endpoint
+      placeholder: POST /api/v1/chat/completions
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: The exact name from GET /api/v1/models, if the request names a model
+    validations:
+      required: false
+  - type: input
+    id: request_id
+    attributes:
+      label: Request ID
+      description: The X-Request-Id response header, if you have it
+    validations:
+      required: false
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Request and response
+      description: Remove API keys, tokens, and personal data before pasting
+    validations:
+      required: false

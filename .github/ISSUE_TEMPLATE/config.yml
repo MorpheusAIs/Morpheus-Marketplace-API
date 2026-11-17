@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: API docs
+    url: https://apidocs.mor.org
+    about: How to call the hosted API. Questions are not tracked as issues
+  - name: Report a security issue
+    url: https://github.com/MorpheusAIs/Morpheus-Marketplace-API/security/policy
+    about: Report a vulnerability privately. Do not open a public issue
+  - name: Web app
+    url: https://github.com/MorpheusAIs/Morpheus-Marketplace-APP/issues/new/choose
+    about: Bugs and requests for app.mor.org belong on Morpheus-Marketplace-APP
+  - name: Node software
+    url: https://github.com/MorpheusAIs/Morpheus-Lumerin-Node/issues/new/choose
+    about: Bugs and requests for the proxy-router, MorpheusUI, and the CLI belong on Morpheus-Lumerin-Node
