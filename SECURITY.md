@@ -22,7 +22,7 @@ We will acknowledge the report and follow up with a fix path. Please give us tim
 In scope:
 
 - This repository
-- The hosted API it deploys: `api.mor.org`, `api.stg.mor.org`, and `api.dev.mor.org`
+- The hosted API it deploys: `api.mor.org` and `api.dev.mor.org`
 
 Out of scope (report those to their own projects):
 
@@ -32,4 +32,4 @@ Out of scope (report those to their own projects):
 
 ## Supported versions
 
-Security fixes land on `dev`, then maintainers promote them through `test` and `stg` to `main`. Production is the `main` image. Older image tags are not maintained as separate release lines.
+Security fixes land on `dev`, then maintainers promote them through `test` to `main`. Production is the `main` image. Older image tags are not maintained as separate release lines.
