@@ -65,9 +65,20 @@ class ModelThinking(BaseModel):
     default: Optional[str] = Field(None, description="on, off or an effort level name; absent when unknown")
 
 
+class ModelVideoLimits(BaseModel):
+    """What every healthy bid's video guide accepts (POST /v1/videos); an absent or null field is unknown."""
+    min_seconds: Optional[int] = Field(None, description="Shortest clip in seconds")
+    max_seconds: Optional[int] = Field(None, description="Longest clip in seconds")
+    resolutions: Optional[List[str]] = Field(None, description="e.g. 480p, 720p, 1080p")
+    aspect_ratios: Optional[List[str]] = Field(None, description="e.g. 16:9, 9:16, 1:1, adaptive")
+    audio: bool = Field(False, description="generate_audio is offered")
+    image: bool = Field(False, description="A first frame (image_url or image_b64) is accepted")
+
+
 class MarketplaceModel(BaseModel):
     """A marketplace model row; capabilities, model_family and thinking come from the provider-spec cache
-    and are present only when every cached provider spec for the model agrees."""
+    and are present only when every cached provider spec for the model agrees. video is set on VIDEO
+    models with a healthy bid."""
     id: str
     blockchainID: str
     created: int = Field(..., description="Unix timestamp (seconds)")
@@ -76,6 +87,7 @@ class MarketplaceModel(BaseModel):
     capabilities: Optional[ModelCapabilities] = None
     model_family: Optional[str] = None
     thinking: Optional[ModelThinking] = None
+    video: Optional[ModelVideoLimits] = None
 
 
 class MarketplaceModelList(BaseModel):

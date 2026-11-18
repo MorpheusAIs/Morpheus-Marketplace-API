@@ -31,6 +31,9 @@ from .credits import (
 from .wallet_link import WalletLink
 from .wallet_nonce import WalletNonce, NONCE_TTL_SECONDS
 
+# Video models
+from .video_job import VideoJob, VideoJobStatus, VideoBillingState, VIDEO_JOB_TERMINAL_STATUSES
+
 # Export all models for easy importing
 __all__ = [
     # Base
@@ -55,4 +58,9 @@ __all__ = [
     "WalletLink",
     "WalletNonce",
     "NONCE_TTL_SECONDS",
+    # Video
+    "VideoJob",
+    "VideoJobStatus",
+    "VideoBillingState",
+    "VIDEO_JOB_TERMINAL_STATUSES",
 ]

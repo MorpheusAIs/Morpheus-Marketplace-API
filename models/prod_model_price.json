@@ -205,5 +205,9 @@
     "gemini-embedding-2-preview": { "input": "0.10", "output": "0.50" },
     "multilingual-e5-large": { "input": "0.10", "output": "0.50" },
     "nemotron-embed-vl-1b-v2": { "input": "0.10", "output": "0.50" }
+  },
+  "clip_prices": {
+    "seedance-2.0": { "per_second": { "480p": "0.05", "720p": "0.10", "1080p": "0.25" }, "audio_per_second": "0.02" },
+    "seedance-2.5": { "per_second": { "480p": "0.05", "720p": "0.10", "1080p": "0.25" }, "audio_per_second": "0.02" }
   }
 }

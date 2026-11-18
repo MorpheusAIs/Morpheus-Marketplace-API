@@ -7,6 +7,7 @@ from .chat.index import router as chat_router
 from .chat_history.index import router as chat_history_router
 from .embeddings.index import router as embeddings_router
 from .audio.index import router as audio_router
+from .videos.index import router as videos_router
 from .billing.index import router as billing_router
 from .billing.admin import admin_router as billing_admin_router
 from .billing.coinbase import coinbase_billing_router
@@ -26,6 +27,9 @@ embeddings.include_router(embeddings_router)
 
 audio = APIRouter()
 audio.include_router(audio_router)
+
+videos = APIRouter()
+videos.include_router(videos_router)
 
 # Wrap auth router in a router with our fixed route class
 auth = APIRouter()

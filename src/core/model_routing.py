@@ -7,6 +7,7 @@ from .model_errors import (
     ModelDeniedError,
     ModelNearMissError,
     ModelNotAllowlistedError,
+    ModelNotFoundError,
     ModelTypeMismatchError,
 )
 from .session_routing_policy import get_session_routing_policy
@@ -88,7 +89,13 @@ class ModelRouter:
     COMPATIBLE_MODEL_TYPES = {
         "LLM": {"LLM"},
         "EMBEDDINGS": {"EMBEDDING"},
+        "VIDEO": {"VIDEO"},
     }
+
+    # Request types that never fall back to a default model. A clip is priced
+    # and held for the model the caller named, so an empty or unknown name is
+    # a 400 (ModelNotFoundError), never a silent rewrite to the LLM default.
+    NO_DEFAULT_MODEL_TYPES = {"VIDEO"}
 
     def __init__(self):
         logger.info("Initialized ModelRouter with DirectModelService",
@@ -168,13 +175,23 @@ class ModelRouter:
             ModelTypeMismatchError: Model exists but is wrong type for the endpoint
             ModelNearMissError: Name not found, but close catalog matches exist
             ModelNotAllowlistedError: Resolved ID outside SESSION_ALLOWED_MODEL_IDS
+            ModelNotFoundError: Empty, unknown or unresolvable model for a
+                type in NO_DEFAULT_MODEL_TYPES (VIDEO)
         """
         # return "0xe086adc275c99e32bb10b0aff5e8bfc391aad18cbb184727a75b2569149425c6"
         logger.info("Getting target model for requested model",
                    requested_model=requested_model,
                    event_type="model_resolution_start",
                    model_type=type)
-        
+
+        no_default = type in self.NO_DEFAULT_MODEL_TYPES
+
+        if not requested_model and no_default:
+            logger.warning("No model specified for a request type without a default",
+                          requested_type=type,
+                          event_type="model_required")
+            raise ModelNotFoundError(requested_model=requested_model, requested_type=type)
+
         if not requested_model:
             logger.warning("No model specified, using default model",
                           default_model=DEFAULT_MODEL,
@@ -255,7 +272,8 @@ class ModelRouter:
             # Not found — if we have close matches, hard-fail with suggestions
             # so agents stop / alert instead of continuing on the default model.
             # True unknowns (no near miss) still soft-fallback for operability
-            # unless a curated allowlist is active (then 503, no silent rewrite).
+            # unless the type has no default (then 400) or a curated allowlist
+            # is active (then 503, no silent rewrite).
             logger.warning("Model not found in active models",
                           requested_model=requested_model,
                           aliased_model=aliased_model if alias_key else None,
@@ -269,6 +287,12 @@ class ModelRouter:
                 raise ModelNearMissError(
                     requested_model=requested_model,
                     suggestions=suggestions,
+                )
+
+            if no_default:
+                raise ModelNotFoundError(
+                    requested_model=requested_model,
+                    requested_type=type,
                 )
 
             if self._allowed_model_ids():
@@ -295,9 +319,20 @@ class ModelRouter:
             ModelNearMissError,
             ModelNotAllowlistedError,
             ModelDeniedError,
+            ModelNotFoundError,
         ):
             raise
         except Exception as e:
+            if no_default:
+                logger.error("Error resolving model for a request type without a default",
+                            requested_model=requested_model,
+                            requested_type=type,
+                            error=str(e),
+                            event_type="model_resolution_error")
+                raise ModelNotFoundError(
+                    requested_model=requested_model,
+                    requested_type=type,
+                ) from e
             logger.error("Error resolving model - using default fallback",
                         requested_model=requested_model,
                         error=str(e),

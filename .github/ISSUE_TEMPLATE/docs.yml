@@ -1,0 +1,27 @@
+name: Docs
+description: A wrong or missing page on apidocs.mor.org, or in this repository's docs
+type: Task
+labels:
+  - documentation
+  - needs-triage
+body:
+  - type: input
+    id: page
+    attributes:
+      label: Page
+      description: URL on apidocs.mor.org, or the path in this repository
+      placeholder: https://apidocs.mor.org
+    validations:
+      required: true
+  - type: textarea
+    id: wrong
+    attributes:
+      label: What is wrong or missing
+    validations:
+      required: true
+  - type: textarea
+    id: correction
+    attributes:
+      label: Suggested correction
+    validations:
+      required: false

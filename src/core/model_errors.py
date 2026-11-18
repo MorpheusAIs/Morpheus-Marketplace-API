@@ -50,10 +50,16 @@ class ModelTypeMismatchError(ModelRoutingError):
     status_code: int = 400
 
     def __post_init__(self):
-        endpoint_hint = {
-            "LLM": "use /v1/chat/completions with an LLM model",
-            "EMBEDDINGS": "use /v1/embeddings with an embedding model",
-        }.get(self.requested_type or "", "use the matching endpoint for this model type")
+        if self.model_type == "VIDEO" and self.requested_type != "VIDEO":
+            # A video model never serves chat or embeddings: point at the
+            # endpoint that can use it, not at another model of this type.
+            endpoint_hint = "use /v1/videos for video models"
+        else:
+            endpoint_hint = {
+                "LLM": "use /v1/chat/completions with an LLM model",
+                "EMBEDDINGS": "use /v1/embeddings with an embedding model",
+                "VIDEO": "use /v1/videos with a video model",
+            }.get(self.requested_type or "", "use the matching endpoint for this model type")
 
         self.message = (
             f"Model '{self.requested_model}' is type '{self.model_type or 'unknown'}' "
@@ -90,6 +96,36 @@ class ModelNearMissError(ModelRoutingError):
         self.details = {
             "requested_model": self.requested_model,
             "suggestions": list(self.suggestions),
+            "code": self.code,
+        }
+        super().__post_init__()
+
+
+@dataclass
+class ModelNotFoundError(ModelRoutingError):
+    """Model missing or unknown for a request type that has no default model."""
+
+    requested_model: Optional[str] = None
+    requested_type: Optional[str] = None
+    message: str = "Model not found"
+    error_type: str = "model_not_found"
+    code: str = "model_not_found"
+    status_code: int = 400
+
+    def __post_init__(self):
+        if self.requested_model:
+            self.message = (
+                f"Model '{self.requested_model}' was not found in active models. "
+                "List the available models with GET /v1/models."
+            )
+        else:
+            self.message = (
+                f"A model is required for '{self.requested_type}' requests: there is no default. "
+                "List the available models with GET /v1/models."
+            )
+        self.details = {
+            "requested_model": self.requested_model,
+            "requested_type": self.requested_type,
             "code": self.code,
         }
         super().__post_init__()

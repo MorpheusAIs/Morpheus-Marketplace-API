@@ -327,6 +327,21 @@ class UsageHoldRequest(BaseModel):
     endpoint: Optional[str] = None
 
 
+class FixedHoldRequest(BaseModel):
+    """Internal request to hold a known amount (unit-priced usage such as a video clip)."""
+    ledger_entry_id: uuid.UUID  # Pre-generated ID for the ledger entry
+    request_id: str  # Trace ID (the video id for clips)
+    amount: Decimal = Field(..., ge=0)  # Exact USD amount to hold and later charge
+    unit_type: str  # e.g. "video_second"
+    units: Decimal = Field(..., gt=0)
+    unit_price: Decimal = Field(..., ge=0)
+    api_key_id: Optional[int] = None
+    model_name: Optional[str] = None  # Human-readable model name
+    model_id: Optional[str] = None  # Hex32 blockchain model identifier
+    endpoint: str = "/v1/videos"
+    usage_metadata: Optional[dict] = None  # Server-side only; stored on the ledger row
+
+
 class UsageHoldResponse(BaseModel):
     """Internal response from creating a usage hold."""
     ledger_entry_id: Optional[uuid.UUID] = None

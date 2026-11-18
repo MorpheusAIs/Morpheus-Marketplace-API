@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import io
+import re
 from httpx import Request
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Optional, Any, List
+from typing import AsyncIterator, Dict, Optional, Any, List, Tuple
 
 import httpx
 from ..core.config import settings
@@ -73,13 +74,25 @@ async def close_http_client():
 
 
 class ProxyRouterServiceError(Exception):
-    """Custom exception for proxy router service errors."""
-    
-    def __init__(self, message: str, status_code: Optional[int] = None, error_type: str = "unknown"):
+    """Custom exception for proxy router service errors.
+
+    node_error_body (video routes only): the error body was the node's own
+    ``{"error": "..."}`` JSON, so the node itself answered. False for a body
+    from something in between (a reverse proxy page, an empty body).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        status_code: Optional[int] = None,
+        error_type: str = "unknown",
+        node_error_body: bool = False,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.error_type = error_type
         self.message = message
+        self.node_error_body = node_error_body
     
     def get_http_status_code(self) -> int:
         """Get the appropriate HTTP status code for this error."""
@@ -1186,6 +1199,276 @@ async def audio_speech(
         if isinstance(e, ProxyRouterServiceError):
             raise
         raise ProxyRouterServiceError(sanitize_error_message(f"Failed to send audio speech request: {str(e)}"))
+
+
+# Node video job ids are "vjob_<hex>". Anything else (empty, a slash) could
+# reach GET v1/video/jobs, the node's list of every gateway user's jobs.
+_VIDEO_JOB_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+_HTTP_STATUS_PREFIX_RE = re.compile(r"^HTTP \d{3}: ")
+
+# The node's quote does not decode the image: a placeholder prices a clip with
+# a first frame without sending the image twice.
+VIDEO_QUOTE_IMAGE_PLACEHOLDER = "first-frame"
+
+
+def _node_video_error(message: str) -> Tuple[str, bool]:
+    """The error text out of an _execute_request message, and whether the
+    body was the node's own ``{"error": "..."}`` JSON (every node video
+    route answers its errors so)."""
+    body = _HTTP_STATUS_PREFIX_RE.sub("", message or "", count=1).strip()
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return body, False
+    if isinstance(parsed, dict):
+        error = parsed.get("error")
+        if isinstance(error, str):
+            return (error.strip() or body), True
+        if isinstance(error, dict):
+            error = error.get("message")
+            if isinstance(error, str) and error.strip():
+                return error.strip(), False
+    return body, False
+
+
+def _video_proxy_error(e: ProxyRouterServiceError) -> ProxyRouterServiceError:
+    """Same status_code and error_type, with the node's own error text as
+    message and node_error_body set when the node itself answered.
+
+    Network errors (no status_code) keep their message.
+    """
+    message, node_error_body = e.message, False
+    if e.status_code:
+        message, node_error_body = _node_video_error(e.message)
+    return ProxyRouterServiceError(
+        message,
+        status_code=e.status_code,
+        error_type=e.error_type,
+        node_error_body=node_error_body,
+    )
+
+
+def _video_job_body(request: Dict[str, Any]) -> Dict[str, Any]:
+    """Node CreateRequest fields with None values left out."""
+    return {k: v for k, v in request.items() if v is not None}
+
+
+async def videoQuote(
+    *,
+    model_id: str,
+    request: Dict[str, Any],
+    request_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Price a video clip: POST v1/video/quote.
+
+    Args:
+        model_id: Blockchain ID of the video model (hex string starting with 0x)
+        request: Node job fields (prompt, duration_seconds, aspect_ratio,
+            resolution, generate_audio, image_url, image_b64). Not mutated;
+            image_b64 is sent as a placeholder.
+        request_id: Request ID for tracing
+
+    Returns:
+        Dict: ``{"object": "list", "data": [quote, ...]}`` in rating order.
+
+    Raises:
+        ProxyRouterServiceError: If the request fails. Node errors keep their
+            status_code; the message is the node's error text.
+    """
+    req_logger = logger.bind(request_id=request_id, model_id=model_id)
+    req_logger.info("Video quote request",
+                    event_type="video_quote_start")
+
+    payload = _video_job_body(request)
+    if payload.get("image_b64"):
+        payload["image_b64"] = VIDEO_QUOTE_IMAGE_PLACEHOLDER
+    payload["model"] = model_id
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if request_id:
+        headers["X-Request-Id"] = request_id
+
+    try:
+        response = await _execute_request(
+            "POST",
+            "v1/video/quote",
+            headers=headers,
+            json_data=payload,
+            timeout=30.0,
+            max_retries=2,
+            request_id=request_id,
+        )
+        result = response.json()
+        if not isinstance(result, dict):
+            raise ProxyRouterServiceError(
+                "Unexpected video quote response from proxy router",
+                error_type="server_error",
+            )
+        data = result.get("data")
+        req_logger.info("Video quote received",
+                        quote_count=len(data) if isinstance(data, list) else 0,
+                        event_type="video_quote_received")
+        return result
+
+    except ProxyRouterServiceError as e:
+        req_logger.error("Video quote error",
+                         status_code=e.status_code,
+                         error=str(e),
+                         event_type="video_quote_error")
+        raise _video_proxy_error(e) from e
+    except Exception as e:
+        req_logger.error("Video quote error",
+                         error=str(e),
+                         event_type="video_quote_error")
+        raise ProxyRouterServiceError(sanitize_error_message(f"Failed to get video quote: {str(e)}"))
+
+
+async def createVideoJob(
+    *,
+    session_id: str,
+    request: Dict[str, Any],
+    request_id: Optional[str] = None,
+    timeout: float = 300.0,
+) -> Dict[str, Any]:
+    """
+    Submit a video clip on an open session: POST v1/video/jobs.
+
+    Sent ONCE (max_retries=1): the node already resends to the provider with
+    the same job id, and a second submit would start a second render.
+
+    Args:
+        session_id: Session opened for this clip (hex32)
+        request: Node job fields; a ``model`` key is dropped (the job takes
+            its model from the session)
+        request_id: Request ID for tracing, sent as X-Request-Id
+        timeout: Request timeout in seconds. The node's worst case is about
+            2 x 60 s plus TEE attestation; callers pass
+            settings.PROXY_ROUTER_VIDEO_SUBMIT_TIMEOUT.
+
+    Returns:
+        Dict: the node Job. An empty vendor_task_id means the provider was
+        unreachable and the node resends the job itself.
+
+    Raises:
+        ProxyRouterServiceError: On any failure. Node errors keep their
+            status_code (400, 404, 422, 502, 503); the message is the node's
+            error text, and node_error_body is True only when the node itself
+            answered (a reverse proxy's 502 page is not a node refusal). A
+            timeout or network error has no status_code.
+    """
+    req_logger = logger.bind(request_id=request_id, session_id=session_id)
+    req_logger.info("Video job create request",
+                    event_type="video_job_create_start")
+
+    payload = _video_job_body(request)
+    payload.pop("model", None)
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "session_id": session_id,
+    }
+    if request_id:
+        headers["X-Request-Id"] = request_id
+
+    try:
+        response = await _execute_request(
+            "POST",
+            "v1/video/jobs",
+            headers=headers,
+            json_data=payload,
+            timeout=timeout,
+            max_retries=1,
+            request_id=request_id,
+        )
+        job = response.json()
+        if not isinstance(job, dict) or not job.get("id"):
+            raise ProxyRouterServiceError(
+                "Unexpected video job response from proxy router",
+                error_type="server_error",
+            )
+        req_logger.info("Video job created",
+                        node_job_id=job.get("id"),
+                        status=job.get("status"),
+                        vendor_confirmed=bool(job.get("vendor_task_id")),
+                        event_type="video_job_created")
+        return job
+
+    except ProxyRouterServiceError as e:
+        req_logger.error("Video job create error",
+                         status_code=e.status_code,
+                         error=str(e),
+                         event_type="video_job_create_error")
+        raise _video_proxy_error(e) from e
+    except Exception as e:
+        req_logger.error("Video job create error",
+                         error=str(e),
+                         event_type="video_job_create_error")
+        raise ProxyRouterServiceError(sanitize_error_message(f"Failed to create video job: {str(e)}"))
+
+
+async def getVideoJob(job_id: str) -> Dict[str, Any]:
+    """
+    Read one video job: GET v1/video/jobs/{id}.
+
+    A node-local read (the node polls the provider itself). The returned Job
+    may carry video_url, a vendor bearer link: never log it.
+
+    Args:
+        job_id: Node job id (``vjob_...``)
+
+    Returns:
+        Dict: the node Job.
+
+    Raises:
+        ProxyRouterServiceError: If the request fails. 404 means the node does
+            not know the job; a network error has no status_code. An invalid
+            job_id is refused locally with status_code 400.
+    """
+    if not isinstance(job_id, str) or not _VIDEO_JOB_ID_RE.fullmatch(job_id):
+        raise ProxyRouterServiceError(
+            "Invalid video job id",
+            status_code=400,
+            error_type="validation_error",
+        )
+
+    try:
+        response = await _execute_request(
+            "GET",
+            f"v1/video/jobs/{job_id}",
+            headers={"Accept": "application/json"},
+            timeout=10.0,
+            max_retries=2,
+        )
+        job = response.json()
+        if not isinstance(job, dict):
+            raise ProxyRouterServiceError(
+                "Unexpected video job response from proxy router",
+                error_type="server_error",
+            )
+        logger.debug("Video job read",
+                     node_job_id=job_id,
+                     status=job.get("status"),
+                     event_type="video_job_read")
+        return job
+
+    except ProxyRouterServiceError as e:
+        logger.warning("Video job read error",
+                       node_job_id=job_id,
+                       status_code=e.status_code,
+                       error=str(e),
+                       event_type="video_job_read_error")
+        raise _video_proxy_error(e) from e
+    except Exception as e:
+        logger.warning("Video job read error",
+                       node_job_id=job_id,
+                       error=str(e),
+                       event_type="video_job_read_error")
+        raise ProxyRouterServiceError(sanitize_error_message(f"Failed to get video job: {str(e)}"))
 
 
 async def getAllModels() -> httpx.Response:

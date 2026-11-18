@@ -14,7 +14,7 @@ import logging
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-from .types import ModelPricing, UsageEstimate, UsageCost
+from .types import ModelPricing, UsageEstimate, UsageCost, ClipPricing
 from .provider import PricingProvider
 from .hardcoded_provider import HardcodedPricingProvider
 
@@ -249,6 +249,31 @@ class PricingService:
             ModelPricing if available, None otherwise
         """
         return await self._provider.get_model_pricing(
+            model_name=model_name, model_id=model_id, db=db
+        )
+    
+    async def get_clip_pricing(
+        self,
+        model_name: Optional[str] = None,
+        model_id: Optional[str] = None,
+        db: Optional["AsyncSession"] = None,
+    ) -> Optional[ClipPricing]:
+        """
+        Get per-clip (video) pricing for a model.
+
+        Exact key match on the 0x model id or the lowercased model name, with
+        no fuzzy match and no default: None means the model is not priced for
+        video and must not be sold.
+
+        Args:
+            model_name: Human-readable model name
+            model_id: Hex32 blockchain model identifier
+            db: Optional database session
+
+        Returns:
+            ClipPricing if the model is priced for video, None otherwise
+        """
+        return await self._provider.get_clip_pricing(
             model_name=model_name, model_id=model_id, db=db
         )
     

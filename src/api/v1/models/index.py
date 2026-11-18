@@ -1,6 +1,6 @@
 # Model routes 
 from fastapi import APIRouter, HTTPException, status, Query, Depends, Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Set
 import time
 import uuid
 
@@ -17,6 +17,85 @@ from .spec_enrichment import spec_enrichment
 logger = get_api_logger()
 
 router = APIRouter(tags=["Models"])
+
+# Bounds on the enums copied from provider video guides into the listing
+VIDEO_ENUM_MAX_ITEMS = 16
+VIDEO_ENUM_MAX_CHARS = 16
+
+
+def _guide_field(guide: Dict[str, Any], name: str) -> Optional[Dict[str, Any]]:
+    for field in guide.get("fields") or []:
+        if isinstance(field, dict) and field.get("name") == name:
+            return field
+    return None
+
+
+def _guide_enum(field: Optional[Dict[str, Any]]) -> Optional[List[str]]:
+    """A field's enum, bounded; None when the guide does not restrict it."""
+    if not field or not isinstance(field.get("enum"), list):
+        return None
+    return [v for v in field["enum"] if isinstance(v, str) and 0 < len(v) <= VIDEO_ENUM_MAX_CHARS]
+
+
+def _guide_int(field: Optional[Dict[str, Any]], key: str) -> Optional[int]:
+    value = (field or {}).get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _intersect(agreed: Optional[List[str]], values: Optional[List[str]]) -> Optional[List[str]]:
+    if values is None:
+        return agreed
+    if agreed is None:
+        return values
+    return [v for v in agreed if v in values]
+
+
+def video_limits(bid_details: Any, healthy_bid_ids: Set[str]) -> Optional[Dict[str, Any]]:
+    """
+    What every healthy bid's video guide (bidDetail[].video) accepts, for a VIDEO row.
+
+    Guides that differ are reduced to what they agree on: enums are
+    intersected, the minimum is the largest minimum and the maximum the
+    smallest maximum, audio and image only when every guide offers them.
+    None when no healthy bid carries a guide.
+    """
+    guides = []
+    for bid in bid_details if isinstance(bid_details, list) else []:
+        if not isinstance(bid, dict) or not isinstance(bid.get("video"), dict):
+            continue
+        bid_id = str(bid.get("bidId") or bid.get("bid_id") or "").strip().lower()
+        if bid_id in healthy_bid_ids:
+            guides.append(bid["video"])
+    if not guides:
+        return None
+
+    min_seconds: Optional[int] = None
+    max_seconds: Optional[int] = None
+    resolutions: Optional[List[str]] = None
+    aspect_ratios: Optional[List[str]] = None
+    audio = image = True
+    for guide in guides:
+        duration = _guide_field(guide, "duration_seconds")
+        low, high = _guide_int(duration, "minimum"), _guide_int(duration, "maximum")
+        if low is not None:
+            min_seconds = low if min_seconds is None else max(min_seconds, low)
+        if high is not None:
+            max_seconds = high if max_seconds is None else min(max_seconds, high)
+        resolutions = _intersect(resolutions, _guide_enum(_guide_field(guide, "resolution")))
+        aspect_ratios = _intersect(aspect_ratios, _guide_enum(_guide_field(guide, "aspect_ratio")))
+        audio = audio and _guide_field(guide, "generate_audio") is not None
+        image = image and (
+            _guide_field(guide, "image_url") is not None or _guide_field(guide, "image_b64") is not None
+        )
+
+    return {
+        "min_seconds": min_seconds,
+        "max_seconds": max_seconds,
+        "resolutions": resolutions[:VIDEO_ENUM_MAX_ITEMS] if resolutions is not None else None,
+        "aspect_ratios": aspect_ratios[:VIDEO_ENUM_MAX_ITEMS] if aspect_ratios is not None else None,
+        "audio": audio,
+        "image": image,
+    }
 
 
 @router.get(
@@ -62,6 +141,11 @@ async def list_models():
                 "modelType": model_type
             }
             openai_model.update(spec_enrichment(blockchain_id))
+            if model_type == "VIDEO":
+                healthy = await direct_model_service.get_healthy_bid_ids_for_model(blockchain_id)
+                limits = video_limits(model.get("bidDetail"), healthy)
+                if limits:
+                    openai_model["video"] = limits
             
             models.append(openai_model)
         

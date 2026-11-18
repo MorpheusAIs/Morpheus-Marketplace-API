@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from src.db.models import CreditLedger, CreditAccountBalance, LedgerStatus, LedgerEntryType
 from src.crud import credits as credits_crud
 from src.schemas.billing import (
-    UsageHoldRequest, UsageHoldResponse,
+    UsageHoldRequest, UsageHoldResponse, FixedHoldRequest,
     UsageFinalizeRequest, UsageFinalizeResponse,
     UsageVoidRequest, UsageVoidResponse,
     RefundRequest, RefundResponse,
@@ -248,79 +248,97 @@ class BillingService:
         # Staking only — no paid fallback
         return staking_available, min(amount, staking_available), Decimal("0")
     
+    @staticmethod
+    def _hold_in_staking_period(
+        hold_created_at: datetime,
+        refresh_date: Optional[date],
+        reset_at: Optional[datetime],
+    ) -> bool:
+        """
+        Whether a hold was placed after the last daily staking reset.
+
+        Args:
+            refresh_date: the balance's staking_refresh_date (last reset day).
+            reset_at: when that reset ran (credits_crud.get_staking_reset_at).
+                Without it only a hold from a later day than the reset counts.
+        """
+        if refresh_date is None:
+            return True
+        if reset_at is not None:
+            return hold_created_at >= reset_at
+        return hold_created_at.date() > refresh_date
+
     # === Usage Hold/Finalize/Void Operations ===
-    
-    async def create_usage_hold(
+
+    async def _existing_hold(
         self,
         db: AsyncSession,
         user_id: int,
-        request: UsageHoldRequest,
+        request_id: str,
+        ledger_entry_id: uuid.UUID,
+    ) -> Optional[UsageHoldResponse]:
+        """Idempotency by entry ID: the response for a hold that already exists, else None."""
+        existing = await credits_crud.get_ledger_entry_by_id(db, ledger_entry_id)
+        if not existing:
+            return None
+        logger.info(
+            "Usage hold already exists",
+            user_id=user_id,
+            request_id=request_id,
+            ledger_entry_id=str(ledger_entry_id),
+        )
+        return UsageHoldResponse(
+            ledger_entry_id=existing.id,
+            hold_amount=existing.amount_paid,
+            success=True,
+        )
+    
+    async def _place_hold(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        request_id: str,
+        ledger_entry_id: uuid.UUID,
+        amount: Decimal,
+        entry_fields: dict,
+        log_fields: Optional[dict] = None,
     ) -> UsageHoldResponse:
         """
-        Create a usage hold at the start of a request.
+        Lock the balance, check sufficiency, split the hold between staking and
+        paid, then write the pending usage_hold row and the balance cache in one
+        transaction.
         
-        This method:
-        1. Estimates cost using pricing service
-        2. Checks if user has sufficient balance
-        3. Creates a hold if balance is sufficient
-        
-        The ledger entry ID is provided by the caller for easy tracking.
-        Returns UsageHoldResponse with success=False and error if insufficient balance.
+        entry_fields are the usage columns stored on the ledger row
+        (model, endpoint, tokens or units...). Shared by token and fixed holds.
         """
-        # Check for existing hold (idempotency by entry ID)
-        existing = await credits_crud.get_ledger_entry_by_id(db, request.ledger_entry_id)
-        if existing:
-            logger.info(
-                "Usage hold already exists",
-                user_id=user_id,
-                request_id=request.request_id,
-                ledger_entry_id=str(request.ledger_entry_id),
-            )
-            return UsageHoldResponse(
-                ledger_entry_id=existing.id,
-                hold_amount=existing.amount_paid,
-                success=True,
-            )
-        
-        # Estimate cost using pricing service
-        estimate = await self.pricing.estimate_usage(
-            estimated_input_tokens=request.estimated_input_tokens,
-            estimated_output_tokens=request.estimated_output_tokens,
-            model_name=request.model_name,
-            model_id=request.model_id,
-            db=db,
-        )
-        
-        estimated_cost = estimate.estimated_total_cost
-        
         # FOR UPDATE: lock the balance row to prevent concurrent workers from
         # both passing the sufficiency check and creating holds that exceed
         # available funds.  The lock is held until the commit at the end.
         balance = await credits_crud.get_or_create_balance(db, user_id, for_update=True)
         
-        available, staking_hold, paid_hold = self._compute_spending_split(balance, estimated_cost)
+        available, staking_hold, paid_hold = self._compute_spending_split(balance, amount)
         
-        if available < estimated_cost:
+        if available < amount:
             logger.warning(
                 "Insufficient balance for usage hold",
                 event_type="insufficient_balance",
                 user_id=user_id,
-                request_id=request.request_id,
-                ledger_entry_id=str(request.ledger_entry_id),
+                request_id=request_id,
+                ledger_entry_id=str(ledger_entry_id),
                 available=str(available),
-                estimated_cost=str(estimated_cost),
+                estimated_cost=str(amount),
                 is_staker=balance.is_staker,
                 allow_overage=balance.allow_overage,
             )
             return UsageHoldResponse(
                 success=False,
                 error="insufficient_balance",
-                estimated_cost=estimated_cost,
+                estimated_cost=amount,
                 available_balance=available,
             )
         
         # Hold amounts are negative (debit)
-        hold_amount = -abs(estimated_cost)
+        hold_amount = -abs(amount)
         
         # Create ledger entry and update balance in a single transaction
         # Both operations use auto_commit=False, then we commit once at the end
@@ -329,20 +347,12 @@ class BillingService:
             user_id=user_id,
             entry_type=LedgerEntryType.usage_hold,
             status=LedgerStatus.pending,
-            entry_id=request.ledger_entry_id,
+            entry_id=ledger_entry_id,
             amount_paid=-paid_hold,  # Negative for hold
             amount_staking=-staking_hold,  # Negative for hold
-            request_id=request.request_id,
-            api_key_id=request.api_key_id,
-            model_name=request.model_name,
-            model_id=request.model_id,
-            input_price_per_million=estimate.input_price_per_million,
-            output_price_per_million=estimate.output_price_per_million,
-            tokens_input=request.estimated_input_tokens,
-            tokens_output=request.estimated_output_tokens,
-            tokens_total=request.estimated_input_tokens + request.estimated_output_tokens,
-            endpoint=request.endpoint,
+            request_id=request_id,
             auto_commit=False,
+            **entry_fields,
         )
         
         # Update balance cache - deduct hold from appropriate buckets
@@ -364,20 +374,113 @@ class BillingService:
             "Created usage hold",
             event_type="billing_hold_created",
             user_id=user_id,
-            request_id=request.request_id,
+            request_id=request_id,
             hold_amount=str(hold_amount),
             paid_hold=str(paid_hold),
             staking_hold=str(staking_hold),
-            estimated_cost=str(estimated_cost),
+            estimated_cost=str(amount),
             ledger_entry_id=str(entry.id),
+            **(log_fields or {}),
         )
         
         return UsageHoldResponse(
             ledger_entry_id=entry.id,
             hold_amount=hold_amount,
-            estimated_cost=estimated_cost,
+            estimated_cost=amount,
             available_balance=available,
             success=True,
+        )
+    
+    async def create_usage_hold(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        request: UsageHoldRequest,
+    ) -> UsageHoldResponse:
+        """
+        Create a usage hold at the start of a request.
+        
+        This method:
+        1. Estimates cost using pricing service
+        2. Checks if user has sufficient balance
+        3. Creates a hold if balance is sufficient
+        
+        The ledger entry ID is provided by the caller for easy tracking.
+        Returns UsageHoldResponse with success=False and error if insufficient balance.
+        """
+        # Check for existing hold (idempotency by entry ID)
+        existing = await self._existing_hold(db, user_id, request.request_id, request.ledger_entry_id)
+        if existing:
+            return existing
+        
+        # Estimate cost using pricing service
+        estimate = await self.pricing.estimate_usage(
+            estimated_input_tokens=request.estimated_input_tokens,
+            estimated_output_tokens=request.estimated_output_tokens,
+            model_name=request.model_name,
+            model_id=request.model_id,
+            db=db,
+        )
+        
+        return await self._place_hold(
+            db,
+            user_id,
+            request_id=request.request_id,
+            ledger_entry_id=request.ledger_entry_id,
+            amount=estimate.estimated_total_cost,
+            entry_fields=dict(
+                api_key_id=request.api_key_id,
+                model_name=request.model_name,
+                model_id=request.model_id,
+                input_price_per_million=estimate.input_price_per_million,
+                output_price_per_million=estimate.output_price_per_million,
+                tokens_input=request.estimated_input_tokens,
+                tokens_output=request.estimated_output_tokens,
+                tokens_total=request.estimated_input_tokens + request.estimated_output_tokens,
+                endpoint=request.endpoint,
+            ),
+        )
+    
+    async def create_fixed_hold(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        request: FixedHoldRequest,
+    ) -> UsageHoldResponse:
+        """
+        Hold an exact, already-priced amount (a video clip) before the work starts.
+        
+        Same balance locking, staking/paid split and idempotency (by ledger
+        entry ID) as create_usage_hold, but there is no estimate: the hold is
+        request.amount, and settle_fixed_hold later charges exactly that.
+        Returns UsageHoldResponse with success=False and error
+        "insufficient_balance" when the balance does not cover it.
+        """
+        existing = await self._existing_hold(db, user_id, request.request_id, request.ledger_entry_id)
+        if existing:
+            return existing
+        
+        return await self._place_hold(
+            db,
+            user_id,
+            request_id=request.request_id,
+            ledger_entry_id=request.ledger_entry_id,
+            amount=request.amount,
+            entry_fields=dict(
+                api_key_id=request.api_key_id,
+                model_name=request.model_name,
+                model_id=request.model_id,
+                endpoint=request.endpoint,
+                unit_type=request.unit_type,
+                units=request.units,
+                unit_price=request.unit_price,
+                usage_metadata=request.usage_metadata,
+            ),
+            log_fields=dict(
+                endpoint=request.endpoint,
+                unit_type=request.unit_type,
+                units=str(request.units),
+            ),
         )
     
     async def finalize_usage(
@@ -509,14 +612,150 @@ class BillingService:
             success=True,
         )
     
+    async def settle_fixed_hold(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        ledger_entry_id: uuid.UUID,
+        commit: bool = True,
+    ) -> UsageFinalizeResponse:
+        """
+        Convert a fixed hold (create_fixed_hold) into a posted charge of exactly
+        the held amount: no re-pricing and no re-split between buckets.
+        
+        Idempotent: an already-posted charge is a success. A voided hold is
+        refused with error "hold_voided".
+        
+        Args:
+            commit: If False, the ledger and balance updates are flushed but not
+                committed, so the caller can commit them atomically with its own
+                row update (e.g. the video job it holds FOR UPDATE).
+        """
+        # FOR UPDATE to prevent a concurrent settle/void of the same hold
+        hold_entry = await credits_crud.get_ledger_entry_by_id(db, ledger_entry_id, for_update=True)
+        
+        if not hold_entry or hold_entry.user_id != user_id:
+            logger.error(
+                "Fixed hold not found for settlement",
+                user_id=user_id,
+                ledger_entry_id=str(ledger_entry_id),
+            )
+            return UsageFinalizeResponse(
+                ledger_entry_id=ledger_entry_id,
+                amount_paid=Decimal("0"),
+                amount_staking=Decimal("0"),
+                amount_total=Decimal("0"),
+                success=False,
+                error="Hold not found",
+            )
+        
+        if hold_entry.status == LedgerStatus.posted and hold_entry.entry_type == LedgerEntryType.usage_charge:
+            logger.info(
+                "Fixed hold already settled",
+                user_id=user_id,
+                ledger_entry_id=str(ledger_entry_id),
+            )
+            return UsageFinalizeResponse(
+                ledger_entry_id=hold_entry.id,
+                amount_paid=hold_entry.amount_paid,
+                amount_staking=hold_entry.amount_staking,
+                amount_total=hold_entry.amount_total,
+                success=True,
+            )
+        
+        if hold_entry.status == LedgerStatus.voided:
+            logger.warning(
+                "Refusing to settle a voided hold",
+                user_id=user_id,
+                ledger_entry_id=str(ledger_entry_id),
+                failure_code=hold_entry.failure_code,
+            )
+            return UsageFinalizeResponse(
+                ledger_entry_id=hold_entry.id,
+                amount_paid=Decimal("0"),
+                amount_staking=Decimal("0"),
+                amount_total=Decimal("0"),
+                success=False,
+                error="hold_voided",
+            )
+        
+        if hold_entry.status != LedgerStatus.pending or hold_entry.entry_type != LedgerEntryType.usage_hold:
+            logger.error(
+                "Ledger entry is not a pending hold",
+                user_id=user_id,
+                ledger_entry_id=str(ledger_entry_id),
+                status=hold_entry.status.value,
+                entry_type=hold_entry.entry_type.value,
+            )
+            return UsageFinalizeResponse(
+                ledger_entry_id=hold_entry.id,
+                amount_paid=Decimal("0"),
+                amount_staking=Decimal("0"),
+                amount_total=Decimal("0"),
+                success=False,
+                error="Not a pending hold",
+            )
+        
+        # The charge is the hold, bucket for bucket (both are negative)
+        held_paid = hold_entry.amount_paid
+        held_staking = hold_entry.amount_staking
+        
+        hold_entry = await credits_crud.update_ledger_entry(
+            db=db,
+            entry=hold_entry,
+            status=LedgerStatus.posted,
+            entry_type=LedgerEntryType.usage_charge,
+            auto_commit=False,
+        )
+        
+        # Balance cache: move the paid hold from pending_holds to posted_balance.
+        # The staking part was already taken from staking_available at hold time,
+        # and releasing it + charging it again nets to zero.
+        await credits_crud.update_balance(
+            db=db,
+            user_id=user_id,
+            paid_holds_delta=-held_paid,  # Remove paid hold (add back the negative)
+            paid_posted_delta=held_paid,  # Apply the same amount as a posted charge
+            auto_commit=False,
+            ensure_exists=False,   # hold creation already ensured the row
+            return_balance=False,  # result is discarded
+        )
+        
+        if commit:
+            await db.commit()
+            await db.refresh(hold_entry)
+        
+        logger.info(
+            "Settled fixed hold",
+            event_type="billing_fixed_hold_settled",
+            user_id=user_id,
+            ledger_entry_id=str(hold_entry.id),
+            request_id=hold_entry.request_id,
+            amount_paid=str(held_paid),
+            amount_staking=str(held_staking),
+        )
+        
+        return UsageFinalizeResponse(
+            ledger_entry_id=hold_entry.id,
+            amount_paid=held_paid,
+            amount_staking=held_staking,
+            amount_total=held_paid + held_staking,
+            success=True,
+        )
+    
     async def void_usage(
         self,
         db: AsyncSession,
         user_id: int,
         request: UsageVoidRequest,
+        commit: bool = True,
     ) -> UsageVoidResponse:
         """
         Void a usage hold when a request fails before producing billable output.
+        
+        Args:
+            commit: If False, the updates are flushed but not committed, so the
+                caller can commit them with its own row update.
         """
         # Find the hold entry by ID (FOR UPDATE to prevent concurrent void/finalize)
         hold_entry = await credits_crud.get_ledger_entry_by_id(db, request.ledger_entry_id, for_update=True)
@@ -550,7 +789,22 @@ class BillingService:
         # Store original hold amounts for cache adjustment (both are negative)
         original_hold_paid = hold_entry.amount_paid  # Negative
         original_hold_staking = hold_entry.amount_staking  # Negative
-        
+
+        # The staking part goes back only to the staking period it was taken
+        # from. A daily reset sets staking_available to the full daily amount
+        # without counting pending holds, so for a hold placed before the last
+        # reset it is already back. The balance is locked so a reset cannot
+        # land between this check and the update below.
+        staking_release = -original_hold_staking
+        if original_hold_staking:
+            balance = await credits_crud.get_or_create_balance(db, user_id, for_update=True)
+            refresh_date = balance.staking_refresh_date
+            reset_at = None
+            if refresh_date is not None:
+                reset_at = await credits_crud.get_staking_reset_at(db, user_id, refresh_date)
+            if not self._hold_in_staking_period(hold_entry.created_at, refresh_date, reset_at):
+                staking_release = Decimal("0")
+
         # Update the ledger entry and balance in a single transaction
         hold_entry = await credits_crud.update_ledger_entry(
             db=db,
@@ -568,20 +822,24 @@ class BillingService:
             db=db,
             user_id=user_id,
             paid_holds_delta=-original_hold_paid,  # Release paid hold (add back the negative)
-            staking_delta=-original_hold_staking,  # Release staking hold (add back the negative)
+            staking_delta=staking_release,  # Release staking hold, if still in its period
             auto_commit=False,
             ensure_exists=False,   # hold creation already ensured/locked the row
             return_balance=False,  # result is discarded
         )
-        
+
         # Commit both ledger update and balance update atomically
-        await db.commit()
-        await db.refresh(hold_entry)
-        
+        if commit:
+            await db.commit()
+            await db.refresh(hold_entry)
+
         logger.info(
             "Voided usage hold",
             user_id=user_id,
             ledger_entry_id=str(hold_entry.id),
+            paid_released=str(-original_hold_paid),
+            staking_released=str(staking_release),
+            staking_kept_by_reset=staking_release != -original_hold_staking,
         )
         
         return UsageVoidResponse(
