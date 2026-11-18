@@ -3,6 +3,7 @@
 A provider withholds an undelivered clip when its session closes more than
 60 s before EndsAt, so expiry cleanup must not run ahead of EndsAt. A failed
 close must stay retryable, or the session day-locks its whole stake unmetered.
+Also the video stake fuse, and the open cool-off a closed session ends.
 """
 
 import asyncio
@@ -26,6 +27,7 @@ from src.db.models.routed_session import RoutedSession, SessionState
 from src.services import proxy_router_service
 from src.services.session_routing_service import (
     SessionRoutingService,
+    SessionStakeFuseError,
     VIDEO_CLOSE_ABANDONED_SECONDS,
     VIDEO_CLOSE_EXPIRY_MARGIN_SECONDS,
     VIDEO_JOBS_ENDPOINT,
@@ -326,3 +328,66 @@ async def test_video_session_fallback_expiry_is_after_ends_at(open_session, expe
         session_id = await open_session(service)
 
     assert db.rows[session_id].expires_at == expected_expires_at
+
+
+# Stakes with SESSION_STAKE_FACTOR 1: 0.001 MOR/s and 0.002 MOR/s for 600 s
+CHEAP = {**QUOTE, "bid_id": "0x" + "c1" * 32}
+DEAR = {**QUOTE, "bid_id": "0x" + "d1" * 32, "price_per_second_wei": str(2 * 10**15)}
+
+
+@pytest.mark.parametrize(
+    "policy_max, video_max, kept",
+    [
+        (0, 0, [CHEAP, DEAR]),
+        (0, 1.0, [CHEAP]),
+        # The smaller positive of the two limits applies
+        (2.0, 1.0, [CHEAP]),
+        (1.0, 5.0, [CHEAP]),
+        (0.5, 2.0, SessionStakeFuseError),
+    ],
+)
+def test_video_stake_fuse_is_the_smaller_positive_limit(policy_max, video_max, kept):
+    service = SessionRoutingService()
+    with patch.object(srs, "get_session_routing_policy", return_value=MagicMock(max_stake_mor=policy_max)), \
+            patch.object(srs.settings, "VIDEO_MAX_STAKE_MOR", video_max), \
+            patch.object(srs.settings, "SESSION_STAKE_FACTOR", 1):
+        if kept is SessionStakeFuseError:
+            with pytest.raises(SessionStakeFuseError):
+                service._quote_candidates_under_fuse(MODEL_ID, [CHEAP, DEAR])
+            return
+        under = service._quote_candidates_under_fuse(MODEL_ID, [CHEAP, DEAR])
+
+    assert [row["bid_id"] for row in under] == [row["bid_id"] for row in kept]
+
+
+PROVIDER = "0x" + "Ab" * 20
+CHAT_MODEL_ID = "0x" + "c4" * 32
+
+
+@pytest.mark.parametrize(
+    "chain_outcome, cooled_after",
+    [
+        # The provider freed the slot: its clips of the model may open again
+        (CLOSED_ON_CHAIN, False),
+        # The session may still hold the slot
+        (RPC_DOWN, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_closed_video_session_ends_its_provider_cool_off(chain_outcome, cooled_after):
+    row = _video_session()
+    row.expires_at = _utcnow() + LIVE
+    row.provider_address = PROVIDER
+    service = SessionRoutingService()
+    close = AsyncMock(side_effect=chain_outcome) if isinstance(chain_outcome, BaseException) \
+        else AsyncMock(return_value=chain_outcome)
+    with patch.object(srs, "get_db", FakeDb(row).get_db), \
+            patch.object(srs.proxy_router_service, "closeSession", close), \
+            patch.object(service, "_read_daylock_on_close", AsyncMock(return_value=None)):
+        await service._mark_video_bid_cooldown(MODEL_ID, PROVIDER.lower())
+        service._mark_provider_open_cooldown(CHAT_MODEL_ID, PROVIDER)
+        await _close_now(service)
+
+        assert await service.video_bid_on_cooldown(MODEL_ID, PROVIDER) is cooled_after
+    # A chat cool-off of the same provider is not the video one
+    assert service._provider_on_open_cooldown(CHAT_MODEL_ID, PROVIDER)

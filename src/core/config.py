@@ -463,6 +463,17 @@ class Settings(BaseSettings):
     VIDEO_JOB_POLL_INTERVAL_SECONDS: int = Field(default=int(os.getenv("VIDEO_JOB_POLL_INTERVAL_SECONDS", "20")))
     # A clip with no terminal state after this many seconds fails as "timeout" and its hold is voided
     VIDEO_JOB_MAX_AGE_SECONDS: int = Field(default=int(os.getenv("VIDEO_JOB_MAX_AGE_SECONDS", "21600")))
+    # Stake limit (MOR) of one clip's session; the smaller positive of this and the
+    # routing policy's max_stake_mor applies. 0: no video-specific limit
+    VIDEO_MAX_STAKE_MOR: float = Field(default=float(os.getenv("VIDEO_MAX_STAKE_MOR", "0")))
+    # A provider with a clip of a model waiting in its vendor's queue (queued with a
+    # node job) longer than this takes no new clip of that model. 0 turns it off;
+    # never below VIDEO_JOB_POLL_INTERVAL_SECONDS + 15
+    VIDEO_VENDOR_QUEUE_BUSY_SECONDS: int = Field(default=int(os.getenv("VIDEO_VENDOR_QUEUE_BUSY_SECONDS", "30")))
+    # Video session closes on chain at once from one replica; more wait for a place
+    VIDEO_CLOSE_CONCURRENCY: int = Field(default=int(os.getenv("VIDEO_CLOSE_CONCURRENCY", "5")))
+    # Video jobs the sweeper refreshes from the node at once
+    VIDEO_REFRESH_CONCURRENCY: int = Field(default=int(os.getenv("VIDEO_REFRESH_CONCURRENCY", "8")))
     
     # Rate Limiting Settings
     # Enable/disable rate limiting globally

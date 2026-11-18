@@ -332,18 +332,21 @@ class SessionRoutingService:
         )
         return int(result.scalar_one() or 0)
 
-    async def _ensure_soft_cap_allows_open(self, model_id: str) -> None:
+    async def _ensure_soft_cap_allows_open(self, model_id: str, opening: int = 0) -> None:
         """Raise SessionPoolBusyError when OPEN count is at/above the soft cap.
 
         Soft by design: checked just before open; multi-replica races may briefly
         overshoot. Cap 0 disables the check entirely.
+
+        opening: opens on their way that have no row yet (video clips accepted
+        but not opened), counted as OPEN. Chat passes none.
         """
         soft_cap = self._soft_cap_for_model(model_id)
         if soft_cap <= 0:
             return
 
         async with get_db() as db:
-            open_count = await self._count_open_sessions(db, model_id)
+            open_count = await self._count_open_sessions(db, model_id) + opening
 
         if open_count >= soft_cap:
             retry_after = max(1, int(settings.SESSION_SOFT_CAP_RETRY_AFTER_SECONDS))
@@ -621,6 +624,71 @@ class SessionRoutingService:
             return False
         return True
 
+    def _video_cooldown_redis_key(self, model_id: str, provider: str) -> str:
+        return f"apigw:video_bid_cooldown:{self._provider_cooldown_key(model_id, provider)}"
+
+    async def _mark_video_bid_cooldown(self, model_id: str, provider: Optional[str]) -> None:
+        """The open cool-off of a video bid, in Redis so every replica sees it
+        and any replica can clear it; the per-replica dict when Redis is down."""
+        if not provider:
+            return
+        ttl = float(getattr(settings, "SESSION_OPEN_PROVIDER_COOLDOWN_SECONDS", 0) or 0)
+        if ttl <= 0:
+            return
+        try:
+            from .cache_service import cache_service
+            redis = await cache_service._acquire_redis()
+            if redis is not None:
+                await redis.set(self._video_cooldown_redis_key(model_id, provider), "1",
+                                ex=max(1, int(ttl)))
+                return
+        except Exception as e:
+            logger.warning(
+                "Video bid cool-off Redis write failed; using local fallback",
+                error=str(e),
+                event_type="video_bid_cooldown_redis_error",
+            )
+        self._mark_provider_open_cooldown(model_id, provider)
+
+    async def video_bid_on_cooldown(self, model_id: str, provider: Optional[str]) -> bool:
+        """Whether a video open skips this provider for the model (open cool-off).
+
+        The per-replica dict counts too: it holds a cool-off marked while
+        Redis was down."""
+        if not provider:
+            return False
+        if self._provider_on_open_cooldown(model_id, provider):
+            return True
+        try:
+            from .cache_service import cache_service
+            redis = await cache_service._acquire_redis()
+            if redis is not None:
+                return bool(await redis.exists(self._video_cooldown_redis_key(model_id, provider)))
+        except Exception as e:
+            logger.warning(
+                "Video bid cool-off Redis read failed; using local fallback",
+                error=str(e),
+                event_type="video_bid_cooldown_redis_error",
+            )
+        return False
+
+    async def _clear_video_bid_cooldown(self, model_id: str, provider: Optional[str]) -> None:
+        """A closed video session freed its provider's slot: end the cool-off."""
+        if not provider:
+            return
+        self._provider_open_cooldown.pop(self._provider_cooldown_key(model_id, provider), None)
+        try:
+            from .cache_service import cache_service
+            redis = await cache_service._acquire_redis()
+            if redis is not None:
+                await redis.delete(self._video_cooldown_redis_key(model_id, provider))
+        except Exception as e:
+            logger.warning(
+                "Video bid cool-off Redis clear failed",
+                error=str(e),
+                event_type="video_bid_cooldown_redis_error",
+            )
+
     @staticmethod
     def _is_open_bid_walk_retryable(exc: BaseException) -> bool:
         """True when InitiateSession failure may succeed on the next peer bid."""
@@ -718,13 +786,20 @@ class SessionRoutingService:
 
         Each entry is opened for its own session_seconds, so its stake is
         pps × session_seconds × SESSION_STAKE_FACTOR. Entries without a bid,
-        a price or a positive session_seconds are dropped.
+        a price or a positive session_seconds are dropped. The fuse is the
+        smaller positive of max_stake_mor and VIDEO_MAX_STAKE_MOR; neither
+        positive: no fuse.
 
         Raises SessionOpenError when no entry is usable and
         SessionStakeFuseError when every usable entry is over the fuse.
         """
         policy = get_session_routing_policy()
-        max_stake = float(policy.max_stake_mor or 0)
+        limits = [
+            limit
+            for limit in (float(policy.max_stake_mor or 0), float(settings.VIDEO_MAX_STAKE_MOR or 0))
+            if limit > 0
+        ]
+        max_stake = min(limits) if limits else 0.0
 
         priced: List[Dict[str, Any]] = []
         for candidate in candidates:
@@ -1780,7 +1855,8 @@ class SessionRoutingService:
 
         Shared by the chat open (_open_session_for_model) and the video open
         (open_session_for_quote). Candidates are walked in the given order
-        with an accumulating omit set, the per-provider open cool-off, at most
+        with an accumulating omit set, the per-provider open cool-off (per
+        replica for chat; shared in Redis for VIDEO_JOBS_ENDPOINT), at most
         SESSION_OPEN_BID_WALK_MAX_ATTEMPTS opens, and the adaptive wallet
         throttle. Only capacity/unreachable failures move to the next peer.
 
@@ -1822,13 +1898,19 @@ class SessionRoutingService:
         attempts = 0
         last_proxy_error: Optional[BaseException] = None
         skipped_cooldown = 0
+        video = endpoint == VIDEO_JOBS_ENDPOINT
 
         for chosen_bid in candidates:
             provider = (chosen_bid.get("provider") or "").strip()
             provider_l = provider.lower()
             if provider_l and provider_l in omitted:
                 continue
-            if self._provider_on_open_cooldown(model_id, provider):
+            cooling = (
+                await self.video_bid_on_cooldown(model_id, provider)
+                if video
+                else self._provider_on_open_cooldown(model_id, provider)
+            )
+            if cooling:
                 skipped_cooldown += 1
                 continue
             if attempts >= max_attempts:
@@ -1958,7 +2040,10 @@ class SessionRoutingService:
                     ) from e
                 if provider_l:
                     omitted.add(provider_l)
-                self._mark_provider_open_cooldown(model_id, provider)
+                if video:
+                    await self._mark_video_bid_cooldown(model_id, provider)
+                else:
+                    self._mark_provider_open_cooldown(model_id, provider)
                 bid_logger.warning(
                     "Open bid walk: capacity/unreachable; trying next peer",
                     omitted_providers=sorted(omitted),
@@ -2078,7 +2163,9 @@ class SessionRoutingService:
         Then it closes on chain through the adaptive throttle and reads the
         daylock, with no DB connection held and bounded by
         VIDEO_CLOSE_DEADLINE_SECONDS from the claim, marks the row CLOSED with
-        that daylock, and only after the mark adds it to the premium counter.
+        that daylock, and only after the mark adds it to the premium counter
+        and ends the open cool-off of the session's provider for its model
+        (the provider has freed the slot).
 
         On an on-chain close error, the deadline, or a cancel mid-close, the
         row goes back to OPEN with active_requests=0 and error_reason set,
@@ -2226,6 +2313,8 @@ class SessionRoutingService:
                 close_logger.warning("Daylock meter failed",
                                      error=str(e),
                                      event_type="daylock_meter_error")
+        if session_row is not None and session_row.endpoint == VIDEO_JOBS_ENDPOINT:
+            await self._clear_video_bid_cooldown(session_row.model_id, session_row.provider_address)
         close_logger.info("Session closed successfully",
                           event_type="session_closed")
         return True
