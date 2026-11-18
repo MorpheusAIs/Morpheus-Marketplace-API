@@ -1,6 +1,6 @@
 """Video job state machine: the refresh transition table, the submit failure
-paths, idempotency, and the sweeper's stuck-submit, close-retry and
-stranded-hold rules.
+paths and refusals, idempotency, busy bids, and the sweeper's stuck-submit,
+close and stranded-hold rules.
 
 Money rules: a clip is charged only when the node delivers it; every other
 end voids the hold. A clip's session is closed once the clip is terminal,
@@ -33,7 +33,11 @@ from src.db.models import VideoJob
 from src.schemas.billing import UsageFinalizeResponse, UsageHoldResponse, UsageVoidResponse
 from src.services.pricing.types import ClipPricing
 from src.services.proxy_router_service import ProxyRouterServiceError
-from src.services.session_routing_service import SessionOpenError, SessionPoolBusyError
+from src.services.session_routing_service import (
+    SessionMorReservedError,
+    SessionOpenError,
+    SessionPoolBusyError,
+)
 from src.services.video import jobs
 from src.services.video.params import VideoRequest, to_video_object
 
@@ -380,6 +384,108 @@ async def test_concurrent_duplicate_key_returns_the_first_video_and_holds_nothin
     assert not jobs._background_tasks
 
 
+PROVIDER = _quote_entry()["provider"]
+
+
+@pytest.mark.parametrize(
+    "status, node_job_id, waited_seconds, setting, busy",
+    [
+        ("queued", "vj_9", 40, 30, True),
+        # Fresher than the threshold (max(setting, poll interval + 15) = 35)
+        ("queued", "vj_9", 30, 30, False),
+        # Rendering, or never confirmed by the node: not waiting in the vendor's queue
+        ("in_progress", "vj_9", 40, 30, False),
+        ("queued", None, 40, 30, False),
+        # A threshold below one poll interval would call a rendering clip waiting
+        ("queued", "vj_9", 25, 1, False),
+        # A task the vendor lost must not hold the model off until the job's age limit
+        ("queued", "vj_9", jobs._VENDOR_QUEUE_STUCK_SECONDS, 30, False),
+    ],
+)
+async def test_a_clip_waiting_in_the_vendor_queue_makes_its_provider_busy(
+    status, node_job_id, waited_seconds, setting, busy
+):
+    waiting = _row(status=status, node_job_id=node_job_id, provider=PROVIDER.upper(),
+                   created_at=_utcnow() - timedelta(seconds=waited_seconds + 60),
+                   updated_at=_utcnow() - timedelta(seconds=waited_seconds))
+    candidate = _quote_entry()
+
+    with patch.object(jobs, "get_db", FakeDb(waiting).get_db), \
+            patch.object(settings, "VIDEO_VENDOR_QUEUE_BUSY_SECONDS", setting), \
+            patch.object(settings, "VIDEO_JOB_POLL_INTERVAL_SECONDS", 20):
+        free = await jobs._drop_vendor_queue_busy(MODEL_ID, [candidate])
+
+    assert free == ([] if busy else [candidate])
+
+
+GATE_BUSY = ("_ensure_soft_cap_allows_open", SessionPoolBusyError("pool full", retry_after=15))
+GATE_LOW_WATER = ("_ensure_mor_low_water_allows_open", SessionMorReservedError("reserved for warm models"))
+OVER_FUSE = "over_fuse"
+BIDS_BUSY = "bids_busy"
+
+
+@pytest.mark.parametrize(
+    "refusal, status, error_type, retry_after, quoted",
+    [
+        (GATE_BUSY, 429, "model_busy", "15", False),
+        (GATE_LOW_WATER, 503, "model_unavailable", None, False),
+        (OVER_FUSE, 503, "model_unavailable", None, True),
+        (BIDS_BUSY, 429, "model_busy", str(settings.SESSION_SOFT_CAP_RETRY_AFTER_SECONDS), True),
+    ],
+)
+async def test_a_refused_submit_creates_no_video_and_holds_nothing(refusal, status, error_type, retry_after, quoted):
+    waiting = _row(status="queued", node_job_id="vj_9", provider=PROVIDER,
+                   updated_at=_utcnow() - timedelta(seconds=jobs.vendor_queue_busy_seconds() + 5))
+    db = FakeDb(waiting) if refusal == BIDS_BUSY else FakeDb()
+    hold = AsyncMock()
+    patches = _quote_patches(db, hold)
+    if refusal == OVER_FUSE:
+        patches.append(patch.object(settings, "VIDEO_MAX_STAKE_MOR", 0.000001))
+    elif refusal != BIDS_BUSY:
+        gate, error = refusal
+        patches.append(patch.object(jobs.session_routing_service, gate, AsyncMock(side_effect=error)))
+    for p in patches:
+        p.start()
+    try:
+        quote = jobs.proxy_router_service.videoQuote
+        with pytest.raises(jobs.VideoError) as refused:
+            await _submit()
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert (refused.value.status_code, refused.value.error_type, refused.value.code) == (status, error_type, error_type)
+    assert (refused.value.headers or {}).get("Retry-After") == retry_after
+    assert quote.await_count == quoted
+    assert list(db.rows) == ([waiting.id] if refusal == BIDS_BUSY else [])
+    hold.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "pending_values, refused",
+    [
+        # Accepted, its session not open yet: counts against the cap
+        (dict(session_id=None), True),
+        # Its session is open: already among the OPEN sessions
+        (dict(), False),
+        # A dead submit the sweeper will fail must not block the model
+        (dict(session_id=None, updated_at=_utcnow() - timedelta(seconds=jobs._SESSION_OPEN_SECONDS + 60)), False),
+    ],
+)
+async def test_soft_cap_at_submit_counts_clips_accepted_but_not_opened(pending_values, refused):
+    db = FakeDb(_row(status="pending", node_job_id=None, **pending_values))
+
+    with patch.object(jobs, "get_db", db.get_db), \
+            patch("src.services.session_routing_service.get_db", db.get_db), \
+            patch.object(settings, "SESSION_SOFT_CAP_DEFAULT", 2), \
+            patch.object(jobs.session_routing_service, "_count_open_sessions", AsyncMock(return_value=1)):
+        if refused:
+            with pytest.raises(SessionPoolBusyError):
+                await jobs._ensure_soft_cap_allows_submit(MODEL_ID)
+        else:
+            await jobs._ensure_soft_cap_allows_submit(MODEL_ID)
+
+
 STALE = timedelta(seconds=jobs.pending_timeout_seconds() + 60)
 SUBMITTING = timedelta(seconds=settings.PROXY_ROUTER_VIDEO_SUBMIT_TIMEOUT)
 
@@ -452,7 +558,7 @@ async def _hang(*args, **kwargs):
         # close is still running: the next pass retries
         (CLIP_ENDED, False, "OPEN", True, False),
         (CLIP_ENDED, False, "CLOSING", True, False),
-        # A close stuck on a slow chain is cut short, so the pass ends
+        # A close stuck on a slow chain is cut short and retried later
         (CLIP_ENDED, HANGS, "OPEN", True, False),
         # Only the expiry close at EndsAt ends the session of an unconfirmed submit
         (SUBMIT_UNCONFIRMED, None, "OPEN", False, False),
@@ -470,36 +576,45 @@ async def test_session_close_is_stamped_only_once_the_session_is_closed(
             patch.object(jobs.session_routing_service, "close_session_now", close), \
             patch.object(jobs.session_routing_service, "get_session_state", AsyncMock(return_value=routed_state)):
         await jobs.sweep()
+        await _drain_background_tasks()
 
     assert close.await_count == close_sent
     assert (row.session_closed_at is not None) == stamped
 
 
-async def test_sweep_closes_sessions_only_after_every_refresh():
-    """A slow chain delays no clip's status, settlement or void: the pass
-    closes the sessions of the clips it ended last."""
+async def test_sweep_starts_every_close_at_once_and_never_twice():
+    """A slow chain delays neither the pass nor the next one: the clip the
+    pass ends and every terminal row get their close started in that pass
+    (not 5 per pass), VIDEO_CLOSE_CONCURRENCY on chain at once, and a close
+    still running is not started again."""
     ended = _row(status="in_progress", node_job_id="vj_1")
-    rendering = _row(status="in_progress", node_job_id="vj_2", session_id="0x" + "6b" * 32)
-    events = []
-
-    async def read(node_job_id):
-        events.append(("read", node_job_id))
-        return SUCCEEDED if node_job_id == "vj_1" else RUNNING
+    finished = [_row(status="failed", billing_state="voided", error_code="job_failed",
+                     session_id=f"0x{i:064x}") for i in range(6)]
+    chain_free, on_chain = asyncio.Event(), []
 
     async def close(session_id, reason=""):
-        events.append(("close", session_id))
+        on_chain.append(session_id)
+        await chain_free.wait()
         return True
 
     settle, void = _billing_mocks()
-    with patch.object(jobs, "get_db", FakeDb(ended, rendering).get_db), \
-            patch("src.services.proxy_router_service.getVideoJob", AsyncMock(side_effect=read)), \
+    with patch.object(jobs, "get_db", FakeDb(ended, *finished).get_db), \
+            patch("src.services.proxy_router_service.getVideoJob", AsyncMock(return_value=SUCCEEDED)), \
             patch.object(jobs.billing_service, "settle_fixed_hold", settle), \
             patch.object(jobs.billing_service, "void_usage", void), \
+            patch.object(settings, "VIDEO_CLOSE_CONCURRENCY", 5), \
+            patch.object(jobs, "_close_slots", None), \
             patch.object(jobs.session_routing_service, "close_session_now", AsyncMock(side_effect=close)):
-        await jobs.sweep()
+        passes = [await jobs.sweep(), await jobs.sweep()]
+        for _ in range(20):
+            await asyncio.sleep(0)
+        running = len(on_chain)
+        chain_free.set()
+        await _drain_background_tasks()
 
-    assert events == [("read", "vj_1"), ("read", "vj_2"), ("close", SESSION_ID)]
-    assert ended.status == "completed" and ended.session_closed_at is not None
+    assert [summary["closes_started"] for summary in passes] == [7, 0]
+    assert running == 5
+    assert all(row.session_closed_at is not None for row in [ended, *finished])
 
 
 @pytest.mark.parametrize(

@@ -2,9 +2,14 @@
 """
 OpenAI Videos compatible endpoints, extended with Morpheus fields.
 
-- POST /videos: quote the clip on the marketplace and hold its fixed
-  price, then answer queued. Opening its session and submitting the job to
-  the node continue in the background; a failure there shows on GET.
+- POST /videos: check that the gateway can open a session for the model,
+  quote the clip on the marketplace and hold its fixed price, then answer
+  queued. A model at its session soft cap, or whose quoted bids are all
+  busy, answers 429 model_busy with Retry-After; a hosted-gateway refusal
+  (allowlist, MOR reserve, premium budget, stake limit) answers 503
+  model_unavailable. Neither creates a video or a hold. Opening its session
+  and submitting the job to the node continue in the background; a failure
+  there shows on GET.
   Idempotency-Key: a retried POST answers with the first video, no new hold.
 - GET /videos, GET /videos/{video_id}: the caller's jobs only.
 - GET /videos/{video_id}/content: 307 to the vendor's link (no proxying), or
@@ -240,9 +245,13 @@ def _content_redirect(value: Optional[str]) -> bool:
         402: {"description": "Insufficient credits (error.type insufficient_balance)"},
         410: VIDEO_DISABLED_DOC,
         413: {"description": "The body is larger than 16 MiB (error.type request_too_large)"},
-        429: {"description": "Rate limited; see Retry-After"},
+        429: {"description": "Rate limited (error.code rate_limit_exceeded), or the model is busy: "
+                            "its session pool is full or every quoted bid is busy (error.type "
+                            "model_busy); see Retry-After. No video is created"},
         502: {"description": "The node could not quote the clip (error.type proxy_error)"},
-        503: {"description": "No provider or price for this model (error.type model_unavailable)"},
+        503: {"description": "No provider or price for this model, or the hosted gateway does not "
+                            "open sessions for it right now: allowlist, MOR reserve, premium budget, "
+                            "stake limit (error.type model_unavailable). No video is created"},
     },
     openapi_extra=create_request_body(),
     dependencies=[Depends(videos_enabled)],
