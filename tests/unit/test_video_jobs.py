@@ -468,8 +468,10 @@ async def test_a_refused_submit_creates_no_video_and_holds_nothing(refusal, stat
         (dict(session_id=None), True),
         # Its session is open: already among the OPEN sessions
         (dict(), False),
-        # A dead submit the sweeper will fail must not block the model
-        (dict(session_id=None, updated_at=_utcnow() - timedelta(seconds=jobs._SESSION_OPEN_SECONDS + 60)), False),
+        # Still opening after one open's time (the walk tries more bids): counts
+        (dict(session_id=None, updated_at=_utcnow() - timedelta(seconds=jobs._SESSION_OPEN_SECONDS + 60)), True),
+        # A submit the sweeper has given up must not block the model
+        (dict(session_id=None, updated_at=_utcnow() - timedelta(seconds=jobs.pending_timeout_seconds() + 60)), False),
     ],
 )
 async def test_soft_cap_at_submit_counts_clips_accepted_but_not_opened(pending_values, refused):

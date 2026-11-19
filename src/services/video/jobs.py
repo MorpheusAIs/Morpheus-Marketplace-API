@@ -946,9 +946,9 @@ def _model_busy_error(message: str, retry_after: Optional[int] = None) -> VideoE
 
 async def _count_opening(model_id: str) -> int:
     """Clips of the model accepted but not yet opened: pending rows with no
-    session, updated within one session open. Older ones are dead submits
-    the sweeper fails, and must not block the model."""
-    since = _utcnow() - timedelta(seconds=_SESSION_OPEN_SECONDS)
+    session that the sweeper has not given up (pending_timeout_seconds()).
+    An open walk can outlast one open, and a clip still opening must count."""
+    since = _utcnow() - timedelta(seconds=pending_timeout_seconds())
     async with get_db() as db:
         rows = (await db.execute(
             select(VideoJob.id).where(

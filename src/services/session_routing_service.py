@@ -635,14 +635,16 @@ class SessionRoutingService:
         ttl = float(getattr(settings, "SESSION_OPEN_PROVIDER_COOLDOWN_SECONDS", 0) or 0)
         if ttl <= 0:
             return
+        from .cache_service import cache_service
         try:
-            from .cache_service import cache_service
             redis = await cache_service._acquire_redis()
             if redis is not None:
                 await redis.set(self._video_cooldown_redis_key(model_id, provider), "1",
                                 ex=max(1, int(ttl)))
                 return
         except Exception as e:
+            # Trip the cache breaker: the next checks go local, not into another timeout
+            cache_service._note_op_error(e)
             logger.warning(
                 "Video bid cool-off Redis write failed; using local fallback",
                 error=str(e),
@@ -659,12 +661,15 @@ class SessionRoutingService:
             return False
         if self._provider_on_open_cooldown(model_id, provider):
             return True
+        from .cache_service import cache_service
         try:
-            from .cache_service import cache_service
             redis = await cache_service._acquire_redis()
             if redis is not None:
                 return bool(await redis.exists(self._video_cooldown_redis_key(model_id, provider)))
         except Exception as e:
+            # Trip the cache breaker, so a POST does not wait out a Redis
+            # timeout for every candidate bid
+            cache_service._note_op_error(e)
             logger.warning(
                 "Video bid cool-off Redis read failed; using local fallback",
                 error=str(e),
@@ -677,12 +682,13 @@ class SessionRoutingService:
         if not provider:
             return
         self._provider_open_cooldown.pop(self._provider_cooldown_key(model_id, provider), None)
+        from .cache_service import cache_service
         try:
-            from .cache_service import cache_service
             redis = await cache_service._acquire_redis()
             if redis is not None:
                 await redis.delete(self._video_cooldown_redis_key(model_id, provider))
         except Exception as e:
+            cache_service._note_op_error(e)
             logger.warning(
                 "Video bid cool-off Redis clear failed",
                 error=str(e),
@@ -2881,6 +2887,8 @@ class SessionRoutingService:
 
         Video clip sessions too: close_session_now leaves an OPEN one near or
         past expires_at to this cleanup, so the two never close it together.
+        A video session closed here ends its provider's open cool-off for the
+        model, as close_session_now does; a failed close keeps it.
         """
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         
@@ -2906,12 +2914,14 @@ class SessionRoutingService:
             session.updated_at = now
 
             close_result = None
+            closed = False
             try:
                 close_result = await self._run_onchain(
                     lambda sid=session.id: proxy_router_service.closeSession(sid),
                     op_name="closeSession",
                     op_logger=logger,
                 )
+                closed = True
             except Exception as e:
                 # Proxy SessionExpiryHandler may already have closed it (or
                 # will). Meter from getSessionStatus / pro-rata anyway so
@@ -2924,6 +2934,8 @@ class SessionRoutingService:
             await self._record_daylock_on_close(
                 session, close_result=close_result
             )
+            if closed and session.endpoint == VIDEO_JOBS_ENDPOINT:
+                await self._clear_video_bid_cooldown(session.model_id, session.provider_address)
         
         if expired_sessions:
             await db.commit()

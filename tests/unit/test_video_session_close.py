@@ -365,28 +365,35 @@ CHAT_MODEL_ID = "0x" + "c4" * 32
 
 
 @pytest.mark.parametrize(
-    "chain_outcome, cooled_after",
+    "expires_in, chain_outcome, cooled_after",
     [
         # The provider freed the slot: its clips of the model may open again
-        (CLOSED_ON_CHAIN, False),
+        (LIVE, CLOSED_ON_CHAIN, False),
         # The session may still hold the slot
-        (RPC_DOWN, True),
+        (LIVE, RPC_DOWN, True),
+        # The same when the expiry cleanup closes the session
+        (EXPIRED, CLOSED_ON_CHAIN, False),
+        (EXPIRED, RPC_DOWN, True),
     ],
 )
 @pytest.mark.asyncio
-async def test_a_closed_video_session_ends_its_provider_cool_off(chain_outcome, cooled_after):
+async def test_a_closed_video_session_ends_its_provider_cool_off(expires_in, chain_outcome, cooled_after):
     row = _video_session()
-    row.expires_at = _utcnow() + LIVE
+    row.expires_at = _utcnow() + expires_in
     row.provider_address = PROVIDER
     service = SessionRoutingService()
+    db = FakeDb(row)
     close = AsyncMock(side_effect=chain_outcome) if isinstance(chain_outcome, BaseException) \
         else AsyncMock(return_value=chain_outcome)
-    with patch.object(srs, "get_db", FakeDb(row).get_db), \
+    with patch.object(srs, "get_db", db.get_db), \
             patch.object(srs.proxy_router_service, "closeSession", close), \
             patch.object(service, "_read_daylock_on_close", AsyncMock(return_value=None)):
         await service._mark_video_bid_cooldown(MODEL_ID, PROVIDER.lower())
         service._mark_provider_open_cooldown(CHAT_MODEL_ID, PROVIDER)
-        await _close_now(service)
+        if expires_in is EXPIRED:
+            await service._cleanup_expired_sessions(db)
+        else:
+            await _close_now(service)
 
         assert await service.video_bid_on_cooldown(MODEL_ID, PROVIDER) is cooled_after
     # A chat cool-off of the same provider is not the video one
