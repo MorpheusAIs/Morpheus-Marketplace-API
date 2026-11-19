@@ -7,12 +7,18 @@ Row status:   pending -> queued / in_progress -> completed | failed
 Billing:      none -> held -> charged | voided
 
 - submit_video runs POST /videos after the route resolved the model:
-  quote -> price -> row (pending) -> fixed hold, then the route answers
-  queued. The session open and the node submit run in a detached task; a
-  failure there fails the row and voids the hold, and the client reads it
+  open gates -> quote -> stake fuse and busy bids -> price -> soft cap ->
+  row (pending) -> fixed hold, then the route answers queued. A gate that
+  refuses answers 429 model_busy or 503 model_unavailable before any row or
+  hold exists. The session open and the node submit run in a detached task;
+  a failure there fails the row and voids the hold, and the client reads it
   on GET.
+- A bid is busy while its provider is on open cool-off for the model, or
+  while one of its clips of the model waits in the vendor's queue longer
+  than vendor_queue_busy_seconds(); a video open skips busy bids.
 - refresh_job reads the node job and applies the transition; GET and the
-  sweeper share it.
+  sweeper share it. A row found terminal gets its session close scheduled
+  in the background, at most VIDEO_CLOSE_CONCURRENCY on chain at once.
 - sweep is one pass of the background sweeper (main.video_job_sweep_loop).
 
 A clip's session is closed only once its job is terminal on the node, or
@@ -34,7 +40,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from sqlalchemy import or_, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
@@ -60,6 +66,7 @@ from src.services.billing_service import billing_service
 from src.services.pricing.types import CLIP_PRICE_QUANTUM
 from src.services.session_routing_service import (
     VIDEO_CLOSE_DEADLINE_SECONDS,
+    SessionPoolBusyError,
     SessionRoutingError,
     session_routing_service,
 )
@@ -73,22 +80,24 @@ UNIT_TYPE_VIDEO_SECOND = "video_second"
 # Sweeper passes in a row whose node read is a 404 before a job is given up
 # as lost. Only the sweeper counts them, so it takes NODE_MISS_LIMIT poll intervals.
 NODE_MISS_LIMIT = 3
-# Rows per sweeper pass for stuck submits, stranded holds and sessions left
-# to the expiry close (each leaves the set once handled, so a limit cannot
-# starve the rest)
+# Rows per sweeper pass for stuck submits, stranded holds, session closes and
+# sessions left to the expiry close (each leaves the set once handled, so a
+# limit cannot starve the rest)
 SWEEP_BATCH_SIZE = 200
-# On-chain session closes per sweeper pass, and again as many reclaims of
-# video sessions left CLOSING by a closer that died. They run last and
-# together, each bounded by SWEEP_CLOSE_TIMEOUT_SECONDS, so a slow chain
-# delays no status refresh, settlement or void; a close that does not go
-# through moves its row behind the others (updated_at), so a stuck close
-# cannot hold a slot pass after pass. A close cut by the timeout goes back to
-# OPEN for a retry.
-SWEEP_CLOSE_BATCH_SIZE = 5
-# close_session_now bounds its own on-chain close and daylock read; this
-# backstop also covers the row reads and writes around it, so it never cuts
-# a close that deadline lets finish
+# One background session close, counted from when it gets its place among
+# the VIDEO_CLOSE_CONCURRENCY. close_session_now bounds its own on-chain
+# close and daylock read; this backstop also covers the row reads and writes
+# around it, so it never cuts a close that deadline lets finish. A close cut
+# by it goes back to OPEN, and its row behind the other retries.
 SWEEP_CLOSE_TIMEOUT_SECONDS = VIDEO_CLOSE_DEADLINE_SECONDS + 30.0
+# A vendor-queue threshold under one poll interval (plus this margin) would
+# call a rendering clip waiting: a row turns in_progress only on a refresh
+_VENDOR_QUEUE_POLL_MARGIN_SECONDS = 15
+# A clip older than this no longer makes its provider busy: by then it is a
+# task the vendor lost, not its queue, and it must not hold the model off
+# until VIDEO_JOB_MAX_AGE_SECONDS. A queue that is really that long keeps
+# the provider busy through its newer clips.
+_VENDOR_QUEUE_STUCK_SECONDS = 900
 # Shutdown waits this long for detached submits and closes, then cancels the
 # rest: a cancelled submit is failed by the sweeper, a cancelled close goes
 # back to OPEN for a retry.
@@ -130,6 +139,10 @@ VIDEO_ID_RE = re.compile(r"video_[0-9a-f]{32}")
 
 # Strong references to detached tasks (submits, background closes)
 _background_tasks: Set[asyncio.Task] = set()
+# Sessions with a close scheduled or running in this process
+_scheduled_closes: Set[str] = set()
+# (event loop, semaphore) of the on-chain close places (VIDEO_CLOSE_CONCURRENCY)
+_close_slots: Optional[Tuple[asyncio.AbstractEventLoop, asyncio.Semaphore]] = None
 # video id -> monotonic time of this process's last node read
 _last_node_reads: "OrderedDict[str, float]" = OrderedDict()
 
@@ -238,6 +251,38 @@ def _reap(task: asyncio.Task) -> None:
                      task=task.get_name(),
                      error=str(exc),
                      event_type="video_background_task_error")
+
+
+def _close_slot() -> asyncio.Semaphore:
+    """The places for video session closes on chain at once in this process."""
+    global _close_slots
+    loop = asyncio.get_running_loop()
+    if _close_slots is None or _close_slots[0] is not loop:
+        _close_slots = (loop, asyncio.Semaphore(max(1, int(settings.VIDEO_CLOSE_CONCURRENCY))))
+    return _close_slots[1]
+
+
+def _schedule_close(session_id: str, name: str, close: Callable[[], Awaitable[Any]]) -> bool:
+    """
+    Run close() in a background task once it has a close place, unless this
+    process already has a close of session_id scheduled or running. The place
+    is taken before close_session_now claims the row, so its deadline is not
+    spent waiting.
+
+    Returns:
+        True when the close was scheduled.
+    """
+    if session_id in _scheduled_closes:
+        return False
+    _scheduled_closes.add(session_id)
+
+    async def run() -> Any:
+        async with _close_slot():
+            return await close()
+
+    task = _spawn(run(), name=name)
+    task.add_done_callback(lambda _: _scheduled_closes.discard(session_id))
+    return True
 
 
 class _SubmitInterrupted(Exception):
@@ -769,20 +814,57 @@ async def _requeue_close(video_id: str) -> None:
                        event_type="video_session_close_requeue_error")
 
 
-async def _ensure_session_closed(job: VideoJob, *, background: bool) -> None:
+async def _bounded_close(video_id: str, session_id: str, reason: str) -> bool:
+    """One on-chain close of a clip's session, bounded by
+    SWEEP_CLOSE_TIMEOUT_SECONDS. A close cut by the timeout goes back to OPEN
+    and its row behind the other retries; an error is logged, not raised."""
+    try:
+        return await asyncio.wait_for(
+            _close_job_session(video_id, session_id, reason),
+            timeout=SWEEP_CLOSE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Video session close timed out; the sweeper retries it",
+                       video_id=video_id,
+                       session_id=session_id,
+                       timeout_seconds=SWEEP_CLOSE_TIMEOUT_SECONDS,
+                       event_type="video_session_close_timeout")
+        await _requeue_close(video_id)
+    except Exception as e:
+        logger.error("Error closing video session",
+                     video_id=video_id,
+                     session_id=session_id,
+                     error_class=type(e).__name__,
+                     error=str(e),
+                     event_type="video_sweep_close_error")
+    return False
+
+
+def _schedule_job_close(video_id: str, session_id: str, status: str) -> bool:
+    """Schedule the on-chain close of a terminal clip's session (see _schedule_close)."""
+    return _schedule_close(
+        session_id,
+        f"video-close-{video_id}",
+        lambda: _bounded_close(video_id, session_id, f"video_{status}"),
+    )
+
+
+async def _ensure_session_closed(job: VideoJob) -> None:
+    """Close a terminal clip's session: in the background when the gateway
+    may close it, else only read whether the expiry close has ended it."""
     if not job.session_id or job.session_closed_at is not None:
         return
-    close = _close_job_session(
-        job.id, job.session_id, f"video_{job.status}", close_now=_session_closable(job)
-    )
-    if background:
-        _spawn(close, name=f"video-close-{job.id}")
+    if _session_closable(job):
+        _schedule_job_close(job.id, job.session_id, job.status)
     else:
-        await close
+        await _close_job_session(job.id, job.session_id, f"video_{job.status}", close_now=False)
 
 
 async def _close_unrecorded_session(session_id: str) -> None:
-    """Close a session that never made it onto its row (no job was submitted on it)."""
+    """Close a session that never made it onto its row (no job was submitted on it).
+
+    Closed at once, not behind the other closes: no row retries this one, so
+    a wait past its expiry would day-lock its whole stake."""
     try:
         await session_routing_service.close_session_now(session_id, reason="video_submit_interrupted")
     except Exception as e:
@@ -844,6 +926,100 @@ async def _quote_candidates(
     raise VideoError(503, "model_unavailable",
                      f"No provider can take a {model_name} video right now",
                      code="model_unavailable")
+
+
+def _gate_error(e: SessionRoutingError) -> VideoError:
+    """A gate refusal at POST /videos in the video error shape, as chat maps it."""
+    if isinstance(e, SessionPoolBusyError):
+        return _model_busy_error(e.message, e.retry_after)
+    # Allowlist, MOR low-water mark, premium budget, stake fuse, or no
+    # quoted entry with a usable price
+    return VideoError(503, "model_unavailable", e.message, code="model_unavailable")
+
+
+def _model_busy_error(message: str, retry_after: Optional[int] = None) -> VideoError:
+    if retry_after is None:
+        retry_after = max(1, int(settings.SESSION_SOFT_CAP_RETRY_AFTER_SECONDS))
+    return VideoError(429, "model_busy", message, code="model_busy",
+                      headers={"Retry-After": str(retry_after)})
+
+
+async def _count_opening(model_id: str) -> int:
+    """Clips of the model accepted but not yet opened: pending rows with no
+    session that the sweeper has not given up (pending_timeout_seconds()).
+    An open walk can outlast one open, and a clip still opening must count."""
+    since = _utcnow() - timedelta(seconds=pending_timeout_seconds())
+    async with get_db() as db:
+        rows = (await db.execute(
+            select(VideoJob.id).where(
+                VideoJob.model_id == model_id,
+                VideoJob.status == VideoJobStatus.pending.value,
+                VideoJob.session_id.is_(None),
+                VideoJob.updated_at >= since,
+            )
+        )).scalars().all()
+    return len(rows)
+
+
+async def _ensure_soft_cap_allows_submit(model_id: str) -> None:
+    await session_routing_service._ensure_soft_cap_allows_open(
+        model_id, opening=await _count_opening(model_id)
+    )
+
+
+async def _ensure_open_gates_allow_submit(model_id: str) -> None:
+    """The open gates that need no quote, before the node is asked for one."""
+    srs = session_routing_service
+    await srs._ensure_allowlist_allows_open(model_id)
+    await _ensure_soft_cap_allows_submit(model_id)
+    await srs._ensure_mor_low_water_allows_open(model_id)
+    await srs._ensure_premium_budget_allows_open(model_id)
+
+
+def vendor_queue_busy_seconds() -> int:
+    """How long a clip may wait in the vendor's queue before its provider is
+    busy for the model. 0: the rule is off."""
+    configured = int(settings.VIDEO_VENDOR_QUEUE_BUSY_SECONDS or 0)
+    if configured <= 0:
+        return 0
+    return max(configured, int(settings.VIDEO_JOB_POLL_INTERVAL_SECONDS) + _VENDOR_QUEUE_POLL_MARGIN_SECONDS)
+
+
+async def _vendor_queue_busy_providers(model_id: str) -> Set[str]:
+    """Providers (lowercased) with a clip of the model queued on the node,
+    not yet rendering, for longer than vendor_queue_busy_seconds(). A clip
+    created more than _VENDOR_QUEUE_STUCK_SECONDS ago does not count."""
+    threshold = vendor_queue_busy_seconds()
+    if threshold <= 0:
+        return set()
+    now = _utcnow()
+    async with get_db() as db:
+        providers = (await db.execute(
+            select(VideoJob.provider).where(
+                VideoJob.model_id == model_id,
+                VideoJob.status == VideoJobStatus.queued.value,
+                VideoJob.node_job_id.isnot(None),
+                VideoJob.provider.isnot(None),
+                VideoJob.updated_at < now - timedelta(seconds=threshold),
+                VideoJob.created_at >= now - timedelta(seconds=_VENDOR_QUEUE_STUCK_SECONDS),
+            )
+        )).scalars().all()
+    return {str(provider).strip().lower() for provider in providers if provider}
+
+
+async def _drop_vendor_queue_busy(model_id: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    busy = await _vendor_queue_busy_providers(model_id)
+    return [c for c in candidates if str(c.get("provider") or "").strip().lower() not in busy]
+
+
+async def _drop_busy(model_id: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The candidates whose provider is busy for the model left out: open
+    cool-off, or a clip waiting in the vendor's queue. Order kept."""
+    free = await _drop_vendor_queue_busy(model_id, candidates)
+    return [
+        c for c in free
+        if not await session_routing_service.video_bid_on_cooldown(model_id, c.get("provider"))
+    ]
 
 
 async def _clip_price(model_id: str, model_name: str, resolved: Dict[str, Any]) -> Decimal:
@@ -937,8 +1113,15 @@ async def _open_clip_session(
     video_logger,
 ) -> Optional[str]:
     """Open the clip's session and record it on the row. None: the open
-    failed, and the row is failed with its hold voided."""
+    failed, and the row is failed with its hold voided.
+
+    The bids whose clips now wait in the vendor's queue are left out first
+    (the walk skips those on open cool-off itself)."""
     try:
+        candidates = await _drop_vendor_queue_busy(job.model_id, candidates)
+        if not candidates:
+            raise SessionRoutingError("No provider capacity available for model right now",
+                                      model_id=job.model_id)
         session_id, chosen = await session_routing_service.open_session_for_quote(
             model_id=job.model_id,
             model_name=job.model_name,
@@ -1015,7 +1198,8 @@ async def _submit_node_job(
                 failure_code=f"node_refused_{e.status_code}",
             )
             # The node kept nothing: the session is empty, close it now
-            await _close_job_session(job.id, session_id, "video_submit_failed")
+            _schedule_close(session_id, f"video-close-{job.id}",
+                            lambda: _bounded_close(job.id, session_id, "video_submit_failed"))
         else:
             # A timeout, an unexpected answer, or an error page from a proxy
             # in front of the node: the node may hold the clip, so its
@@ -1094,9 +1278,17 @@ async def submit_video(
     idempotency_key: Optional[str] = None,
 ) -> VideoJob:
     """
-    POST /videos after the route resolved the model: quote, price, row and
-    fixed hold. The session open and the node submit then run in a detached
-    task, so a client disconnect cannot stop them half way.
+    POST /videos after the route resolved the model: open gates, quote,
+    stake fuse and busy bids, price, soft cap again, row and fixed hold. The
+    session open and the node submit then run in a detached task, so a
+    client disconnect cannot stop them half way.
+
+    Every refusal before the row leaves nothing behind: no row, no hold.
+    The open gates run before the quote (allowlist, soft cap counting clips
+    accepted but not yet opened, MOR low-water mark, premium budget), the
+    stake fuse and the busy bids after it, and the soft cap once more right
+    before the row, so requests that arrive together count against each
+    other (still a soft cap: no lock). The detached open keeps its own gates.
 
     Returns:
         The pending row (public status queued). When a concurrent request
@@ -1104,7 +1296,9 @@ async def submit_video(
 
     Raises:
         VideoError: 400 invalid_request, 402 insufficient_balance,
-            500 billing_error, 502 proxy_error, 503 model_unavailable.
+            429 model_busy (soft cap, every bid busy; Retry-After),
+            500 billing_error, 502 proxy_error, 503 model_unavailable
+            (also allowlist, MOR low-water, premium budget, stake fuse).
             Once the row exists it is failed first.
     """
     video_id = new_video_id()
@@ -1112,15 +1306,29 @@ async def submit_video(
                                request_id=request_id)
     node_request = request.node_request()
 
-    candidates = await _quote_candidates(
-        model_id=model_id,
-        model_name=model_name,
-        node_request=node_request,
-        video_id=video_id,
-        video_logger=video_logger,
-    )
+    try:
+        await _ensure_open_gates_allow_submit(model_id)
+        candidates = await _quote_candidates(
+            model_id=model_id,
+            model_name=model_name,
+            node_request=node_request,
+            video_id=video_id,
+            video_logger=video_logger,
+        )
+        candidates = session_routing_service._quote_candidates_under_fuse(model_id, candidates)
+    except SessionRoutingError as e:
+        raise _gate_error(e) from e
+    candidates = await _drop_busy(model_id, candidates)
+    if not candidates:
+        video_logger.info("Every quoted bid is busy for the model",
+                          event_type="video_bids_busy")
+        raise _model_busy_error(f"Every provider of {model_name} is busy right now. Retry later.")
     resolved = candidates[0]["resolved"]
     price = await _clip_price(model_id, model_name, resolved)
+    try:
+        await _ensure_soft_cap_allows_submit(model_id)
+    except SessionRoutingError as e:
+        raise _gate_error(e) from e
 
     # The row comes first: from here on the sweeper owns anything left pending
     now = _utcnow()
@@ -1201,7 +1409,6 @@ async def refresh_job(
     video_id: str,
     *,
     client_read: bool = False,
-    close_session: bool = True,
 ) -> Optional[VideoJob]:
     """
     Read the node job and apply the transition (shared by GET and the sweeper).
@@ -1213,14 +1420,13 @@ async def refresh_job(
        in front of the node, changes nothing (the age limit still applies).
     3. Apply under the row lock: settle on success, void on a failure, the
        age limit or a lost job. The billing and the row commit together.
-    4. Once terminal, close the clip's session.
+    4. Once terminal, schedule the close of the clip's session in the
+       background (_ensure_session_closed), so neither a GET nor the
+       sweeper waits for the chain.
 
     client_read (GET): the node is read at most once per
-    REFRESH_MIN_INTERVAL_SECONDS per video in this process, a node 404 does
-    not count a miss (only the sweeper counts them, once per pass), and the
-    close runs in a background task so a GET does not wait for the chain.
-    close_session=False (the sweeper): no close here; the pass closes
-    terminal rows last, after every refresh.
+    REFRESH_MIN_INTERVAL_SECONDS per video in this process, and a node 404
+    does not count a miss (only the sweeper counts them, once per pass).
 
     Returns:
         The row after the refresh, or None when it does not exist.
@@ -1233,8 +1439,7 @@ async def refresh_job(
     if job is None:
         return await load_job(video_id)
     if job.is_terminal:
-        if close_session:
-            await _ensure_session_closed(job, background=client_read)
+        await _ensure_session_closed(job)
         return job
     if not job.node_job_id:
         return job
@@ -1291,8 +1496,8 @@ async def refresh_job(
                                 error_code=job.error_code,
                                 event_type="video_job_transition")
 
-    if job.is_terminal and close_session:
-        await _ensure_session_closed(job, background=client_read)
+    if job.is_terminal:
+        await _ensure_session_closed(job)
     return job
 
 
@@ -1338,50 +1543,53 @@ async def _release_stranded_hold(video_id: str) -> bool:
     return job.billing_state in (VideoBillingState.charged.value, VideoBillingState.voided.value)
 
 
-async def _sweep_close(row: Any) -> bool:
-    """One on-chain close retry of a sweeper pass, bounded by
-    SWEEP_CLOSE_TIMEOUT_SECONDS. A close cut by the timeout goes back to OPEN
-    and its row behind the other retries."""
-    try:
-        return await asyncio.wait_for(
-            _close_job_session(row.id, row.session_id, f"video_{row.status}"),
-            timeout=SWEEP_CLOSE_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("Video session close timed out; the sweeper retries it",
-                       video_id=row.id,
-                       session_id=row.session_id,
-                       timeout_seconds=SWEEP_CLOSE_TIMEOUT_SECONDS,
-                       event_type="video_session_close_timeout")
-        await _requeue_close(row.id)
-        raise
-
-
 async def _sweep_reclaim(session_id: str) -> bool:
     """Close again a video session left CLOSING by a closer that died,
-    bounded as _sweep_close. Its closer had decided the close, so this only
-    finishes it."""
-    return await asyncio.wait_for(
-        session_routing_service.close_session_now(session_id, reason="video_close_abandoned"),
-        timeout=SWEEP_CLOSE_TIMEOUT_SECONDS,
-    )
+    bounded as _bounded_close. Its closer had decided the close, so this only
+    finishes it. An error is logged, not raised."""
+    try:
+        closed = await asyncio.wait_for(
+            session_routing_service.close_session_now(session_id, reason="video_close_abandoned"),
+            timeout=SWEEP_CLOSE_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        logger.error("Error closing an abandoned video session",
+                     session_id=session_id,
+                     error_class=type(e).__name__,
+                     error=str(e),
+                     event_type="video_sweep_close_error")
+        return False
+    if closed:
+        logger.warning("Abandoned video session close finished",
+                       session_id=session_id,
+                       event_type="video_abandoned_close_finished")
+    return closed
 
 
 async def sweep() -> Dict[str, int]:
     """
     One sweeper pass (the caller holds the advisory lock), in this order:
-    1. refresh queued / in_progress rows (settle or void their holds);
+    1. refresh queued / in_progress rows, VIDEO_REFRESH_CONCURRENCY at a
+       time, oldest first (settle or void their holds); a row this ends gets
+       its session close scheduled right away;
     2. fail rows pending without progress for pending_timeout_seconds() as
        submit_interrupted (their sessions are left to the expiry close);
     3. finish the billing of terminal rows whose hold is still pending;
     4. stamp the sessions of unconfirmed submits that the expiry close ended;
-    5. last, retry the on-chain closes of terminal rows, and claim again the
-       video sessions left CLOSING by a closer that died (those of a submit
-       that lost its row have no video_jobs row to retry them): at most
-       SWEEP_CLOSE_BATCH_SIZE of each, together, each bounded by
-       SWEEP_CLOSE_TIMEOUT_SECONDS, so a slow chain delays none of the above.
+    5. schedule the on-chain close of every terminal row whose session is
+       still unclosed and closable, and claim again the video sessions left
+       CLOSING by a closer that died (those of a submit that lost its row
+       have no video_jobs row to retry them).
+
+    Closes run in background tasks, at most VIDEO_CLOSE_CONCURRENCY on chain
+    at once, each bounded by SWEEP_CLOSE_TIMEOUT_SECONDS from its start; a
+    session already closing in this process is not scheduled again. The
+    pass does not wait for them, so a slow chain delays neither the
+    refreshes nor the next pass. closes_started counts the closes this pass
+    scheduled; sessions_closed the sessions it found closed (step 4).
     """
-    summary = {"refreshed": 0, "interrupted": 0, "sessions_closed": 0, "holds_released": 0, "errors": 0}
+    summary = {"refreshed": 0, "interrupted": 0, "sessions_closed": 0, "closes_started": 0,
+               "holds_released": 0, "errors": 0}
     terminal = list(VIDEO_JOB_TERMINAL_STATUSES)
 
     async with get_db() as db:
@@ -1392,18 +1600,27 @@ async def sweep() -> Dict[str, int]:
             .where(VideoJob.status.in_([VideoJobStatus.queued.value, VideoJobStatus.in_progress.value]))
             .order_by(VideoJob.created_at.asc())
         )).scalars().all()
-    for video_id in active:
-        try:
-            # The pass closes the sessions of rows this ends in step 5
-            await refresh_job(video_id, close_session=False)
-            summary["refreshed"] += 1
-        except Exception as e:
-            summary["errors"] += 1
-            # The class only: a failed UPDATE's text can carry video_url
-            logger.error("Error refreshing video job",
-                         video_id=video_id,
-                         error_class=type(e).__name__,
-                         event_type="video_sweep_refresh_error")
+
+    refresh_slots = asyncio.Semaphore(max(1, int(settings.VIDEO_REFRESH_CONCURRENCY)))
+
+    async def refresh(video_id: str) -> None:
+        async with refresh_slots:
+            try:
+                job = await refresh_job(video_id)
+                summary["refreshed"] += 1
+                # refresh_job scheduled the close with no await since
+                if job is not None and job.is_terminal and job.session_id in _scheduled_closes:
+                    summary["closes_started"] += 1
+            except Exception as e:
+                summary["errors"] += 1
+                # The class only: a failed UPDATE's text can carry video_url
+                logger.error("Error refreshing video job",
+                             video_id=video_id,
+                             error_class=type(e).__name__,
+                             event_type="video_sweep_refresh_error")
+
+    # Semaphore waiters are woken in order: the oldest rows start first
+    await asyncio.gather(*(refresh(video_id) for video_id in active))
 
     async with get_db() as db:
         stuck = (await db.execute(
@@ -1481,7 +1698,7 @@ async def sweep() -> Dict[str, int]:
             select(*columns)
             .where(*unclosed, _session_closable_clause())
             .order_by(VideoJob.updated_at.asc())
-            .limit(SWEEP_CLOSE_BATCH_SIZE)
+            .limit(SWEEP_BATCH_SIZE)
         )).all()
 
     for row in waiting:
@@ -1496,46 +1713,21 @@ async def sweep() -> Dict[str, int]:
                          error=str(e),
                          event_type="video_sweep_close_error")
 
-    retried = {row.session_id for row in closable}
+    for row in closable:
+        if _schedule_job_close(row.id, row.session_id, row.status):
+            summary["closes_started"] += 1
+
     try:
-        abandoned_ids = await session_routing_service.list_abandoned_video_closes(SWEEP_CLOSE_BATCH_SIZE)
+        abandoned = await session_routing_service.list_abandoned_video_closes(SWEEP_BATCH_SIZE)
     except Exception as e:
         # A failed read must not cost this pass its close retries.
         logger.error("Error listing abandoned video session closes",
                      error_class=type(e).__name__,
                      event_type="video_sweep_close_error")
-        abandoned_ids = []
-    abandoned = [session_id for session_id in abandoned_ids if session_id not in retried]
-
-    results = await asyncio.gather(
-        *(_sweep_close(row) for row in closable),
-        *(_sweep_reclaim(session_id) for session_id in abandoned),
-        return_exceptions=True,
-    )
-    for row, result in zip(closable, results):
-        if result is True:
-            summary["sessions_closed"] += 1
-        elif isinstance(result, BaseException):
-            summary["errors"] += 1
-            if not isinstance(result, asyncio.TimeoutError):
-                logger.error("Error closing video session",
-                             video_id=row.id,
-                             session_id=row.session_id,
-                             error_class=type(result).__name__,
-                             error=str(result),
-                             event_type="video_sweep_close_error")
-    for session_id, result in zip(abandoned, results[len(closable):]):
-        if result is True:
-            summary["sessions_closed"] += 1
-            logger.warning("Abandoned video session close finished",
-                           session_id=session_id,
-                           event_type="video_abandoned_close_finished")
-        elif isinstance(result, BaseException):
-            summary["errors"] += 1
-            logger.error("Error closing an abandoned video session",
-                         session_id=session_id,
-                         error_class=type(result).__name__,
-                         error=str(result),
-                         event_type="video_sweep_close_error")
+        abandoned = []
+    for session_id in abandoned:
+        if _schedule_close(session_id, f"video-reclaim-{session_id}",
+                           lambda session_id=session_id: _sweep_reclaim(session_id)):
+            summary["closes_started"] += 1
 
     return summary

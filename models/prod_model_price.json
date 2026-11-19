@@ -206,8 +206,11 @@
     "multilingual-e5-large": { "input": "0.10", "output": "0.50" },
     "nemotron-embed-vl-1b-v2": { "input": "0.10", "output": "0.50" }
   },
+  "default_clip_price": { "per_second": { "480p": "0.112", "720p": "0.252", "1080p": "0.296" }, "audio_per_second": "0" },
   "clip_prices": {
     "seedance-2.0": { "per_second": { "480p": "0.05", "720p": "0.10", "1080p": "0.25" }, "audio_per_second": "0.02" },
-    "seedance-2.5": { "per_second": { "480p": "0.05", "720p": "0.10", "1080p": "0.25" }, "audio_per_second": "0.02" }
+    "seedance-2.5": { "per_second": { "480p": "0.05", "720p": "0.10", "1080p": "0.25" }, "audio_per_second": "0.02" },
+    "seedance-2.0:alpha": { "per_second": { "480p": "0.056", "720p": "0.12", "1080p": "0.296" }, "audio_per_second": "0" },
+    "seedance-2.5:alpha": { "per_second": { "480p": "0.112", "720p": "0.252" }, "audio_per_second": "0" }
   }
 }

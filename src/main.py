@@ -367,8 +367,8 @@ async def video_job_sweep_loop():
     Every VIDEO_JOB_POLL_INTERVAL_SECONDS, on the replica that wins the
     advisory lock: refresh queued / in_progress jobs from the node (settle
     or void their holds), fail jobs that never reached the node, release
-    holds stranded on finished jobs, and last retry session closes that did
-    not go through.
+    holds stranded on finished jobs, and start the session closes of
+    finished jobs in the background (the pass does not wait for them).
     """
     from src.db.database import advisory_xact_lock
     from src.services.video import jobs as video_jobs
@@ -396,7 +396,7 @@ async def video_job_sweep_loop():
                     continue
                 summary = await video_jobs.sweep()
 
-            if (summary["interrupted"] or summary["sessions_closed"]
+            if (summary["interrupted"] or summary["sessions_closed"] or summary["closes_started"]
                     or summary["holds_released"] or summary["errors"]):
                 sweep_logger.info(
                     "Video job sweep completed",
