@@ -83,6 +83,7 @@ class HardcodedPricingProvider(PricingProvider):
     def __init__(self):
         self._pricing_cache: Dict[str, ModelPricing] = {}
         self._clip_pricing_cache: Dict[str, ClipPricing] = {}
+        self._default_clip_pricing: Optional[ClipPricing] = None
         self._default_input_price: Decimal = Decimal("2.00")
         self._default_output_price: Decimal = Decimal("8.00")
         self._initialize_pricing()
@@ -132,6 +133,20 @@ class HardcodedPricingProvider(PricingProvider):
                     event_type="clip_price_config_invalid",
                 )
 
+        # A video model with no clip_prices entry of its own falls back to this,
+        # so a newly listed vendor name sells at the default rate instead of a
+        # 503. A missing or malformed default leaves those models failing closed.
+        default_clip = config.get("default_clip_price")
+        if default_clip is not None:
+            try:
+                self._default_clip_pricing = _parse_clip_pricing("default", default_clip)
+            except (TypeError, ValueError, InvalidOperation) as e:
+                logger.error(
+                    "Skipping malformed default clip price",
+                    error=str(e),
+                    event_type="clip_price_config_invalid",
+                )
+
     @property
     def source_name(self) -> str:
         return "json_config"
@@ -171,11 +186,14 @@ class HardcodedPricingProvider(PricingProvider):
         Get per-clip pricing by exact key: the 0x model id first, then the
         lowercased model name. No slug, suffix trim or fuzzy match, so a
         "-pro" variant never picks up the base model's price.
+
+        An unmatched model takes default_clip_price when the config sets one,
+        and stays unpriced (None) otherwise.
         """
         for key in (_clip_price_key(model_id), _clip_price_key(model_name)):
             if key and key in self._clip_pricing_cache:
                 return self._clip_pricing_cache[key]
-        return None
+        return self._default_clip_pricing
 
     async def get_all_model_pricing(
         self,

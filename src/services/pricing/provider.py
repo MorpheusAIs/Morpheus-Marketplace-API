@@ -101,8 +101,9 @@ class PricingProvider(ABC):
         Get per-clip (video) pricing for a model.
 
         Exact key match only: a wrong video price costs real money, so there is
-        no fuzzy match and no default. The base implementation prices nothing,
-        so providers that do not override it fail closed.
+        no fuzzy match. A provider may fall back to a configured default clip
+        price; the base implementation prices nothing, so providers that do not
+        override it fail closed.
 
         Args:
             model_name: Human-readable model name

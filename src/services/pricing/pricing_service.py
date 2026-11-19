@@ -262,7 +262,8 @@ class PricingService:
         Get per-clip (video) pricing for a model.
 
         Exact key match on the 0x model id or the lowercased model name, with
-        no fuzzy match and no default: None means the model is not priced for
+        no fuzzy match; an unmatched model takes the provider's default clip
+        price when one is configured. None means the model is not priced for
         video and must not be sold.
 
         Args:
