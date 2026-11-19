@@ -4,8 +4,10 @@ Both fail closed: a None price makes POST /videos answer 503 instead of
 selling an unpriced clip.
 """
 
+import json
 import os
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault(
@@ -95,3 +97,51 @@ async def test_clip_pricing_lookup_is_exact(provider, model_name, model_id, expe
         assert pricing is None
     else:
         assert pricing.model_key == expected_key
+
+
+def _prod_json(name: str) -> dict:
+    path = Path(__file__).resolve().parents[2] / "models" / name
+    return json.loads(path.read_text())
+
+
+def test_prod_alpha_clip_prices_are_vendor_list_minus_20_percent():
+    """Mainnet alpha names are priced from the 2026-11-19 vendor list, minus 20%.
+
+    seedance-2.0:alpha is BytePlus dreamina-seedance-2-0-260128
+    ($0.07 / $0.15 / $0.37 per second). seedance-2.5:alpha is Renderful
+    seedance-2.5-t2v ($0.140 / $0.315; no 1080p). Audio is included in
+    those rates, so the surcharge is zero and a sound clip still sells.
+    """
+    clip = _prod_json("prod_model_price.json")["clip_prices"]
+    assert clip["seedance-2.0:alpha"] == {
+        "per_second": {"480p": "0.056", "720p": "0.12", "1080p": "0.296"},
+        "audio_per_second": "0",
+    }
+    assert clip["seedance-2.5:alpha"] == {
+        "per_second": {"480p": "0.112", "720p": "0.252"},
+        "audio_per_second": "0",
+    }
+    video = next(g for g in _prod_json("prod_rate_limit.json")["model_groups"] if g["name"] == "video")
+    assert "seedance-2.0:alpha" in video["models"]
+    assert "seedance-2.5:alpha" in video["models"]
+
+
+@pytest.mark.parametrize(
+    "model_name, resolution, audio, expected",
+    [
+        ("seedance-2.0:alpha", "720p", False, Decimal("0.60000000")),
+        ("seedance-2.0:alpha", "720p", True, Decimal("0.60000000")),
+        ("seedance-2.0:alpha", "1080p", False, Decimal("1.48000000")),
+        ("seedance-2.5:alpha", "480p", False, Decimal("0.56000000")),
+        ("seedance-2.5:alpha", "1080p", False, None),
+    ],
+)
+async def test_prod_alpha_clip_price_for_five_seconds(model_name, resolution, audio, expected):
+    config = _prod_json("prod_model_price.json")
+    with patch("src.services.pricing.hardcoded_provider.load_model_prices", return_value=config):
+        pricing = await HardcodedPricingProvider().get_clip_pricing(model_name=model_name)
+    if expected is None:
+        assert pricing is None or pricing.price_for(5, resolution, audio) is None
+    else:
+        assert pricing is not None
+        assert pricing.price_for(5, resolution, audio) == expected
