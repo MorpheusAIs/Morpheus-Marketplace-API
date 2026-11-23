@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Ask a question or share an idea
+    url: https://github.com/orgs/MorpheusAIs/discussions
+    about: Use a matching Discussions category. Ideas go in Ideas.
   - name: API docs
     url: https://apidocs.mor.org
     about: How to call the hosted API. Questions are not tracked as issues
