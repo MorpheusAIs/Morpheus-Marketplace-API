@@ -2,6 +2,8 @@
 
 A robust API Gateway connecting Web2 clients to the Morpheus-Lumerin AI Marketplace using FastAPI, PostgreSQL, and secure key management practices.
 
+**Community:** questions and ideas go in [Morpheus Discussions](https://github.com/orgs/MorpheusAIs/discussions).
+
 ## Overview
 
 This project migrates the existing Morpheus API Gateway functionality from Node.js/Express to Python/FastAPI, incorporating robust authentication, persistent storage, secure key management, and best practices for API development and deployment using Docker.
